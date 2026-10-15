@@ -1,0 +1,25 @@
+{
+  "name": "fungi-counter",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./host": "./host.mjs"
+  },
+  "fungi": {
+    "id": "counter",
+    "capabilities": [
+      "run_tools"
+    ],
+    "terminals": [
+      {
+        "id": "counter",
+        "name": "Counter",
+        "description": "A counter the Agent can change",
+        "command": [
+          "./bin/counter.mjs"
+        ]
+      }
+    ]
+  }
+}

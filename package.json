@@ -1,0 +1,149 @@
+{
+  "name": "@fungi.computer/local",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Private local Agent host primitives for Fungi (see wiki/0-system/current-direction.md)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "fungi-local-auth": "./dist/auth-cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./acp-stdio": {
+      "types": "./dist/private-local-acp-stdio.d.ts",
+      "import": "./dist/private-local-acp-stdio.js"
+    },
+    "./auth": {
+      "types": "./dist/auth-cli.d.ts",
+      "import": "./dist/auth-cli.js"
+    },
+    "./service": {
+      "types": "./dist/private-local-service.d.ts",
+      "import": "./dist/private-local-service.js"
+    },
+    "./service-process": {
+      "types": "./dist/private-local-service-listener.d.ts",
+      "import": "./dist/private-local-service-listener.js"
+    },
+    "./computer-backend": {
+      "types": "./dist/private-local-computer-backend.d.ts",
+      "import": "./dist/private-local-computer-backend.js"
+    },
+    "./login": {
+      "types": "./dist/local-login.d.ts",
+      "import": "./dist/local-login.js"
+    },
+    "./skills": {
+      "types": "./dist/local-skill-source.d.ts",
+      "import": "./dist/local-skill-source.js"
+    },
+    "./apps": {
+      "types": "./dist/team-apps.d.ts",
+      "import": "./dist/team-apps.js"
+    },
+    "./extensions": {
+      "types": "./dist/local-extensions.d.ts",
+      "import": "./dist/local-extensions.js"
+    }
+  },
+  "files": [
+    "dist",
+    "computerd-loopback.cjs",
+    "native/bin",
+    "native/apply-patch/LICENSE.codex"
+  ],
+  "scripts": {
+    "lint": "../../node_modules/.bin/eslint src scripts test --max-warnings=0 && ../../node_modules/.bin/oxlint --config ../../oxlint.config.ts --deny-warnings src scripts test",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "build": "pnpm run clean && tsc -p tsconfig.build.json && esbuild src/internal/private-workerd-sandbox-worker.mjs --outfile=dist/internal/private-workerd-sandbox-worker.mjs --bundle --format=esm --platform=neutral --conditions=workerd,browser --target=es2024 --external:cloudflare:workers --metafile=dist/internal/sandbox-metafile.json --log-level=warning",
+    "clean": "node --input-type=module --eval \"import { rm } from 'node:fs/promises'; await rm('dist', { recursive: true, force: true });\"",
+    "test": "pnpm run test:node && pnpm run test:patch",
+    "test:full": "pnpm run test && pnpm run test:bun",
+    "test:node": "../../node_modules/.bin/vitest run",
+    "test:bun": "bun test ./test/private-local-service-discovery.bun.test.ts ./test/private-local-service-listener.bun.test.ts ./test/private-local-service-manager.bun.test.ts ./test/private-local-auth-rpc.bun.test.ts ./test/private-workerd-deadline.bun.test.ts ./test/private-workerd-forage.bun.test.ts ./test/local-extensions.bun.test.ts",
+    "build:native": "node scripts/build-apply-patch.mjs",
+    "test:patch": "node --test --test-timeout=30000 test/apply-patch.native.mjs",
+    "format:check": "node ../../tooling/repository/scripts/format-package-check.mjs",
+    "lint:anti-slop": "node ../../tooling/repository/scripts/lint-package-anti-slop.mjs",
+    "test:unit": "node ../../tooling/repository/scripts/test-file-pool.mjs pnpm run test:node",
+    "test:merge": "pnpm run test:patch",
+    "proof:goal-loop-sol": "bun scripts/goal-loop-model-proof.mjs"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "1.7.0",
+    "@earendil-works/pi-ai": "0.99.2",
+    "@effect/platform-node": "4.0.2",
+    "@fungi.computer/graft": "workspace:*",
+    "@fungi.computer/agar": "workspace:*",
+    "@fungi.computer/bird-dog": "workspace:*",
+    "@fungi.computer/cairn": "workspace:*",
+    "@fungi.computer/cordyceps": "workspace:*",
+    "@fungi.computer/knapsack": "workspace:*",
+    "@fungi.computer/mycelium": "workspace:*",
+    "@fungi.computer/shiitake": "workspace:*",
+    "@fungi.computer/shiitake-extensions": "workspace:*",
+    "@fungi.computer/veil": "workspace:*",
+    "@fungi.computer/whistle": "workspace:*",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@fungi.computer/capnweb": "workspace:*",
+    "diff": "8.0.4",
+    "effect": "4.0.2",
+    "eventsource": "5.1.1",
+    "hono": "4.13.5",
+    "miniflare": "5.20260828.0-alpha",
+    "proper-lockfile": "4.1.2",
+    "re2js": "1.3.3",
+    "write-file-atomic": "8.0.0",
+    "yaml": "2.9.0",
+    "zod": "4.4.3",
+    "@fungi.computer/lantern": "workspace:*",
+    "jose": "6.2.11",
+    "@fungi.computer/oyster": "workspace:*",
+    "@fungi.computer/seam": "workspace:*",
+    "@fungi.computer/gills": "workspace:*"
+  },
+  "devDependencies": {
+    "@cloudflare/codemode": "0.5.1",
+    "@modelcontextprotocol/server": "2.0.0",
+    "@types/node": "24.13.3",
+    "bun-types": "1.4.1",
+    "@types/proper-lockfile": "4.1.4",
+    "@types/write-file-atomic": "4.0.3",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3",
+    "vitest": "4.1.11",
+    "bun": "1.4.2",
+    "@fungi.computer/mule": "workspace:*"
+  },
+  "botanical": {
+    "role": "runtime",
+    "operations": {
+      "lint": "required",
+      "typecheck": "required",
+      "build": "required",
+      "test": "required",
+      "docs": {
+        "status": "not-applicable",
+        "reason": "Local remains a private runtime and owns no generated API documentation surface"
+      },
+      "pack": {
+        "status": "not-applicable",
+        "reason": "Local remains private and is not independently packed"
+      },
+      "smoke": {
+        "status": "not-applicable",
+        "reason": "Focused synthetic persistence and Pi integration tests are the current runtime proof"
+      },
+      "stranger": {
+        "status": "not-applicable",
+        "reason": "Local remains private and owns no external consumer fixture"
+      }
+    }
+  },
+  "license": "MIT"
+}
