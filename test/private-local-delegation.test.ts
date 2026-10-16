@@ -461,10 +461,21 @@ it("lists the Agents one Local conversation created and sent work to, and no oth
     });
     const listed = await until(
       () => slot("main"),
-      (value) =>
-        JSON.stringify(value).includes('"sessionId":null') &&
-        JSON.stringify(value).includes('"state":"idle"') &&
-        !JSON.stringify(value).includes('"state":"working"'),
+      (value) => {
+        const decoded = Schema.decodeUnknownOption(SubagentsProjection)(value);
+        if (decoded._tag === "None") return false;
+        const { agents } = decoded.value;
+        // Both host rows are recorded: the created Agent and the one sent to.
+        return (
+          agents.length === 2 &&
+          agents.some((agent) => agent.sessionId === null) &&
+          agents.some(
+            (agent) =>
+              agent.agentId === ids.child && agent.sessionId === "main",
+          ) &&
+          agents.every((agent) => agent.state === "idle")
+        );
+      },
       "the parent's sub-agent rows",
     );
     const rows = Schema.decodeUnknownSync(SubagentsProjection)(listed);

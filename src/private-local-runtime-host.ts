@@ -23,6 +23,7 @@ import {
   type Models,
   type ThinkingLevel,
 } from "@earendil-works/pi-ai";
+import type { CapabilitySource } from "@fungi.computer/mycelium";
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
 import type {
   Accepted,
@@ -989,8 +990,11 @@ export async function createPrivateLocalTools(
   sessionPath?: (sessionId: string) => string | undefined,
   /** This Agent's store; its owner-enabled installed extensions join the roster. */
   storeDirectory?: string,
-  /** This Agent's sub-agent facts; present when it can direct other Agents. */
-  subagents?: SubagentSource,
+  /**
+   * This Agent's sub-agent record: its Session-bound Agent-control tools and
+   * the view's facts. Present when it can direct other Agents.
+   */
+  subagents?: Readonly<{ control: CapabilitySource; source: SubagentSource }>,
 ): Promise<PrivateLocalTools> {
   const root = await realpath(resolve(invocationRoot));
   const port = await createPrivateInvocationFilesPort(root);
@@ -1033,7 +1037,7 @@ export async function createPrivateLocalTools(
       }),
       ...(subagents === undefined
         ? []
-        : [subagentsExtension({ source: subagents })]),
+        : [subagentsExtension({ source: subagents.source })]),
       ...installed.roster,
     ],
     grants: [
@@ -1052,7 +1056,7 @@ export async function createPrivateLocalTools(
       sources: Object.freeze([
         ...(agentControl === undefined
           ? []
-          : [createAgentControlSource(agentControl)]),
+          : [subagents?.control ?? createAgentControlSource(agentControl)]),
         ...computerSources,
         ...(fungiMcp === undefined
           ? []
@@ -1287,39 +1291,25 @@ export async function openPrivateLocalRuntimeHost(
             },
           });
     let agentControl: AgentControlDirectory | undefined;
-    let subagents: ReturnType<typeof createPrivateLocalSubagents> | undefined;
     if (input.agentControl !== undefined) {
-      subagents = createPrivateLocalSubagents({
-        database,
-        directory: input.agentControl,
-        recipients: delegation?.recipients,
-      });
-      const recordCreation = subagents.recordCreation;
       agentControl = {
         ...input.agentControl,
         models: (signal) => listOfferedLocalModels(models, signal),
       };
-      const create = input.agentControl.create;
-      if (create !== undefined)
-        agentControl = {
-          ...agentControl,
-          create: async (request, signal, invoker) => {
-            const created = await create(request, signal, invoker);
-            if (invoker !== undefined)
-              recordCreation(invoker.sessionId, created.agentId);
-            return created;
-          },
-        };
       if (delegation !== undefined)
         agentControl = { ...agentControl, send: delegation.send };
     }
+    const subagents =
+      agentControl === undefined
+        ? undefined
+        : createPrivateLocalSubagents({ database, directory: agentControl });
     const localTools = await createPrivateLocalTools(
       root,
       input.fungiMcp,
       agentControl,
       (sessionId) => sessionPaths.get(sessionId),
       dirname(paths.databasePath),
-      subagents?.source,
+      subagents,
     );
     processes = localTools.processes;
     const sessionProcesses = processes;

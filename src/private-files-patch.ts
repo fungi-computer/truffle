@@ -11,7 +11,7 @@ import { runPrivateInvocationProcess } from "./private-invocation-computer.js";
 
 function patchExecutable(): string {
   if (process.env.FUNGI_BUNDLED_CLI) {
-    const name = `@fungi.computer/cli-native-${process.platform}-${process.arch}`;
+    const name = `@fungi.computer/spore-native-${process.platform}-${process.arch}`;
     try {
       return createRequire(process.env.FUNGI_BUNDLED_CLI).resolve(
         `${name}/bin/fungi-apply-patch`,

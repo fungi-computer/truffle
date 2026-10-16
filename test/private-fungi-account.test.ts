@@ -14,6 +14,7 @@ import {
 import { expect, it } from "vitest";
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
 import {
+  signInFungiAccount,
   freshFungiAccess,
   fungiMcpAccountAuth,
   signOutFungiAccount,
@@ -538,3 +539,64 @@ for (const result of [
     }
   });
 }
+
+it("offline sign-in fails before showing a browser URL or changing credentials", async () => {
+  const root = await mkdtemp(join(tmpdir(), "fungi-offline-signin-"));
+  const credentialPath = join(root, "credentials.json");
+  let opened = false;
+  try {
+    await expect(
+      signInFungiAccount("https://fungi.computer", {
+        credentialPath,
+        fetch: () => Promise.reject(new TypeError("fetch failed")),
+        openBrowser: () => {
+          opened = true;
+          throw new Error("unusable browser URL");
+        },
+      }),
+    ).rejects.toThrow("Can't reach fungi.computer");
+    expect(opened).toBe(false);
+    expect(await readFungiAccountStatus({ credentialPath })).toBeUndefined();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("an unavailable Hub does not replace a saved account or open the browser", async () => {
+  const root = await mkdtemp(join(tmpdir(), "fungi-unavailable-signin-"));
+  const credentialPath = join(root, "credentials.json");
+  const store = createPrivateCredentialStore(credentialPath);
+  await store.modify("fungi", () =>
+    Promise.resolve({
+      type: "oauth",
+      access: "fixture-access",
+      refresh: "fixture-refresh",
+      expires: Date.now() + 60_000,
+      issuer: "https://saved.test",
+      clientId: "fixture-client",
+    }),
+  );
+  const saved = await store.read("fungi");
+  try {
+    await expect(
+      signInFungiAccount("https://fungi.computer", {
+        credentialPath,
+        fetch: (_url, init) => {
+          expect(init?.method).toBe("HEAD");
+          expect(init?.signal).toBeInstanceOf(AbortSignal);
+          expect(init?.redirect).toBe("manual");
+          return Promise.resolve(new Response(null, { status: 503 }));
+        },
+        openBrowser: () => {
+          throw new Error("must not open the browser");
+        },
+        confirmReplace: () => {
+          throw new Error("must not replace the saved account");
+        },
+      }),
+    ).rejects.toThrow("Can't reach fungi.computer");
+    expect(await store.read("fungi")).toEqual(saved);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

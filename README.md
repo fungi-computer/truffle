@@ -14,8 +14,8 @@ Local runs its own host build of the native `apply_patch` engine, which
 owns; Cordyceps' build prerequisites apply. Run from the repository root:
 
 ```sh
-pnpm turbo:run run build --filter=@fungi.computer/local
-pnpm --filter @fungi.computer/local test
+pnpm turbo:run run build --filter=@fungi.computer/truffle
+pnpm --filter @fungi.computer/truffle test
 ```
 
 The build places the engine in `native/bin` through Cordyceps'
@@ -159,8 +159,8 @@ never executed by this source.
 
 ## Installed extensions
 
-`@fungi.computer/local/extensions` is the one owner of installed extensions. It
-keeps package bytes and the install record in `~/.fungi/extensions`, and the
+`@fungi.computer/truffle/extensions` is the one owner of installed extensions.
+It keeps package bytes and the install record in `~/.fungi/extensions`, and the
 activations its own operations write in `~/.fungi/extensions/activations.json`.
 Files in a project or an Agent store never enable anything, so a copied folder
 starts disabled.
@@ -243,7 +243,7 @@ OS user. Offline conflicts keep the Computer's version. The absolute folder path
 and private key stay local.
 
 [The ACP stdio adapter](src/private-local-acp-stdio.ts) exports
-`runPrivateLocalAcpStdio` through `@fungi.computer/local/acp-stdio`. It serves
+`runPrivateLocalAcpStdio` through `@fungi.computer/truffle/acp-stdio`. It serves
 stable ACP v1 over the maintained NDJSON stream and the persistent service's
 Sessions. The CLI launches this adapter with `fungi acp`; editor configuration
 uses executable `fungi` and arguments `["acp"]`. It supports text and image
@@ -258,9 +258,9 @@ lease retains durable Session data.
 From the repository root:
 
 ```sh
-pnpm --filter @fungi.computer/local typecheck
-pnpm --filter @fungi.computer/local lint
-pnpm --filter @fungi.computer/local test:full
+pnpm --filter @fungi.computer/truffle typecheck
+pnpm --filter @fungi.computer/truffle lint
+pnpm --filter @fungi.computer/truffle test:full
 ```
 
 [Runtime-host tests](test/private-local-runtime-host.test.ts) exercise native
@@ -280,13 +280,14 @@ or a hosted Team deployment.
 
 ## Selected-Team App reads
 
-`openLocalTeamApps` from `@fungi.computer/local/apps` opens the saved account's
-selected Team. Its `read`, `requestGill`, `surfaceUrl` and `openSession`
-operations keep credentials inside Local and recheck account selection around
-reads. Gill requests resolve current directory selectors and declared actions
-through the ordinary admitted App door. Hosted Session transport uses the Local
-OAuth door and the same Team/resource capability rule as browser Sessions.
-Closing a Session client releases observation; it does not cancel durable work.
+`openLocalTeamApps` from `@fungi.computer/truffle/apps` opens the saved
+account's selected Team. Its `read`, `requestGill`, `surfaceUrl` and
+`openSession` operations keep credentials inside Local and recheck account
+selection around reads. Gill requests resolve current directory selectors and
+declared actions through the ordinary admitted App door. Hosted Session
+transport uses the Local OAuth door and the same Team/resource capability rule
+as browser Sessions. Closing a Session client releases observation; it does not
+cancel durable work.
 
 The directory grammar lives in `@fungi.computer/oyster/shell/app-directory`. UI
 handoff resolves the selected App's published surface on the saved Hub origin,

@@ -49,7 +49,7 @@ async function fixture(t) {
   const port = await createPrivateInvocationFilesPort(root);
   assert.ok(
     port.patch,
-    "Run pnpm --filter @fungi.computer/local build:native first",
+    "Run pnpm --filter @fungi.computer/truffle build:native first",
   );
   const surface = Knapsack.files({ port });
   assert.equal(surface.tools[0]?.descriptor.name, "apply_patch");

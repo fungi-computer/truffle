@@ -335,3 +335,24 @@ it("an expired token refreshes and writes exactly once, then the rotated token i
   expect(requests).toEqual(["/api/v1/teams", "/api/v1/teams"]);
   expect(await credentialFingerprint()).toEqual(afterRefresh);
 });
+
+for (const action of ["status", "teams", "balance"] satisfies readonly (
+  "status" | "teams" | "balance"
+)[]) {
+  it(`${action} reports a fresh account as signed out without network access`, async () => {
+    const fetch = () => Promise.reject(new Error("must not reach the Hub"));
+    await runFungiAccountCommand(
+      { action },
+      { json: false, stdout, credentialPath, fetch },
+    );
+    expect(output.join("")).toBe(
+      "Not signed in to Fungi. Run fungi login --provider fungi.\n",
+    );
+    output = [];
+    await runFungiAccountCommand(
+      { action },
+      { json: true, stdout, credentialPath, fetch },
+    );
+    expect(replies()).toEqual([{ schemaVersion: 1, signedIn: false }]);
+  });
+}

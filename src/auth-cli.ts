@@ -183,6 +183,7 @@ async function chooseProvider(
   input: NodeJS.ReadableStream,
   output: NodeJS.WritableStream,
   supplied?: AuthInteraction,
+  message = "Choose a provider",
 ): Promise<Provider> {
   if (requested !== undefined) {
     const provider = providers.find((candidate) => candidate.id === requested);
@@ -192,7 +193,7 @@ async function chooseProvider(
   }
   const id = await interactionFor(signal, input, output, supplied).prompt({
     type: "select",
-    message: "Choose a provider",
+    message,
     options: providers.map((provider) => ({
       id: provider.id,
       label: providerLabel(provider),
@@ -270,13 +271,19 @@ async function login(
     writeMessage(output, supplied, message);
     throw new Error(message);
   }
+  const signInLabel =
+    authType === "oauth" && provider.id === "openai"
+      ? "ChatGPT for Shiitake"
+      : authType === "oauth" && provider.id === "anthropic"
+        ? "Claude for Shiitake"
+        : provider.name;
   const interaction = interactionFor(
     signal,
     input,
     output,
     supplied,
     command.method,
-    provider.name,
+    signInLabel,
   );
   // Sign in with ChatGPT needs a stable installation UUID in its authorize
   // URL (`ext_agent_host_id`); pass it at this one call site, the way Pi's
@@ -293,7 +300,46 @@ async function login(
   } else {
     await models.login(provider.id, authType, interaction);
   }
-  writeMessage(output, supplied, `${providerLabel(provider)} login complete.`);
+  writeMessage(output, supplied, `${signInLabel} login complete.`);
+}
+
+const credentialLabel = { oauth: "subscription", api_key: "API key" } as const;
+
+/**
+ * Signed-in providers first, then one summary line; the full catalog only
+ * when one provider is asked for by name.
+ */
+function statusLines(
+  statuses: readonly LocalAuthStatus[],
+  explicit: boolean,
+): readonly string[] {
+  const label = (status: LocalAuthStatus) =>
+    status.providerName === status.providerId
+      ? status.providerName
+      : `${status.providerName} (${status.providerId})`;
+  const signedIn = statuses.flatMap((status) =>
+    status.state === "configured"
+      ? [`${label(status)}: signed in (${credentialLabel[status.type]})`]
+      : [],
+  );
+  if (explicit)
+    return [
+      ...signedIn,
+      ...statuses.flatMap((status) =>
+        status.state === "unconfigured"
+          ? [`${label(status)}: not signed in`]
+          : [],
+      ),
+    ];
+  const others = statuses.length - signedIn.length;
+  return signedIn.length === 0
+    ? [
+        `Model providers: none signed in (${String(others)} available). Run fungi login.`,
+      ]
+    : [
+        ...signedIn,
+        `${String(others)} other providers not signed in. Run fungi login to add one.`,
+      ];
 }
 
 async function status(
@@ -313,7 +359,7 @@ async function status(
   const statuses: LocalAuthStatus[] = [];
   for (const provider of selected) {
     const checked = await models.checkAuth(provider.id, { signal });
-    const providerStatus: LocalAuthStatus =
+    statuses.push(
       checked === undefined
         ? {
             providerId: provider.id,
@@ -325,20 +371,29 @@ async function status(
             providerName: provider.name,
             state: "configured",
             type: checked.type,
-          };
-    statuses.push(providerStatus);
-    writeMessage(
-      output,
-      interaction,
-      `${providerLabel(provider)}: ${providerStatus.state === "unconfigured" ? "unconfigured" : `configured (${providerStatus.type})`}`,
+          },
     );
   }
+  for (const line of statusLines(statuses, providerId !== undefined))
+    writeMessage(output, interaction, line);
   return {
     kind: "status",
     providers: Object.freeze(
       statuses.map((providerStatus) => Object.freeze(providerStatus)),
     ),
   };
+}
+
+async function signedInProviders(
+  models: LocalAuthModels,
+  providers: readonly Provider[],
+  signal: AbortSignal,
+): Promise<readonly Provider[]> {
+  const signedIn: Provider[] = [];
+  for (const provider of providers)
+    if ((await models.checkAuth(provider.id, { signal })) !== undefined)
+      signedIn.push(provider);
+  return signedIn;
 }
 
 async function runCommand(
@@ -364,13 +419,27 @@ async function runCommand(
     );
     return { kind: "completed" };
   }
+  const providers = models.getProviders();
+  const candidates =
+    command.provider === undefined
+      ? await signedInProviders(models, providers, signal)
+      : providers;
+  if (candidates.length === 0) {
+    writeMessage(
+      output,
+      interaction,
+      "You're not signed in to any model provider. Nothing to log out of.",
+    );
+    return { kind: "completed" };
+  }
   const provider = await chooseProvider(
-    models.getProviders(),
+    candidates,
     command.provider,
     signal,
     input,
     output,
     interaction,
+    "Log out of which provider?",
   );
   await models.logout(provider.id, { signal });
   writeMessage(

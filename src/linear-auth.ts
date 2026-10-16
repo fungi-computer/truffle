@@ -30,7 +30,7 @@ export function linearAuthInteraction(
     async prompt(prompt) {
       if (!interactive)
         throw new Error(
-          "Login needs a terminal. Run fungi login or fungi-local-auth login interactively; no credentials were changed.",
+          "This choice needs an interactive terminal; pass --provider <id> instead. No credentials were changed.",
         );
       const options: PasswordOptions = {
         message: prompt.message,
@@ -68,16 +68,16 @@ export function linearAuthInteraction(
             event.providerLabel === undefined
               ? "Sign in"
               : `Sign in to ${event.providerLabel}`;
-          // Each of these is its own single-line clack message, so none of
-          // them is a continuation line that could pick up a "│ " gutter —
-          // including the hyperlink line, whose OSC 8 escape carries the
-          // whole URL even though only the short label is visible.
+          // The hyperlink line carries the whole URL in its OSC 8 escape; the
+          // URL itself follows as one framed, unbroken line for copying.
           cli.info(heading);
           cli.info(cli.link("Open sign-in page", event.url));
-          // The URL itself must stay one whole, copyable line: print it
-          // outside clack's log box entirely.
-          cli.raw(event.url);
-          cli.info(event.instructions ?? defaultAuthUrlInstructions);
+          cli.url(event.url);
+          cli.info(
+            event.instructions === undefined
+              ? defaultAuthUrlInstructions
+              : `Waiting for the browser… ${event.instructions}`,
+          );
           break;
         }
         case "device_code":

@@ -178,9 +178,14 @@ function loginCommand(endpoint: URL | string): string {
 }
 
 function openBrowser(url: URL): void {
+  process.stderr.write(`Open this URL to sign in to Fungi:\n${url.href}\n`);
+  launchPlatformBrowser(url);
+}
+
+/** Hand a Fungi sign-in page to the platform browser; callers show the URL. */
+export function launchPlatformBrowser(url: URL): void {
   if (process.platform !== "darwin" && process.platform !== "linux")
     throw new Error("Fungi OAuth login supports macOS and Linux");
-  process.stderr.write(`Open this URL to connect Fungi Local:\n${url.href}\n`);
   const child = spawn(
     process.platform === "darwin" ? "open" : "xdg-open",
     [url.href],
@@ -838,6 +843,26 @@ export async function signInFungiAccount(
 ): Promise<void> {
   options.signal?.throwIfAborted();
   const endpoint = validateEndpoint(rawEndpoint);
+  // Check the Hub before offering a browser handoff or replacing a saved login.
+  // Any HTTP reply below 500 proves reachability; this is not an auth request.
+  const reachabilitySignal = AbortSignal.any([
+    AbortSignal.timeout(5_000),
+    ...(options.signal === undefined ? [] : [options.signal]),
+  ]);
+  try {
+    const response = await (options.fetch ?? fetch)(endpoint.origin, {
+      method: "HEAD",
+      redirect: "manual",
+      signal: reachabilitySignal,
+    });
+    await response.body?.cancel();
+    if (response.status >= 500) throw new Error("Hub unavailable");
+  } catch {
+    options.signal?.throwIfAborted();
+    throw new TypeError(
+      `Can't reach ${endpoint.host}. Check your connection and try again.`,
+    );
+  }
   const saved = await readCredential(options.credentialPath);
   if (
     saved !== undefined &&

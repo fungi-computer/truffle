@@ -9,12 +9,14 @@ export {
   listPrivateModels,
   type PrivateLocalModelChoice,
 } from "./local-models.js";
+export { defaultLocalModel } from "./private-local-default-model.js";
 export { createPrivateInvocationFilesPort } from "./private-invocation-files.js";
 export { createPrivateInvocationComputer } from "./private-invocation-computer.js";
 export { ensurePrivateLocalGitExclude } from "./private-local-git-exclude.js";
 export { createPrivateWorkerdSandbox } from "./private-workerd-sandbox.js";
 export {
   signInFungiAccount,
+  launchPlatformBrowser,
   signOutFungiAccount,
   readFungiAccountStatus,
   switchFungiAccountTeam,

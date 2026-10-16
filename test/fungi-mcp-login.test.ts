@@ -50,6 +50,10 @@ async function saveLogin(issuer: string): Promise<void> {
 }
 
 const offline: FetchLike = () => Promise.reject(new TypeError("fetch failed"));
+const reachableHub: FetchLike = (url, init) =>
+  init?.method === "HEAD"
+    ? Promise.resolve(new Response(null, { status: 200 }))
+    : offline(url, init);
 
 /** Serves only the authorization server metadata and revocation endpoint. */
 function hubMetadata(onRevoke: (body: URLSearchParams) => void): FetchLike {
@@ -91,6 +95,7 @@ it("listens on an OS-chosen loopback port while 8765 is in use", async () => {
     const browserOpened = Promise.withResolvers<URL>();
     const login = signInFungiAccount(endpoint, {
       credentialPath,
+      fetch: reachableHub,
       openBrowser: (url) => {
         opened.push(url);
         browserOpened.resolve(url);
@@ -128,7 +133,7 @@ it("refuses another browser account before replacing a cached client's identity"
   const opened = Promise.withResolvers<URL>();
   const login = signInFungiAccount(endpoint, {
     credentialPath,
-    fetch: offline,
+    fetch: reachableHub,
     openBrowser: (url) => {
       opened.resolve(url);
     },
@@ -288,7 +293,7 @@ it("a login for another issuer needs confirmation, then replaces the saved login
   await expect(
     signInFungiAccount(endpoint, {
       credentialPath,
-      fetch: offline,
+      fetch: reachableHub,
       openBrowser: () => undefined,
     }),
   ).rejects.toThrow(
@@ -302,7 +307,7 @@ it("a login for another issuer needs confirmation, then replaces the saved login
   const browserOpened = Promise.withResolvers<URL>();
   const login = signInFungiAccount(endpoint, {
     credentialPath,
-    fetch: offline,
+    fetch: reachableHub,
     confirmReplace: (saved, next) => {
       asked.push([saved, next]);
       return Promise.resolve(true);
@@ -329,7 +334,7 @@ it("an offline authorization after registration names the unreachable origin", a
   const opened = Promise.withResolvers<URL>();
   const login = signInFungiAccount(endpoint, {
     credentialPath,
-    fetch: offline,
+    fetch: reachableHub,
     openBrowser: (url) => {
       opened.resolve(url);
     },
@@ -345,6 +350,23 @@ it("an offline authorization after registration names the unreachable origin", a
   }).toString();
   await fetch(callback);
   await failed;
+});
+
+it("an offline sign-in stops before registration and keeps the saved account", async () => {
+  await saveLogin("https://hub.test");
+  const before = await readFile(credentialPath, "utf8");
+  const openBrowser = vi.fn();
+  await expect(
+    signInFungiAccount(endpoint, {
+      credentialPath,
+      fetch: offline,
+      openBrowser,
+    }),
+  ).rejects.toThrow(
+    "Can't reach hub.test. Check your connection and try again.",
+  );
+  expect(openBrowser).not.toHaveBeenCalled();
+  expect(await readFile(credentialPath, "utf8")).toBe(before);
 });
 
 it("an offline hosted connection names the unreachable origin", async () => {

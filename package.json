@@ -1,8 +1,8 @@
 {
-  "name": "@fungi.computer/local",
-  "version": "0.1.0",
-  "private": true,
-  "description": "Private local Agent host primitives for Fungi (see wiki/0-system/current-direction.md)",
+  "name": "@fungi.computer/truffle",
+  "version": "0.1.1",
+  "private": false,
+  "description": "Truffle: Fungi's local Agent runtime, bundled into the fungi command",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -128,11 +128,11 @@
       "test": "required",
       "docs": {
         "status": "not-applicable",
-        "reason": "Local remains a private runtime and owns no generated API documentation surface"
+        "reason": "Truffle ships inside @fungi.computer/spore and owns no generated API documentation surface"
       },
       "pack": {
         "status": "not-applicable",
-        "reason": "Local remains private and is not independently packed"
+        "reason": "Truffle is bundled into @fungi.computer/spore and not packed on its own"
       },
       "smoke": {
         "status": "not-applicable",
@@ -140,9 +140,12 @@
       },
       "stranger": {
         "status": "not-applicable",
-        "reason": "Local remains private and owns no external consumer fixture"
+        "reason": "Truffle is bundled into @fungi.computer/spore; the packed fungi stranger install is its consumer proof"
       }
     }
   },
-  "license": "MIT"
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
 }

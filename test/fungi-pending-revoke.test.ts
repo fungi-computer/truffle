@@ -69,6 +69,8 @@ it.each([
     const transport: FetchLike = async (input, init) => {
       const request = new Request(String(input), init);
       const url = new URL(request.url);
+      if (request.method === "HEAD" && url.pathname === "/")
+        return new Response(null, { status: 200 });
       if (url.pathname.startsWith("/.well-known/oauth-protected-resource"))
         return Response.json({
           resource: "https://hub.test/api/teams",

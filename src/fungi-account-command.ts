@@ -84,6 +84,14 @@ export async function runFungiAccountCommand(
     );
     return;
   }
+  const status = await readFungiAccountStatus(owner);
+  if (status === undefined) {
+    emit(
+      { signedIn: false },
+      "Not signed in to Fungi. Run fungi login --provider fungi.",
+    );
+    return;
+  }
   if (command.action === "teams") {
     const { teams, selectedTeamId } = await readFungiAccountTeams(owner);
     emit(
@@ -105,14 +113,6 @@ export async function runFungiAccountCommand(
   if (command.action === "balance") {
     const balance = await readFungiTeamBalance(owner);
     emit(balanceReply(balance), balanceText(balance));
-    return;
-  }
-  const status = await readFungiAccountStatus(owner);
-  if (status === undefined) {
-    emit(
-      { signedIn: false },
-      "Not signed in to Fungi. Run fungi login --provider fungi.",
-    );
     return;
   }
   const reply: AccountStatusReply = {

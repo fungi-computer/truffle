@@ -9,6 +9,9 @@ import type {
 import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it, vi } from "vitest";
 
+import { localLoginProviders } from "../src/local-login.js";
+import { createPrivateModels } from "../src/local-models.js";
+
 import { runLocalAuthCli, type LocalAuthCliOptions } from "../src/auth-cli.js";
 
 type AuthModels = Pick<
@@ -225,7 +228,7 @@ describe("Local auth CLI", () => {
     expect(notified[0]).toEqual({
       type: "auth_url",
       url: "https://example.com/authorize",
-      providerLabel: "OpenAI",
+      providerLabel: "ChatGPT for Shiitake",
     });
   });
 
@@ -304,9 +307,55 @@ describe("Local auth CLI", () => {
         },
       ],
     });
-    expect(harness.text()).toContain("ready: configured (oauth)");
-    expect(harness.text()).toContain("missing: unconfigured");
+    // Signed-in providers are listed; the rest collapse into one summary.
+    expect(harness.text()).toContain("ready: signed in (subscription)");
+    expect(harness.text()).toContain("1 other providers not signed in");
+    expect(harness.text()).not.toContain("missing");
     expect(harness.text()).not.toContain("OAuth");
+  });
+
+  it("logs out only of a signed-in provider, and says so when there is none", async () => {
+    const harness = outputHarness();
+    const logout = vi.fn(() => Promise.resolve());
+    const prompted = vi.fn();
+    const models: AuthModels = {
+      getProviders: () => [
+        provider("first", { apiKey: { name: "First", resolve: noAuth } }),
+        provider("second", { apiKey: { name: "Second", resolve: noAuth } }),
+      ],
+      checkAuth: vi.fn(() => Promise.resolve(undefined)),
+      login: vi.fn(),
+      logout,
+    };
+    await runLocalAuthCli(["logout"], {
+      models,
+      output: harness.output,
+      interaction: { prompt: prompted, notify: vi.fn() },
+    });
+    expect(prompted).not.toHaveBeenCalled();
+    expect(logout).not.toHaveBeenCalled();
+    const offered: string[] = [];
+    await runLocalAuthCli(["logout"], {
+      models: {
+        ...models,
+        checkAuth: vi.fn((id: string) =>
+          Promise.resolve(
+            id === "second" ? { type: "api_key" as const } : undefined,
+          ),
+        ),
+      },
+      output: harness.output,
+      interaction: {
+        prompt: (prompt) => {
+          if (prompt.type === "select")
+            offered.push(...prompt.options.map((option) => option.id));
+          return Promise.resolve("second");
+        },
+        notify: vi.fn(),
+      },
+    });
+    expect(offered).toEqual(["second"]);
+    expect(logout).toHaveBeenCalledWith("second", expect.any(Object));
   });
 
   it("limits status to an explicitly selected provider", async () => {
@@ -447,4 +496,41 @@ describe("Local auth CLI", () => {
     await expect(completion).rejects.toBeDefined();
     expect(listeners.size).toBe(0);
   });
+});
+
+it("CLI offers Anthropic methods in the same registry order as /login", async () => {
+  const providers = createPrivateModels()
+    .getProviders()
+    .filter((one) => one.id === "anthropic");
+  const [entry] = localLoginProviders(providers);
+  expect(entry?.methods.map((method) => method.kind)).toEqual([
+    "api_key",
+    "subscription",
+  ]);
+  const prompts: unknown[] = [];
+  const models: AuthModels = {
+    getProviders: () => providers,
+    checkAuth: noAuth,
+    login: () => Promise.resolve(apiKeyCredential()),
+    logout: () => Promise.resolve(),
+  };
+  await runLocalAuthCli(
+    ["login", "--provider", "anthropic"],
+    options(models, {
+      prompt: (prompt) => {
+        prompts.push(prompt);
+        return Promise.resolve("api_key");
+      },
+      notify: () => undefined,
+    }),
+  );
+  expect(prompts).toEqual([
+    expect.objectContaining({
+      type: "select",
+      options: entry?.methods.map((method) => ({
+        id: method.kind === "subscription" ? "oauth" : "api_key",
+        label: method.label,
+      })),
+    }),
+  ]);
 });
