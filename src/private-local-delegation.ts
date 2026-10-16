@@ -141,5 +141,10 @@ export function createPrivateLocalDelegation(
     return input.accept({ ...mail, meta }, meta, delegation.reply);
   }
 
-  return { send, receive };
+  /** The distinct Agents one of this Agent's Sessions sent work to. */
+  function recipients(sessionId: string, limit: number) {
+    return fleet.recipients({ agentId: input.agentId, sessionId }, limit);
+  }
+
+  return { send, receive, recipients };
 }

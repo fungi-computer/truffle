@@ -54,8 +54,7 @@
   "files": [
     "dist",
     "computerd-loopback.cjs",
-    "native/bin",
-    "native/apply-patch/LICENSE.codex"
+    "native/bin"
   ],
   "scripts": {
     "lint": "../../node_modules/.bin/eslint src scripts test --max-warnings=0 && ../../node_modules/.bin/oxlint --config ../../oxlint.config.ts --deny-warnings src scripts test",
@@ -66,7 +65,7 @@
     "test:full": "pnpm run test && pnpm run test:bun",
     "test:node": "../../node_modules/.bin/vitest run",
     "test:bun": "bun test ./test/private-local-service-discovery.bun.test.ts ./test/private-local-service-listener.bun.test.ts ./test/private-local-service-manager.bun.test.ts ./test/private-local-auth-rpc.bun.test.ts ./test/private-workerd-deadline.bun.test.ts ./test/private-workerd-forage.bun.test.ts ./test/local-extensions.bun.test.ts",
-    "build:native": "node scripts/build-apply-patch.mjs",
+    "build:native": "fungi-apply-patch-build --out native/bin",
     "test:patch": "node --test --test-timeout=30000 test/apply-patch.native.mjs",
     "format:check": "node ../../tooling/repository/scripts/format-package-check.mjs",
     "lint:anti-slop": "node ../../tooling/repository/scripts/lint-package-anti-slop.mjs",

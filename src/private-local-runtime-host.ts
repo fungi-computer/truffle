@@ -98,6 +98,12 @@ import {
   createPrivateLocalDelegation,
   type PrivateLocalMailRouting,
 } from "./private-local-delegation.js";
+import { createPrivateLocalSubagents } from "./private-local-subagents.js";
+import {
+  subagentsExtension,
+  subagentsGrant,
+  type SubagentSource,
+} from "@fungi.computer/shiitake-extensions/subagents/host";
 
 const initialSessionId = "main";
 const maximumInstructionReadBytes = 128 * 1_024;
@@ -983,6 +989,8 @@ export async function createPrivateLocalTools(
   sessionPath?: (sessionId: string) => string | undefined,
   /** This Agent's store; its owner-enabled installed extensions join the roster. */
   storeDirectory?: string,
+  /** This Agent's sub-agent facts; present when it can direct other Agents. */
+  subagents?: SubagentSource,
 ): Promise<PrivateLocalTools> {
   const root = await realpath(resolve(invocationRoot));
   const port = await createPrivateInvocationFilesPort(root);
@@ -1023,9 +1031,17 @@ export async function createPrivateLocalTools(
           read: () => [{ name: "local", attachmentId: "local-computer", port }],
         },
       }),
+      ...(subagents === undefined
+        ? []
+        : [subagentsExtension({ source: subagents })]),
       ...installed.roster,
     ],
-    grants: [...base.grants, homeGrant, ...installed.grants],
+    grants: [
+      ...base.grants,
+      homeGrant,
+      ...(subagents === undefined ? [] : [subagentsGrant]),
+      ...installed.grants,
+    ],
   };
   return Object.freeze({
     port,
@@ -1271,11 +1287,29 @@ export async function openPrivateLocalRuntimeHost(
             },
           });
     let agentControl: AgentControlDirectory | undefined;
+    let subagents: ReturnType<typeof createPrivateLocalSubagents> | undefined;
     if (input.agentControl !== undefined) {
+      subagents = createPrivateLocalSubagents({
+        database,
+        directory: input.agentControl,
+        recipients: delegation?.recipients,
+      });
+      const recordCreation = subagents.recordCreation;
       agentControl = {
         ...input.agentControl,
         models: (signal) => listOfferedLocalModels(models, signal),
       };
+      const create = input.agentControl.create;
+      if (create !== undefined)
+        agentControl = {
+          ...agentControl,
+          create: async (request, signal, invoker) => {
+            const created = await create(request, signal, invoker);
+            if (invoker !== undefined)
+              recordCreation(invoker.sessionId, created.agentId);
+            return created;
+          },
+        };
       if (delegation !== undefined)
         agentControl = { ...agentControl, send: delegation.send };
     }
@@ -1285,6 +1319,7 @@ export async function openPrivateLocalRuntimeHost(
       agentControl,
       (sessionId) => sessionPaths.get(sessionId),
       dirname(paths.databasePath),
+      subagents?.source,
     );
     processes = localTools.processes;
     const sessionProcesses = processes;

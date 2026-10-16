@@ -16,6 +16,8 @@ import {
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
 import type { SessionSnapshot } from "@fungi.computer/shiitake";
 import { afterEach, expect, it } from "vitest";
+import * as Schema from "effect/Schema";
+import { SubagentsProjection } from "@fungi.computer/shiitake-extensions/subagents";
 
 import type {
   LocalServiceRuntime,
@@ -327,42 +329,77 @@ it("refuses a Local reply that does not match work the parent sent", async () =>
   }
 }, 60_000);
 
-it("queues a Local reply that arrives mid-turn behind the parent's active run", async () => {
+it("steers a Local reply into the same active parent run at its safe boundary", async () => {
   const parentContexts: Context[] = [];
+  const parentHeld = Promise.withResolvers<undefined>();
   const replyWaiting = Promise.withResolvers<undefined>();
+  const childWaiting = Promise.withResolvers<undefined>();
+  const childRelease = Promise.withResolvers<undefined>();
+  let parentSignal: AbortSignal | undefined;
   const local = await project(
     [
       delegate(parentContexts),
-      async (context) => {
+      async (context, options) => {
         parentContexts.push(structuredClone(context));
-        // Hold the parent's run until the child's reply is waiting behind it.
+        parentSignal = options?.signal;
+        parentHeld.resolve(undefined);
+        // Hold the parent model call until the child's reply awaits steering.
         await replyWaiting.promise;
         return fauxAssistantMessage("Done for now");
       },
       capture(parentContexts, "Saw the reply next"),
     ],
-    [() => fauxAssistantMessage("Child result")],
+    [
+      async () => {
+        childWaiting.resolve(undefined);
+        await childRelease.promise;
+        return fauxAssistantMessage("Child result");
+      },
+    ],
   );
   try {
     const parentTurn = await local.parent.session.send("Delegate this", {
       requestId: "parent-prompt",
     });
+    await parentHeld.promise;
+    await childWaiting.promise;
+    const activeBeforeReply = await local.parent.session.read();
+    expect(activeBeforeReply.activity.queue.state).toBe("running");
+    expect(activeBeforeReply.activity.cancellationRequested).toBe(false);
     const waiting = await until(
-      () => local.parent.session.read(),
+      async () => {
+        const snapshot = await local.parent.session.read();
+        if (
+          !snapshot.pending.prompts.some((prompt) =>
+            JSON.stringify(prompt).includes("Child result"),
+          )
+        )
+          childRelease.resolve(undefined);
+        return snapshot;
+      },
       (snapshot) =>
         snapshot.pending.prompts.some((prompt) =>
           JSON.stringify(prompt).includes("Child result"),
         ),
-      "the reply to queue behind the active run",
+      "the reply to wait at the active run's steering boundary",
     );
-    // The reply never interrupted the running work.
+    const pendingReply = waiting.pending.prompts.find((prompt) =>
+      JSON.stringify(prompt).includes("Child result"),
+    );
+    if (pendingReply === undefined)
+      throw new Error("The active parent has no pending child reply");
+    expect(pendingReply.delivery).toBe("steer");
+    expect(waiting.activity.queue).toEqual(activeBeforeReply.activity.queue);
+    expect(waiting.activity.cancellationRequested).toBe(false);
+    // The same active command remains live without interruption.
     expect(local.parentModel.state.callCount).toBe(2);
     expect(waiting.terminals).toEqual([]);
+    expect(parentSignal?.aborted).toBe(false);
     replyWaiting.resolve(undefined);
     const settled = await until(
       () => local.parent.session.read(),
       (snapshot) => snapshot.terminals.length === 2,
-      "the parent's run and then the reply's run",
+      "the parent run and its steered reply",
     );
     expect(local.parentModel.state.callCount).toBe(3);
     const [, reply] = userLines(settled);
@@ -379,6 +416,78 @@ it("queues a Local reply that arrives mid-turn behind the parent's active run", 
     expect(messageDelegationReply(reply?.meta)?.outcome).toBe("completed");
   } finally {
     replyWaiting.resolve(undefined);
+    childRelease.resolve(undefined);
+    await local.owners.close();
+  }
+}, 60_000);
+
+it("lists the Agents one Local conversation created and sent work to, and no other conversation's", async () => {
+  const parentContexts: Context[] = [];
+  const spawnAndSend: FauxResponseStep = (context) => {
+    parentContexts.push(structuredClone(context));
+    return fauxAssistantMessage(
+      fauxToolCall("execute", {
+        code: `async () => { const made = await agents.create({ requestId: "spawn-one" }); await agents.send({ agentId: ${JSON.stringify(ids.child)}, sessionId: "main", text: "Find the answer", delivery: "followUp" }); await agents.send({ agentId: ${JSON.stringify(ids.child)}, sessionId: "main", text: "And once more", delivery: "followUp" }); return made.agentId; }`,
+      }),
+      { stopReason: "toolUse" },
+    );
+  };
+  const local = await project(
+    [
+      spawnAndSend,
+      capture(parentContexts, "Spawned"),
+      capture(parentContexts, "Reply received"),
+      capture(parentContexts, "Second reply received"),
+    ],
+    [
+      () => fauxAssistantMessage("Child result"),
+      () => fauxAssistantMessage("Again"),
+    ],
+  );
+  const owner = () => {
+    const runtime = local.runtimes.get(ids.parent);
+    if (runtime === undefined) throw new Error("Parent runtime is not open");
+    return runtime;
+  };
+  const slot = async (sessionId: string) => {
+    const found = (await owner().getSession(sessionId).read()).extensions[
+      "botanical-session-subagents"
+    ];
+    return found?.status === "running" ? found.value : undefined;
+  };
+  try {
+    await local.parent.session.send("Spawn and delegate", {
+      requestId: "parent-prompt",
+    });
+    const listed = await until(
+      () => slot("main"),
+      (value) =>
+        JSON.stringify(value).includes('"sessionId":null') &&
+        JSON.stringify(value).includes('"state":"idle"') &&
+        !JSON.stringify(value).includes('"state":"working"'),
+      "the parent's sub-agent rows",
+    );
+    const rows = Schema.decodeUnknownSync(SubagentsProjection)(listed);
+    // Two sends to one child stay one row; the created Agent is the other.
+    expect(rows.more).toBe(0);
+    expect(rows.agents).toHaveLength(2);
+    expect(rows.agents).toContainEqual({
+      agentId: ids.child,
+      name: ids.child,
+      sessionId: "main",
+      state: "idle",
+    });
+    expect(rows.agents.find((agent) => agent.sessionId === null)?.state).toBe(
+      "idle",
+    );
+    const elsewhere = await owner().createSession("elsewhere");
+    await until(
+      () => slot(elsewhere),
+      (value) => value !== undefined,
+      "the other conversation's empty view",
+    );
+    expect(await slot(elsewhere)).toEqual({ agents: [], more: 0 });
+  } finally {
     await local.owners.close();
   }
 }, 60_000);

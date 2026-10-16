@@ -9,40 +9,20 @@ installation path.
 ## Source setup
 
 Use a configured repository checkout with the pinned Node, Bun and pnpm tools.
-Linux x64 builds the native patch engine in a digest-pinned Ubuntu 22.04 Docker
-container with Rust 1.98.1 and glibc 2.35. Only its source and disposable build
-directories are mounted; the Cargo target is separate from host-built objects.
-The binary and portable upstream notice inventory are cached together. Other
-native hosts need [rustup](https://rustup.rs) with the `1.98.1` toolchain
-installed (`rustup toolchain install 1.98.1`), plus a C compiler, `pkg-config`
-and OpenSSL development headers, through their ordinary tools.
-[`build-apply-patch.mjs`](scripts/build-apply-patch.mjs) asks rustup for that
-toolchain's `cargo` explicitly, so a different `cargo` earlier on `PATH` (for
-example Homebrew's) is not picked up by mistake. A missing rustup or a missing
-`1.98.1` toolchain fails the build with one message naming the fix. Run from the
-repository root:
+Local runs its own host build of the native `apply_patch` engine, which
+[`@fungi.computer/cordyceps`](../../packages/cordyceps/README.md#native-patch-engine)
+owns; Cordyceps' build prerequisites apply. Run from the repository root:
 
 ```sh
-pnpm --filter @fungi.computer/local build:native
 pnpm turbo:run run build --filter=@fungi.computer/local
 pnpm --filter @fungi.computer/local test
 ```
 
-These commands build the native patch helper and Local's dependency closure,
-then run its unit and native patch tests. They do not sign in to a provider or
-start a customer Agent. Build outputs and test fixtures are disposable.
-
-The native patch builder shares one immutable artifact per pinned Codex version
-and target under `${XDG_CACHE_HOME:-~/.cache}/fungi/native-patch/`. The pin
-lives in [native/apply-patch/pin.mjs](native/apply-patch/pin.mjs), already
-covered by the native Turbo inputs. Concurrent misses use `proper-lockfile` to
-serialize one compiler; the parent keeps its heartbeat live while the child
-builds. Publication is atomic. Cache hits verify the source/wrapper and artifact
-checksums, then restore the executable and its portable license inventory into
-the calling checkout. A mismatch is refused rather than silently reused or
-rebuilt under the same pin. Updating the Codex pin creates a new cache key. The
-ordinary TUI Turbo build already includes this native prerequisite; the updater
-must not follow it with a second direct native build.
+The build places the engine in `native/bin` through Cordyceps'
+`fungi-apply-patch-build` and Local's dependency closure, then the tests run its
+unit and native patch tests. They do not sign in to a provider or start a
+customer Agent. Build outputs and test fixtures are disposable. Without a built
+engine, Local offers no `apply_patch` tool.
 
 ## Host and Session lifetime
 
