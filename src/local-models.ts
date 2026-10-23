@@ -14,6 +14,9 @@ import {
 
 import { createFungiAccountCredentialStore } from "./private-fungi-account.js";
 import { createFungiModelProvider } from "./private-fungi-model-provider.js";
+import { retainSubscriptionIdentity } from "./subscription-identity.js";
+import { registerSubscriptionTurnOwner } from "./subscription-turn.js";
+import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 
 /** Register Pi's standalone OAuth modules on the same instance Local uses. */
 export function registerPrivateBundledModelOAuthFlows(): void {
@@ -39,17 +42,24 @@ function locallyPermitted(provider: Provider): Provider | undefined {
   if (apiKey === undefined && oauth === undefined) return undefined;
   const auth: Provider["auth"] = {};
   if (apiKey !== undefined) auth.apiKey = apiKey;
-  if (oauth !== undefined) auth.oauth = oauth;
+  if (oauth !== undefined)
+    auth.oauth =
+      provider.id === "anthropic" || provider.id === "openai"
+        ? retainSubscriptionIdentity(oauth, provider.id)
+        : oauth;
   return { ...provider, auth };
 }
 
 /** Create the private local Pi collection with Pi's policy-permitted providers. */
-export function createPrivateModels(credentialPath?: string): MutableModels {
-  const options: Parameters<typeof createFungiModelProvider>[0] = {};
-  if (credentialPath !== undefined) options.credentialPath = credentialPath;
+export function createPrivateModels(
+  credentialPath: string = capturePrivateLocalConfigRoot().credentialPath,
+  providerOptions: { providers?: readonly Provider[] } = {},
+): MutableModels {
+  const options = { credentialPath };
   const credentials = createFungiAccountCredentialStore(options);
   const models = createModels({ credentials });
-  for (const provider of builtinProviders()) {
+  registerSubscriptionTurnOwner(models, credentials);
+  for (const provider of providerOptions.providers ?? builtinProviders()) {
     const permitted = locallyPermitted(provider);
     if (permitted !== undefined) models.setProvider(permitted);
   }

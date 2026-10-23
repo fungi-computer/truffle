@@ -42,13 +42,110 @@ server. Closing the batch closes their resources.
 The [service manager](src/private-local-service.ts) discovers or starts the same
 user's shared background service. It selects project stores and creates or
 resumes Sessions through that owner. Closing a client connection does not stop
-the service or erase its Session. Explicit service shutdown drains its owners.
-The CLI's `fungi stop` requests that shutdown. Clients only reconnect to a
-service from the same build. After an upgrade, finish active turns, run
-`fungi stop`, then reopen with `fungi resume --last` from the original project.
-Saved Sessions remain on disk. This avoids running a service whose installed
-sandbox executable was removed by the upgrade; the client never stops an older
-service automatically.
+the service or erase its Session. The CLI's `fungi stop` sends the service
+SIGTERM, which drains its owners; a service still running 5 s later is
+SIGKILLed, and its `service.json` and owner lock are removed either way. A
+SIGKILL ends only the service process: the shell and exec commands its Agents
+started run detached in their own process groups and can keep running after it
+([client-surfaces-v1-79](../../issues/client-surfaces-v1/79-stop-the-service-process-groups-on-fungi-stop.md)).
+Interrupted turns resume when the service next starts.
+
+The service releases an Agent nothing is using. It counts each request and each
+open Session watch on that Agent, and every mail or control operation that
+reaches it. An unused Agent with no running or waiting Session, Watchdog job,
+scheduled wake, reply still owed a delivery attempt or running background
+process is closed after two consecutive idle checks (one per minute). Delivered
+reply receipts and dead letters stay in the outbox but owe nothing. Work an
+Agent delegated is owed by its child, whose reply mail reopens the parent. It is
+then dropped from `~/.fungi/service/owners.json`. The next request, mail or send
+reopens it. Shutdown keeps only Agents with work in that file, so a restart
+reopens just those. A released Agent's per-Session client PATH binding and
+exited background-process logs end with it.
+
+`~/.fungi/service/service.json` and the service's `status` route record its
+`version` (the packed CLI's content hash, or `source`) and `protocol` (the
+client-service wire contract). Every TUI or CLI start ensures its own build: it
+reuses a service of the same version, and otherwise stops the registered one as
+`fungi stop` does and starts its own. A window that has already reached a
+service never replaces one: it keeps a newer build that speaks its protocol, and
+for another protocol shows only "The Fungi service was updated. Restart this
+window." Saved Sessions remain on disk throughout.
+
+Version policy: a fresh launch of a different build replaces the running
+service, so use one installed build per service directory (`~/.fungi/service`).
+Every source checkout counts as the same `source` version, so restart the
+service (`fungi stop`) after editing the source.
+
+### Service diagnostics candidate
+
+`private-local-service-log.ts` owns the service's JSON record contract, native
+file sink and always-on five-minute sampler. It retains all maintained `bun:jsc`
+type counts when the encoded record fits 32 KiB. If not, it emits an explicit
+map omission summary rather than selecting a top-N subset or truncating JSON.
+Counts include uncollected allocations; they are not retained-root evidence.
+Unavailable statistics are explicit, never zero substitutes.
+
+CTO ruling `dc105` selects the runtime's own filesystem primitives, owned by
+this same module. The sink opens append with mode `0600` and verifies the
+descriptor without chmod repair, checks byte counts on every write, and rotates
+using checked native renames. No logger framework, worker, retry loop or second
+store is part of this contract.
+
+The candidate policy is one active 1 MiB file plus three 1 MiB backups, not a
+four-backup policy. Disposal must precede the existing owner lease release. No
+inspector, environment debug switch, forced GC, new service supervisor or
+memory-leak fix is implied. The separate 4,096-cycle memory experiment did not
+reproduce the reported sustained growth.
+
+The diagnostics resource records startup/ready and observed stop reasons and
+owns only its sampler/writer. Both entry paths use the existing listener owner,
+which disposes diagnostics before registration removal and lease release.
+Diagnostics I/O faults do not stop the service, turns or normal shutdown.
+
+Native fixtures allocate only under this worktree's ignored
+`.botanical/service-log-fixtures/`; child HOME and TMPDIR are fixture-owned.
+Primitive-only native tests use the diagnostics resource directly; later
+service/CLI/doctor proofs load the real consumer closure separately. Short-count
+injection controls the maintained SDK return value; it is not an OS-generated
+short-write claim. Rename-fault tests use an actual filesystem collision.
+
+CTO decision `ee8f5320e0de` selects continued service operation with explicit
+failed diagnostics. The first sink fault latches a bounded code and stable
+first-failure ISO timestamp, stops the sampler and attempts writer disposal
+once. Later requests read that current resource state, not the startup
+connection snapshot. Opening/writing/closing failures are distinct; a failed
+heap read emits `memory-unavailable`, never zero statistics. No retries,
+separate journal or store, environment switch or new runtime owner is added.
+
+Protocol 2 requires diagnostics on live `/status` and `/inspect` responses; the
+registration file remains identity-only. The maintained Zod live decoder rejects
+missing diagnostics rather than assuming ACTIVE. `fungi doctor` performs only
+the manager's live status read and prints `FAILED <code> since <timestamp>` (or
+ACTIVE). It never starts/restarts the service.
+
+The earlier LogTape probe was rejected on native mode and swallowed-rename
+failures; it is not an adoption option. Its old candidate tests are superseded
+by native-fs tests, with the historical probe preserved separately. Dependency
+removal uses the maintained package operation, not hand-edited lock state.
+Focused native tests do not qualify the service/CLI/doctor consumer closure or
+authorize production enablement; those remain subject to the built-dependency
+merge gate.
+
+The service acquires its SQLite owner row and writes its PID and process-start
+identity in the same transaction. `service.json` is only a pointer to that row;
+a matching file or HTTP handshake alone does not authorize a signal. Before
+stopping, the client requires the file to match the live lease owner and checks
+that process's start identity (Linux `/proc/<pid>/stat` `starttime`). It checks
+the process identity again before each signal. These are separate reads and
+`kill` calls: a residual read-to-signal PID-reuse window remains; this is not an
+atomic kernel process handle.
+
+On macOS, `ps lstart` has only one-second resolution. No sub-second macOS reader
+is implemented, so `fungi stop` and automatic build replacement **refuse to
+signal** there with an actionable message. Close the service manually before
+launching another build. A possibly live lease is retained conservatively on
+platforms without verifiable start identity, even if its PID may have been
+reused.
 
 A Session keeps its invoking client's validated executable PATH while its owner
 is live. Reconnecting the same live Session with a different PATH is a conflict.
@@ -58,12 +155,12 @@ toolchain. Other caller environment variables are not imported.
 ## Files, tools and models
 
 The local Computer is explicit in execute: `env.computers.local.exec(...)` and
-`env.computers.local.files.read/list/glob/grep/edit(...)`. There is no shared
-`files` module or Computer role named Home. The host grants the product Home
-extension its already-rooted port; Home adopts the single local attachment and
-supplies direct `read`, `list`, `glob`, `grep` and native `apply_patch` tools.
-The same tool gate admits each direct call. `/home local` is a human command;
-there is no model operation that changes Home.
+`env.computers.local.files.read/find/edit(...)`. There is no shared `files`
+module or Computer role named Home. The host grants the product Home extension
+its already-rooted port; Home adopts the single local attachment and supplies
+direct `read`, `list`, `glob`, `grep` and native `apply_patch` tools. The same
+tool gate admits each direct call. `/home local` is a human command; there is no
+model operation that changes Home.
 
 - [Files](src/private-invocation-files.ts) captures the project root and rejects
   path or symlink escapes. Native patch follows its own stricter rooted
@@ -95,20 +192,42 @@ there is no model operation that changes Home.
   separately from the native command's result.
 - [Models](src/local-models.ts) uses Pi's registry and Veil's allowed login
   methods with the local credential store. Fungi's provider reads its hosted
-  catalog through the selected Team and uses Hub billing. Model choice follows
-  explicit Session, explicit Agent, the person's remembered model in
-  `~/.config/fungi/shiitake.json`, a host's Team default, then an available
-  provider login. A Session `/model` switch is only that Session's override; it
-  never changes an Agent default or another Agent. Agent defaults stay in their
-  Agent store. The host validates offered models and supported thinking levels.
+  catalog through the selected Team and uses Hub billing. Model choice follows a
+  Session override, then the Agent's default, then an available provider login;
+  there is no per-person remembered model. `/model` in a chat sets that Agent's
+  default and thinking level and clears the Session override, so the running
+  chat and every new chat with that Agent use it; another Agent is unaffected.
+  Agent defaults stay in their Agent store.
+  [One resolver](src/private-local-startup-model.ts) decides a new chat's model
+  for both a fresh Session and the landing, reading the stored default through
+  the same reader as Agent discovery (a store that predates the schema fails
+  loudly). The host validates offered models and supported thinking levels.
   `agents.models` lists the `provider/model` addresses offered by signed-in or
-  configured providers. `agents.create` accepts an optional address from that
-  list, and `agents.setModel` changes future runs without replacing Session
-  overrides. An address Local does not offer fails as a typed `model:rejected`
-  capability failure and changes nothing. Creation and sends refuse missing
-  provider login; failed runs keep a safe, actionable diagnostic for
-  `agents.wait`. A hosted Team's key-source choice remains an explicit
-  restriction, including when a manual model is selected.
+  configured providers. `agents.create` accepts an optional name, an optional
+  address from that list and an optional thinking level; the new Agent works in
+  the project folder and the result returns it with the resolved model.
+  `agents.setModel` changes the Agent's default, optionally with a thinking
+  level, without replacing Session overrides. An address Local does not offer
+  fails as a typed `model:rejected` capability failure and changes nothing.
+  Creation and sends refuse missing provider login; failed runs keep a safe,
+  actionable diagnostic for `agents.wait`. A hosted Team's key-source choice
+  remains an explicit restriction, including when a manual model is selected.
+- Archiving tidies a folder's Agents without deleting any. The archived flag
+  lives in the Agent's own store next to `created_by`, so the store, its
+  Sessions and files stay. An Agent can `agents.archive` and `agents.unarchive`
+  an Agent it created, never another Agent or itself; a person runs
+  `fungi agents archive|unarchive <id>` for any Agent or presses `a` on the
+  landing Agent picker. An archived Agent leaves `agents.list`, discovery (the
+  picker and newest-Session resolution) and delegation: `agents.send` to it
+  fails as `archive:archived`. `agents.list` with `archived: true`, or
+  `fungi agents list --archived`, finds it to restore. Archiving is refused,
+  naming the running command, while any Session of the Agent has queued or
+  running work, or while it still waits for work it delegated
+  (`archive:pending`); the Agent cancels or waits first. Archive and admission
+  are serialized per Agent, so a send racing an archive either runs first (and
+  the archive is refused) or is refused as archived. A store written before the
+  flag reads as unreadable, with the phrase to move it aside; archiving it fails
+  as `archive:unreadable`.
 - [Delegation](src/private-local-delegation.ts) gives each project Agent the
   Hub's `followUp` delegation over its own store. `agents.send` freezes BirdDog
   mail through `fleet.start` and returns the child's `commandId`. The
@@ -171,9 +290,23 @@ starts disabled.
   whose declared `./host` entry or terminal program is not built is refused.
 - `enableProject(root, id)` turns on the extension's client entry and programs
   for that folder, whichever Agent is selected.
-- `enableAgent(store, id)` grants one Agent store the capabilities the current
-  revision declares. The Agent keeps an older accepted revision until it is
-  enabled again, so an upgrade never widens it silently.
+- `enableAgent(store, id, requester?)` grants one Agent store the capabilities
+  the current revision declares. The Agent keeps an older accepted revision
+  until it is enabled again, so an upgrade never widens it silently. A human
+  (the CLI) names no requester. When an Agent is the requester it must hold the
+  extension itself (granted tools, not only its skills), or the call is refused
+  with reason `not-held`.
+- `assertHeldByAgent(store, ids)` is that one held-check: it rejects with
+  `not-held`, naming every id the Agent lacks. An Agent creating an Agent is
+  judged by it before anything exists, so a created Agent never holds more than
+  its creator, and a refused request creates nothing.
+- `enableAgentSkills(store, id)` opts one Agent store into the skills folder the
+  package declares with `fungi.skills` (for example `"./skills"`), with no tools
+  granted; a package with no `./host` can be skills-only. The folder is read in
+  place from the installed package, ranks below project and personal skills (so
+  yours win), and shows as "from <id>". `disableAgentSkills`, `disableAgent` and
+  `remove` take it away. Local installed extensions only; Hub-hosted extensions
+  are not covered.
 - `remove(id)` deletes the package and every activation that references it.
 
 The package declares itself in `package.json`:
@@ -205,6 +338,50 @@ repository and calls its tools through the real workerd `execute`.
 
 A Team MCP connection adds admitted hosted Computer tools to a local Agent. It
 does not move the local Files root or Session storage into the Hub.
+
+Local's host-only `presentApproval(sessionId, pending, approvals)` port binds a
+genuine canonical `PendingApproval` and member-bound `Approvals` capability to
+the requesting Session. `mcpFormApprovalContract` uses the existing Session
+extension channel: `pending` contains `{id, approval}`, where `id` is ephemeral
+and `approval` is the canonical `ApprovalView`, including host-computed rights.
+Optional evidence descriptors pass through with that view. They remain untrusted
+display-only metadata, never form input, model input or instructions; this port
+does not fetch or decode images.
+
+The Session `answer` command takes `{id, decision, expectedRevision}` with
+`decision: "approve" | "deny"`. Only a live selected-Session UI attachment can
+schedule a decision. After the Session command commits and the attachment is
+rechecked, the client awaits canonical `capability.answer`; that capability
+authorizes the answer and its native host owns durable apply/result delivery.
+The form id, UI attachment and display data cannot grant operation rights. There
+is no second dispatch through MCP `accept`, and no suspended Agent turn. Closing
+or rebinding a UI releases its route, not the durable approval record.
+
+This binding is not a TUI renderer or a second ledger. Production submit/apply
+composition still needs the canonical ledger/producer owner and host-attested
+identity, fence and idempotency facts. The legacy boolean MCP form cannot supply
+those facts and is not connected to this Session decision port.
+
+**Pending approvals-bundle join:** boorsr owns the canonical ledger/producer
+composition. Local's `observePrivateSqliteOwner(owner, onFailure)` wraps a
+supplied owner without choosing transactions or closing its connection. Local
+selects the actual driver's maintained transaction API: Watchdog's
+`fromNodeSqlite` savepoints for a real Node `DatabaseSync`, and native
+`bun:sqlite` `Database.transaction(...)` for the Bun wrapper. The Node adapter
+is never passed the Bun wrapper; Bun retains native `close(true)` to finalize
+held statements. No savepoint machinery is copied into Local, and the old
+non-nestable `BEGIN` adapter is removed.
+
+The same driver laws run through the production opener under Node and Bun:
+nested commit/rollback, native failure classification and cause preservation,
+host-owned connection lifetime, held-statement finalization, and reopen of
+committed data. The canonical submit/get projection tracer also runs against
+both actual Local drivers. Additional approvals-bundle driver tests exercise
+canonical answer/apply, atomic intent rollback and effect replay across reopen
+through unchanged invokeModuleOperation on both drivers. These checks do not
+prove production identity/fences, restart result delivery or producer wiring.
+The form binding and SQLite adapter ride as consumers in boorsr's approvals
+bundle, not as a separate production approval owner.
 
 [Fungi account custody](src/private-fungi-account.ts) supplies the same OAuth
 login and locked refresh to MCP and models. `fungi login --provider fungi` opens
@@ -264,7 +441,12 @@ pnpm --filter @fungi.computer/truffle test:full
 ```
 
 [Runtime-host tests](test/private-local-runtime-host.test.ts) exercise native
-SQLite, provider fixtures, instruction snapshots, replay and close.
+SQLite, provider fixtures, instruction snapshots, replay and close. On Linux
+with Bun, `pnpm --dir runtimes/local run proof:sqlite-close` also checks
+`/proc/self/fd` immediately after closing an Agent, its create receipt and a
+service lease, without requesting garbage collection. This native descriptor
+proof is Linux-specific; the ordinary Node suite also checks the writable
+adapter's timeout, foreign keys, transaction state and changed rows.
 [Computer tests](test/private-invocation-computer.test.ts) cover process-group
 cleanup and deadlines.
 [Background-process tests](test/private-local-computer-processes.test.ts) cover
@@ -289,7 +471,73 @@ transport uses the Local OAuth door and the same Team/resource capability rule
 as browser Sessions. Closing a Session client releases observation; it does not
 cancel durable work.
 
-The directory grammar lives in `@fungi.computer/oyster/shell/app-directory`. UI
-handoff resolves the selected App's published surface on the saved Hub origin,
-without putting an access token in the URL. A later account/Team selection
-retires this client; open a new client for the new selection.
+The directory grammar lives in `@fungi.computer/nacre/app-directory`. UI handoff
+resolves the selected App's published surface on the saved Hub origin, without
+putting an access token in the URL. A later account/Team selection retires this
+client; open a new client for the new selection.
+
+## Subscription credential activation
+
+`fungi account use-credential --provider anthropic|openai --from-file -` accepts
+bounded JSON on stdin:
+`{ "expected": <OAuth credential or null>, "credential": <replacement OAuth credential> }`.
+Tokens never travel in arguments or replies. Under the credential store's
+existing refresh lock, the owner compares the expected provider entry
+semantically, preserves every other provider, and atomically persists a 0600
+replacement. A stale comparison fails closed with the fixed `conflict` category.
+Input and filesystem failures expose only `invalid-input` or `store-failure`,
+never parser diagnostics or causes. The machine-readable success is
+`{"ok":true}`; failure also writes a bounded
+`{"ok":false,"error":{"category":"..."}}` reply and exits nonzero.
+
+Fungi remains the credential refresher. Local pins the Anthropic/OpenAI account
+at the accepted turn boundary, including all subsequent tool iterations. Pi
+refreshes that same account under the existing store lock while it remains
+active; refreshed tokens do not change the pinned identity. The next turn picks
+up an activated account without restarting the service.
+
+Pi's `openai` provider uses the ChatGPT direct-token flow, not the legacy
+`openai-codex` flow. Its credentials contain `clientId` and `scopes`, but do not
+add `accountId`. Local decodes the access token with `jose`; only its issuer and
+person `sub` identify the OpenAI subscription. Same-person refreshes are
+adopted; a different issuer or subject is not. Workspace metadata is not
+identity. An OpenAI grant without a provable person cannot establish turn
+continuity. An already-started refresh is committed under Pi's existing lock
+before Local decides whether the turn can adopt it; refusal or cancellation must
+not discard the rotated refresh token or restore a released pin.
+
+After switching A to B, the current turn may continue using A's still-valid
+token, but never refreshes inactive A. If A expires, its next request ends the
+turn with the typed, redacted `account-switched-during-turn` refusal: retry on
+the next turn using B. Completed tool results remain in the Session. A's durable
+inactive credential belongs to the external vault; Local creates no second
+inactive-credential authority and does not rotate it behind the vault's back.
+
+For vault capture, `fungi account prepare-credential --provider anthropic`
+enriches a fresh Fungi login with Anthropic's OAuth profile account UUID. OpenAI
+uses unpatched Pi OAuth: Local neither intercepts the code exchange nor reads
+its ID token. After Pi returns a grant, Local requires a usable issuer and
+subject in the access token before storage. No OpenAI workspace `accountId` is
+captured or retained across refresh. Anthropic still retains its profile
+account. `fungi account prepare-credential --provider openai` confirms only the
+access token's issuer and subject, without a request or token change. Failures
+expose `identity-unavailable` and bounded claim names, never token or claim
+values, and preserve the prior entry. A turn detects a different OpenAI person
+by issuer and subject and refuses as `account-switched-during-turn`.
+
+Auth tests inject a fixture ChatGPT OAuth provider through `createPrivateModels`
+and pass the resulting collection to `runLocalAuthCli`. They do not start Pi's
+callback server or bind an OAuth port. Explicit temporary credential paths and
+real-file size/mtime guards prevent touching the person's credentials. After
+building Truffle's dependencies,
+`pnpm --dir runtimes/local proof:unpatched-login` packs Truffle with npm and
+signs in through that fixture in an external npm consumer using registry pi-ai
+1.3.0. This qualifies the local seam and stored person identity, not a live
+OpenAI authorization.
+
+A provider HTTP refusal is reported as `provider_rejected` with its status code
+only, never the response body. Use Fungi's ordinary login flow in a private
+temporary HOME for additional accounts. External vault managers must reconcile
+the live credential before switching and treat activation conflicts as failures,
+not overwrite permission. This contract does not authorize a live import, login
+change or cutover.

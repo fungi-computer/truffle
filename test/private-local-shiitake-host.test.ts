@@ -35,11 +35,18 @@ function fakeSession(label: string) {
     },
     extensions: {},
     attention: [],
+    toolOutput: [],
     progress: null,
     label,
   };
   const session: ShiitakeSession = {
     address: "fixture://" + label,
+    withdraw: () =>
+      Promise.reject(new Error("withdraw is unused in this routing proof")),
+    latestPending: () =>
+      Promise.reject(
+        new Error("pending lookup is unused in this routing proof"),
+      ),
     read: () => Promise.resolve(snapshot),
     command: (): Promise<never> =>
       Promise.reject(new Error("command is unused in this routing proof")),
@@ -67,10 +74,26 @@ function fakeSession(label: string) {
 
 function owner(name: string, closed: string[]): PrivateLocalRuntimeHost {
   const fixture: PrivateLocalRuntimeHost = {
+    presentApproval: () =>
+      Promise.reject(
+        new Error("approval binding is unused in this routing proof"),
+      ),
+    prepareReload: () => Promise.reject(new Error("Unexpected fixture reload")),
     setModel: () => Promise.reject(new Error("Unexpected model write")),
+    pendingDelegation: () => Promise.resolve(undefined),
+    idle: () =>
+      Promise.reject(new Error("idle is unused in this routing proof")),
+    setArchived: () => {
+      throw new Error("Unexpected archive write");
+    },
+    setRequireSandbox: () => {
+      throw new Error("Unexpected sandbox requirement write");
+    },
+    sandboxStatus: () => ({ state: "available", requireSandbox: false }),
     assertModelReady: () =>
       Promise.reject(new Error("Unexpected model admission")),
     agentId: "fixture-" + name,
+    name: "fake-agent",
     bindSessionPath: () => {
       throw new Error("bindSessionPath is unused in this routing proof");
     },

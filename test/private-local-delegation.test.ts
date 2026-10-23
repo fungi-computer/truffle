@@ -15,10 +15,12 @@ import {
 } from "@fungi.computer/agar/agents";
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
 import type { SessionSnapshot } from "@fungi.computer/shiitake";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import * as Schema from "effect/Schema";
+import { z } from "zod";
 import { SubagentsProjection } from "@fungi.computer/shiitake-extensions/subagents";
 
+import { readPrivateLocalAgentProfile } from "../src/private-local-session-discovery.js";
 import type {
   LocalServiceRuntime,
   OpenLocalServiceRuntime,
@@ -47,7 +49,7 @@ const delegate = (stepContexts: Context[]): FauxResponseStep => {
     stepContexts.push(structuredClone(context));
     return fauxAssistantMessage(
       fauxToolCall("execute", {
-        code: `async () => agents.send({ agentId: ${JSON.stringify(ids.child)}, sessionId: "main", text: "Find the answer", delivery: "followUp" })`,
+        code: `async () => agents.send({ agentId: ${JSON.stringify(ids.child)}, sessionId: "main", requestId: "find-answer", text: "Find the answer", delivery: "followUp" })`,
       }),
       { stopReason: "toolUse" },
     );
@@ -124,7 +126,6 @@ async function project(
         ...options,
         providerId: parent ? "faux-parent" : "faux-child",
         modelId: parent ? "parent-model" : "child-model",
-        modelSettingsPath: join(root, "settings.json"),
       },
       models,
     );
@@ -143,6 +144,7 @@ async function project(
     sessionId: "main",
   });
   return {
+    root: invocationRoot,
     owners,
     parent,
     child,
@@ -221,9 +223,19 @@ it.each(["completed", "failed", "cancelled"] as const)(
       );
       const [, reply] = userLines(settled);
       const facts = messageDelegationReply(reply?.meta);
-      expect(messageAuthor(reply?.meta)).toEqual({
+      // Another Agent's message: the host stamps the replying Agent's kind.
+      const author = messageAuthor(reply?.meta);
+      expect({ id: author?.id, kind: author?.kind }).toEqual({
         id: ids.child,
-        name: ids.child,
+        kind: "agent",
+      });
+      expect(author?.name).toMatch(/^[a-z]+-[a-z]+$/u);
+      // The delegated send the child received names the parent as an Agent.
+      const [sentLine] = userLines(await local.child.session.read());
+      expect(messageAuthor(sentLine?.meta)).toEqual({
+        id: ids.parent,
+        name: ids.parent,
+        kind: "agent",
       });
       const childTerminal = (await local.child.session.read()).terminals.at(-1);
       expect(facts).toMatchObject({
@@ -237,6 +249,10 @@ it.each(["completed", "failed", "cancelled"] as const)(
         String(childTerminal?.commandId),
       );
       if (outcome === "failed") {
+        expect((await local.child.session.read()).terminals).toEqual([
+          childTerminal,
+        ]);
+        expect(facts?.diagnostic).toBe(childTerminal?.diagnostic);
         // Local's model door already reports provider failures in its own words.
         expect(facts?.diagnostic).toMatch(
           /^faux-child rejected the model request/u,
@@ -324,6 +340,8 @@ it("refuses a Local reply that does not match work the parent sent", async () =>
     );
     expect(lines).toHaveLength(3);
     expect(messageDelegationReply(lines[2]?.meta)).toBeUndefined();
+    // Text that looks like a reply never makes a human line read as an Agent.
+    expect(messageAuthor(lines[2]?.meta)?.kind).toBeUndefined();
   } finally {
     await local.owners.close();
   }
@@ -421,13 +439,13 @@ it("steers a Local reply into the same active parent run at its safe boundary", 
   }
 }, 60_000);
 
-it("lists the Agents one Local conversation created and sent work to, and no other conversation's", async () => {
+it("lists the Agents one Local conversation created and sent work to, shows a created Agent made by its creator, and shows no other conversation's", async () => {
   const parentContexts: Context[] = [];
   const spawnAndSend: FauxResponseStep = (context) => {
     parentContexts.push(structuredClone(context));
     return fauxAssistantMessage(
       fauxToolCall("execute", {
-        code: `async () => { const made = await agents.create({ requestId: "spawn-one" }); await agents.send({ agentId: ${JSON.stringify(ids.child)}, sessionId: "main", text: "Find the answer", delivery: "followUp" }); await agents.send({ agentId: ${JSON.stringify(ids.child)}, sessionId: "main", text: "And once more", delivery: "followUp" }); return made.agentId; }`,
+        code: `async () => { const made = await agents.create({ requestId: "spawn-one" }); await agents.send({ agentId: ${JSON.stringify(ids.child)}, sessionId: "main", requestId: "find-answer", text: "Find the answer", delivery: "followUp" }); await agents.send({ agentId: ${JSON.stringify(ids.child)}, sessionId: "main", requestId: "find-answer-again", text: "And once more", delivery: "followUp" }); return made.agentId; }`,
       }),
       { stopReason: "toolUse" },
     );
@@ -479,26 +497,243 @@ it("lists the Agents one Local conversation created and sent work to, and no oth
       "the parent's sub-agent rows",
     );
     const rows = Schema.decodeUnknownSync(SubagentsProjection)(listed);
+    // Roster ownership does not depend on opening its footer drawer.
+    expect(rows.expanded).toBe(false);
     // Two sends to one child stay one row; the created Agent is the other.
     expect(rows.more).toBe(0);
     expect(rows.agents).toHaveLength(2);
-    expect(rows.agents).toContainEqual({
-      agentId: ids.child,
-      name: ids.child,
+    const child = rows.agents.find((agent) => agent.agentId === ids.child);
+    expect({ sessionId: child?.sessionId, state: child?.state }).toEqual({
       sessionId: "main",
       state: "idle",
     });
-    expect(rows.agents.find((agent) => agent.sessionId === null)?.state).toBe(
-      "idle",
-    );
+    expect(child?.name).toMatch(/^[a-z]+-[a-z]+$/u);
+    const made = rows.agents.find((agent) => agent.sessionId === null);
+    expect(made?.state).toBe("idle");
+    // The Agent that ran the create is recorded as the creator, from its own host.
+    expect(
+      readPrivateLocalAgentProfile(
+        (await resolvePrivateLocalCreateStore(local.root, "spawn-one"))
+          .databasePath,
+      ).createdBy,
+    ).toBe(ids.parent);
     const elsewhere = await owner().createSession("elsewhere");
     await until(
       () => slot(elsewhere),
-      (value) => value !== undefined,
+      // The first read only starts the refresh; wait for its published rows.
+      (value) => value !== undefined && value !== null,
       "the other conversation's empty view",
     );
-    expect(await slot(elsewhere)).toEqual({ agents: [], more: 0 });
+    expect(await slot(elsewhere)).toEqual({
+      agents: [],
+      more: 0,
+      expanded: false,
+    });
   } finally {
+    await local.owners.close();
+  }
+}, 60_000);
+
+it("an Agent still waiting for delegated work reports it as pending until the child settles", async () => {
+  const parentContexts: Context[] = [];
+  const childStarted = Promise.withResolvers<undefined>();
+  const childRelease = Promise.withResolvers<undefined>();
+  const childStep: FauxResponseStep = async () => {
+    childStarted.resolve(undefined);
+    await childRelease.promise;
+    return fauxAssistantMessage("Child result", { stopReason: "stop" });
+  };
+  const local = await project(
+    [
+      delegate(parentContexts),
+      capture(parentContexts, "Delegated; waiting"),
+      capture(parentContexts, "Reply received"),
+    ],
+    [childStep],
+  );
+  try {
+    const parent = local.runtimes.get(ids.parent);
+    if (parent === undefined) throw new Error("parent runtime missing");
+    await expect(parent.pendingDelegation()).resolves.toBeUndefined();
+    await local.parent.session.send("Delegate this", {
+      requestId: "parent-prompt",
+    });
+    await childStarted.promise;
+    const waiting = await until(
+      () => parent.pendingDelegation(),
+      (pending) => pending !== undefined,
+      "the parent's pending delegation",
+    );
+    expect(waiting).toMatchObject({ agentId: ids.child, sessionId: "main" });
+    childRelease.resolve(undefined);
+    await until(
+      () => local.parent.session.read(),
+      (snapshot) =>
+        JSON.stringify(snapshot.messages).includes("Reply received"),
+      "the parent's reply turn",
+    );
+    await expect(parent.pendingDelegation()).resolves.toBeUndefined();
+  } finally {
+    await local.owners.close();
+  }
+});
+
+it("a created child sends followUp and steer back to its creator from delegated work", async ({
+  onTestFinished,
+}) => {
+  const home = await mkdtemp(join(tmpdir(), "fungi-peer-send-home-"));
+  temporaryDirectories.push(home);
+  const environment = {
+    HOME: home,
+    XDG_CONFIG_HOME: join(home, "config"),
+    XDG_DATA_HOME: join(home, "data"),
+    XDG_CACHE_HOME: join(home, "cache"),
+  };
+  onTestFinished(() => {
+    vi.unstubAllEnvs();
+  });
+  for (const [key, value] of Object.entries(environment))
+    vi.stubEnv(key, value);
+  const parentContexts: Context[] = [];
+  const childContexts: Context[] = [];
+  const callbacks = Promise.withResolvers<Context>();
+  const childCompletionReceived = Promise.withResolvers<undefined>();
+  const creatorCompletionReceived = Promise.withResolvers<undefined>();
+  const observeCreatorCompletion = (context: Context) => {
+    if (
+      !context.messages.some(
+        (message) =>
+          message.role === "user" &&
+          JSON.stringify(message.content).includes("Creator callback complete"),
+      )
+    )
+      return;
+    childContexts.push(structuredClone(context));
+    creatorCompletionReceived.resolve(undefined);
+  };
+  const creatorResponse: FauxResponseStep = (context) => {
+    parentContexts.push(structuredClone(context));
+    if (JSON.stringify(context.messages).includes("Child callbacks finished"))
+      childCompletionReceived.resolve(undefined);
+    return fauxAssistantMessage("Creator callback complete");
+  };
+  const local = await project(
+    [
+      () =>
+        fauxAssistantMessage(
+          fauxToolCall("execute", {
+            code: `async () => {
+              const child = await agents.create({ requestId: "creator-returner" });
+              const session = await agents.createSession({
+                agentId: child.agentId, requestId: "returner-session"
+              });
+              await agents.send({
+                agentId: child.agentId, sessionId: session.sessionId,
+                requestId: "creator-delegates-to-created-child",
+                text: "Send both callbacks to your creator", delivery: "followUp"
+              });
+              return child;
+            }`,
+          }),
+          { stopReason: "toolUse" },
+        ),
+      creatorResponse,
+      creatorResponse,
+      creatorResponse,
+      creatorResponse,
+    ],
+    [
+      () =>
+        fauxAssistantMessage(
+          fauxToolCall("execute", {
+            code: `async () => {
+              const followUp = await agents.send({
+                agentId: ${JSON.stringify(ids.parent)}, sessionId: "main",
+                requestId: "child-followup-to-creator",
+                text: "child-followUp-to-creator", delivery: "followUp"
+              });
+              const steer = await agents.send({
+                agentId: ${JSON.stringify(ids.parent)}, sessionId: "main",
+                requestId: "child-steer-to-creator",
+                text: "child-steer-to-creator", delivery: "steer"
+              });
+              return { followUp, steer };
+            }`,
+          }),
+          { stopReason: "toolUse" },
+        ),
+      (context) => {
+        // A verified reply steers the active run: it may already be visible
+        // in this post-tool turn, without requiring a later model call.
+        observeCreatorCompletion(context);
+        callbacks.resolve(structuredClone(context));
+        return fauxAssistantMessage("Child callbacks finished");
+      },
+      (context) => {
+        observeCreatorCompletion(context);
+        return fauxAssistantMessage("Creator response received");
+      },
+    ],
+  );
+  const watched = await local.parent.session.watch();
+  try {
+    await local.parent.session.send("Create a child and delegate work", {
+      requestId: "create-and-delegate",
+    });
+    const context = await callbacks.promise;
+    // A sandbox refusal is a failure, not successful admission. In particular,
+    // this catches the old ancestor-target refusal before waiting for receipt.
+    expect(
+      context.messages.findLast((message) => message.role === "toolResult"),
+    ).toMatchObject({ isError: false });
+    const arrived = (snapshot: Pick<SessionSnapshot, "messages">) => {
+      const lines = snapshot.messages
+        .filter(({ value }) => value.role === "user")
+        .map(({ value }) => JSON.stringify(value));
+      return ["child-followUp-to-creator", "child-steer-to-creator"].every(
+        (text) => lines.some((line) => line.includes(text)),
+      );
+    };
+    if (!arrived(watched.snapshot)) {
+      for await (const frame of watched.changes)
+        if (frame.kind === "update" && arrived(frame)) break;
+    }
+    // Observe the actual creator Session, not only the send receipts or the
+    // child's model transcript. Both callback deliveries must have arrived.
+    expect(arrived(await local.parent.session.read({ limit: 100 }))).toBe(true);
+    const child = await resolvePrivateLocalCreateStore(
+      local.root,
+      "creator-returner",
+    );
+    const followUp = userLines(
+      await local.parent.session.read({ limit: 100 }),
+    ).find((line) =>
+      JSON.stringify(line.value).includes("child-followUp-to-creator"),
+    );
+    expect(messageAuthor(followUp?.meta)?.id).toBe(child.agentId);
+    const created = parentContexts[0]?.messages.findLast(
+      (message) => message.role === "toolResult",
+    );
+    if (created?.role !== "toolResult")
+      throw new Error("Missing the creator's native create result");
+    const result = created.content.find((part) => part.type === "text");
+    if (result?.type !== "text")
+      throw new Error("Missing the native create result text");
+    expect(
+      z.object({ createdBy: z.string() }).parse(JSON.parse(result.text)),
+    ).toEqual({ createdBy: ids.parent });
+    // Both directions create real correspondence obligations. Let completion
+    // mail reach both models before teardown can close either SQLite owner.
+    await Promise.all([
+      childCompletionReceived.promise,
+      creatorCompletionReceived.promise,
+    ]);
+    expect(JSON.stringify(childContexts[0])).toContain(
+      "Creator callback complete",
+    );
+    expect(JSON.stringify(childContexts[0])).toContain("<fungi_agent_reply");
+  } finally {
+    await watched.close();
     await local.owners.close();
   }
 }, 60_000);

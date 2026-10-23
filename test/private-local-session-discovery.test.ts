@@ -19,13 +19,18 @@ import {
 } from "../../../packages/shiitake/src/internal/woodstock/session-store.js";
 import type { StoredSessionEntry } from "../../../packages/shiitake/src/internal/woodstock/session-entry.js";
 
-import { createLocalServiceOwners } from "../src/private-local-service-owner.js";
+import {
+  createLocalServiceOwners,
+  LocalAgentSelectionAmbiguous,
+} from "../src/private-local-service-owner.js";
 import type { ShiitakeSession } from "@fungi.computer/shiitake";
 import { createPrivateSqliteOwner } from "../src/private-sqlite-owner.js";
 import {
   projectPrivateLocalSessionDiscovery,
   readPrivateLocalSessionDiscovery,
+  unreadableStoreReason,
 } from "../src/private-local-session-discovery.js";
+import { sessionDiscoverySchema } from "../src/private-local-service-discovery.js";
 import { unusedExtensions } from "./fixtures/unused-extensions.js";
 import {
   fixtureEffectiveModel,
@@ -126,6 +131,42 @@ describe("private local session discovery", () => {
       "older prompt",
     ]);
     await expect(readFile(current)).resolves.toBeInstanceOf(Buffer);
+  });
+
+  it("shows a store written before the current schema as unreadable instead of hiding it", async () => {
+    const folder = await root();
+    const store = join(folder, ".fungi", "agents", "old");
+    await mkdir(store, { recursive: true });
+    createDatabase(join(store, "agent.sqlite"), "old prompt", 10);
+
+    const discovered = await discoverPrivateLocalSessions(
+      folder,
+      connectTestService,
+    );
+    expect(
+      discovered.agents.map(({ agentId, unreadable }) => ({
+        agentId,
+        unreadable,
+      })),
+    ).toEqual([{ agentId: "old", unreadable: unreadableStoreReason("old") }]);
+  });
+
+  it("sends an unreadable store across the service wire as its own visible row", async () => {
+    const folder = await root();
+    const store = join(folder, ".fungi", "agents", "old");
+    await mkdir(store, { recursive: true });
+    createDatabase(join(store, "agent.sqlite"), "old prompt", 10);
+
+    const sent: unknown = JSON.parse(
+      JSON.stringify(await readPrivateLocalSessionDiscovery(folder)),
+    );
+    const received = sessionDiscoverySchema.parse(sent);
+    expect(
+      received.agents.map(({ agentId, unreadable }) => ({
+        agentId,
+        unreadable,
+      })),
+    ).toEqual([{ agentId: "old", unreadable: unreadableStoreReason("old") }]);
   });
 
   it("lists every Session in one store and resumes its exact identity", async () => {
@@ -324,6 +365,7 @@ describe("Local startup selection", () => {
         createSession: () => Promise.resolve("fresh-session"),
         deleteSession: () => Promise.resolve(false),
         extensions: unusedExtensions,
+        name: "fake-agent",
         bindSessionPath: () => true,
         effectiveModel: fixtureEffectiveModel,
         ...fixtureModelControls,
@@ -363,14 +405,35 @@ describe("Local startup selection", () => {
       throw new Error("must not open an arbitrary Agent");
     });
     try {
-      await expect(owners.select({ invocationRoot: folder })).rejects.toThrow(
-        "Multiple Agent stores",
-      );
+      await expect(
+        owners.select({ invocationRoot: folder }),
+      ).rejects.toBeInstanceOf(LocalAgentSelectionAmbiguous);
       const discovery = await discoverPrivateLocalSessions(
         folder,
         connectTestService,
       );
-      expect(discovery.agentCount).toBe(2);
+      expect(
+        discovery.agents.toSorted((a, b) => a.agentId.localeCompare(b.agentId)),
+      ).toEqual([
+        {
+          agentId: "first",
+          databasePath: await realpath(
+            join(folder, ".fungi/agents/first/agent.sqlite"),
+          ),
+          sessionCount: 1,
+          updatedAt: 10,
+          unreadable: unreadableStoreReason("first"),
+        },
+        {
+          agentId: "second",
+          databasePath: await realpath(
+            join(folder, ".fungi/agents/second/agent.sqlite"),
+          ),
+          sessionCount: 1,
+          updatedAt: 10,
+          unreadable: unreadableStoreReason("second"),
+        },
+      ]);
     } finally {
       await owners.close();
     }

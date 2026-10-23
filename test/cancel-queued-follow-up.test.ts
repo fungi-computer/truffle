@@ -50,6 +50,7 @@ it.each(["followUp", "steer"] as const)(
           const first = acquisitions++ === 0;
           return Promise.resolve({
             model: faux.model,
+            retryable: () => false,
             stream: faux.stream,
             release: () => (first ? cleanup.promise : Promise.resolve()),
           });

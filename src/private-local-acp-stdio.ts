@@ -121,6 +121,7 @@ function localDirectory(
         {
           invocationRoot: input.cwd,
           databasePath,
+          uiAttachmentLifetime: "connection",
         },
         { signal: input.signal },
       );
@@ -130,6 +131,7 @@ function localDirectory(
             invocationRoot: input.cwd,
             databasePath: selected.databasePath,
             requestId: createPrivateLocalSessionRequestId(),
+            uiAttachmentLifetime: "connection",
           },
           { signal: input.signal },
         );
@@ -145,6 +147,7 @@ function localDirectory(
           invocationRoot: input.cwd,
           databasePath,
           sessionId: input.sessionId,
+          uiAttachmentLifetime: "connection",
         },
         { signal: input.signal },
       );

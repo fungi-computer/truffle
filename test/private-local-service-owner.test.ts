@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
+import { LocalExtensionError } from "../src/local-extensions.js";
 import {
   mkdir,
   mkdtemp,
+  readdir,
   realpath,
   readFile,
   rm,
@@ -9,32 +11,68 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import type { ShiitakeAgent, ShiitakeSession } from "@fungi.computer/shiitake";
 
-import type { AgentControlDirectory } from "@fungi.computer/shiitake/agent-control";
+import type { LocalAgentControlDirectory } from "../src/private-local-agent-control.js";
 
 import {
   createLocalServiceOwners,
   type OpenLocalServiceRuntime,
 } from "../src/private-local-service-owner.js";
+import {
+  LocalStoreSchemaError,
+  readPrivateLocalAgentProfile,
+} from "../src/private-local-session-discovery.js";
+import { writeFreshStore } from "./fixtures/fresh-store.js";
 import { resolvePrivateLocalCreateStore } from "../src/private-local-runtime-host.js";
 import { unusedExtensions } from "./fixtures/unused-extensions.js";
+import { LocalSandboxUnavailable } from "../src/private-local-containment.js";
 import {
   fixtureEffectiveModel,
   fixtureMailControls,
   fixtureModelControls,
 } from "./fixtures/effective-model.js";
 
-type LocalCreateDirectory = AgentControlDirectory &
-  Readonly<{
-    create: (
-      input: Readonly<{ requestId: string }>,
-      signal: AbortSignal,
-    ) => Promise<Readonly<{ agentId: string; name: string }>>;
-  }>;
-
 describe("persistent Local service owners", () => {
+  it("passes the requirement before opening can execute or recover affected work", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "fungi-required-open-")),
+    );
+    const databasePath = join(root, "agent.sqlite");
+    await writeFile(databasePath, "owned opener fixture");
+    let openedWithRequirement = false;
+    let recoveredWithoutRequirement = false;
+    const owners = createLocalServiceOwners((options) => {
+      openedWithRequirement = options.requireSandbox === true;
+      // Model an opener that begins recovery before resolving. A setter on
+      // the returned host would already be too late at this boundary.
+      if (options.requireSandbox !== true) recoveredWithoutRequirement = true;
+      return Promise.reject(
+        new LocalSandboxUnavailable({
+          kind: "missing",
+          message: "Owned missing-backend fixture",
+        }),
+      );
+    });
+    try {
+      await expect(
+        owners.select({
+          invocationRoot: root,
+          databasePath,
+          sessionId: "main",
+          requireSandbox: true,
+        }),
+      ).rejects.toBeInstanceOf(LocalSandboxUnavailable);
+      expect(openedWithRequirement).toBe(true);
+      expect(recoveredWithoutRequirement).toBe(false);
+    } finally {
+      await owners.close();
+      await rm(root, { recursive: true });
+    }
+  });
+
   it("keeps owners usable after a failed recovery write and saves on the next open", async () => {
     const root = await mkdtemp(
       join(tmpdir(), "fungi-service-recovery-failure-"),
@@ -42,7 +80,7 @@ describe("persistent Local service owners", () => {
     const databasePath = join(root, "agent.sqlite");
     const recoveryDirectory = join(root, "not-a-directory");
     await writeFile(databasePath, "fixture");
-    await writeFile(recoveryDirectory, "fixture");
+    await mkdir(recoveryDirectory);
     const closeFailure = new Error("Runtime has not drained");
     let opens = 0;
     const owners = createLocalServiceOwners((options) => {
@@ -60,11 +98,17 @@ describe("persistent Local service owners", () => {
         getSession: (sessionId: string) =>
           // SAFETY: This fixture observes only the Session address.
           ({ address: `session:${sessionId}` }) as ShiitakeSession,
+        name: "fake-agent",
         bindSessionPath: () => true,
         close: () => Promise.reject(closeFailure),
       });
     }, recoveryDirectory);
     try {
+      // Confirm initial absence before obstructing writes. An initial read
+      // failure instead disables persistence for this service's lifetime.
+      await owners.restore();
+      await rm(recoveryDirectory, { recursive: true });
+      await writeFile(recoveryDirectory, "fixture");
       const selection = {
         invocationRoot: root,
         databasePath,
@@ -120,6 +164,7 @@ describe("persistent Local service owners", () => {
         getSession: (sessionId: string) =>
           // SAFETY: This fixture observes only the Session address.
           ({ address: `session:${sessionId}` }) as ShiitakeSession,
+        name: "fake-agent",
         bindSessionPath: (sessionId: string, path: string) => {
           const previous = paths.get(sessionId);
           if (previous !== undefined && previous !== path) return false;
@@ -167,9 +212,16 @@ describe("persistent Local service owners", () => {
     const root = await realpath(
       await mkdtemp(join(tmpdir(), "fungi-service-agent-create-failure-")),
     );
-    const creator = join(root, "creator.sqlite");
-    await writeFile(creator, "fixture");
-    let directory: AgentControlDirectory | undefined;
+    const creator = join(
+      root,
+      ".fungi",
+      "agents",
+      "local_store_creator",
+      "agent.sqlite",
+    );
+    await mkdir(dirname(creator), { recursive: true });
+    writeFreshStore(creator, null);
+    let directory: LocalAgentControlDirectory | undefined;
     const owners = createLocalServiceOwners((options) => {
       if (options.agentControl !== undefined)
         directory ??= options.agentControl;
@@ -184,6 +236,7 @@ describe("persistent Local service owners", () => {
         createSession: () => Promise.resolve("unused"),
         deleteSession: () => Promise.resolve(false),
         extensions: unusedExtensions,
+        name: "fake-agent",
         bindSessionPath: () => true,
         effectiveModel: fixtureEffectiveModel,
         ...fixtureModelControls,
@@ -202,13 +255,16 @@ describe("persistent Local service owners", () => {
       });
       if (directory === undefined) throw new Error("Local directory missing");
       const activeDirectory = directory;
-      if (activeDirectory.create === undefined)
-        throw new Error("Local Agent creation is unavailable");
       const signal = new AbortController().signal;
       await expect(
-        activeDirectory.create({ requestId: "invalid-owner" }, signal),
+        activeDirectory.create(
+          { requestId: "invalid-owner", createdBy: "local_store_creator" },
+          signal,
+        ),
       ).rejects.toThrow("Local model configuration is invalid");
-      expect(await activeDirectory.list(signal)).toEqual([]);
+      expect(
+        (await activeDirectory.list(signal)).map(({ agentId }) => agentId),
+      ).toEqual(["local_store_creator"]);
     } finally {
       await owners.close();
       await rm(root, { recursive: true, force: true });
@@ -221,6 +277,7 @@ describe("persistent Local service owners", () => {
         typeof fixtureMailControls & {
           databasePath: string;
           agentId: string;
+          name: string;
           getSession: (sessionId: string) => ShiitakeSession;
           bindSessionPath: (sessionId: string, path: string) => boolean;
           listSessions: ShiitakeAgent["listSessions"];
@@ -247,6 +304,7 @@ describe("persistent Local service owners", () => {
       createSession: () => Promise.resolve("fresh-session"),
       deleteSession: () => Promise.resolve(false),
       extensions: unusedExtensions,
+      name: "fake-agent",
       bindSessionPath: () => true,
       effectiveModel: fixtureEffectiveModel,
       ...fixtureModelControls,
@@ -289,6 +347,7 @@ describe("persistent Local service owners", () => {
         createSession: () => Promise.resolve("new-session"),
         deleteSession: () => Promise.resolve(false),
         extensions: unusedExtensions,
+        name: "fake-agent",
         bindSessionPath: () => true,
         effectiveModel: fixtureEffectiveModel,
         ...fixtureModelControls,
@@ -389,6 +448,7 @@ describe("persistent Local service owners", () => {
         createSession: () => Promise.resolve("fresh-session"),
         deleteSession: () => Promise.resolve(false),
         extensions: unusedExtensions,
+        name: "fake-agent",
         bindSessionPath: () => true,
         effectiveModel: fixtureEffectiveModel,
         ...fixtureModelControls,
@@ -423,6 +483,7 @@ describe("persistent Local service owners", () => {
         typeof fixtureMailControls & {
           databasePath: string;
           agentId: string;
+          name: string;
           getSession: (sessionId: string) => ShiitakeSession;
           bindSessionPath: (sessionId: string, path: string) => boolean;
           listSessions: ShiitakeAgent["listSessions"];
@@ -454,6 +515,7 @@ describe("persistent Local service owners", () => {
       createSession: () => Promise.resolve("fresh-session"),
       deleteSession: () => Promise.resolve(false),
       extensions: unusedExtensions,
+      name: "fake-agent",
       bindSessionPath: () => true,
       effectiveModel: fixtureEffectiveModel,
       ...fixtureModelControls,
@@ -484,6 +546,7 @@ describe("persistent Local service owners", () => {
         createSession: () => Promise.resolve("fresh-session"),
         deleteSession: () => Promise.resolve(false),
         extensions: unusedExtensions,
+        name: "fake-agent",
         bindSessionPath: () => true,
         effectiveModel: fixtureEffectiveModel,
         ...fixtureModelControls,
@@ -522,6 +585,7 @@ describe("persistent Local service owners", () => {
           Promise.resolve(`owner-session-${String(++creations)}`),
         deleteSession: () => Promise.resolve(false),
         extensions: unusedExtensions,
+        name: "fake-agent",
         bindSessionPath: () => true,
         effectiveModel: fixtureEffectiveModel,
         ...fixtureModelControls,
@@ -560,11 +624,19 @@ describe("persistent Local service owners", () => {
     const root = await realpath(
       await mkdtemp(join(tmpdir(), "fungi-service-agent-create-")),
     );
-    const creatorDatabasePath = join(root, "creator.sqlite");
-    await writeFile(creatorDatabasePath, "fixture");
+    const creatorDatabasePath = join(
+      root,
+      ".fungi",
+      "agents",
+      "local_store_creator",
+      "agent.sqlite",
+    );
+    await mkdir(dirname(creatorDatabasePath), { recursive: true });
+    writeFreshStore(creatorDatabasePath, null);
+    const creator = "local_store_creator";
     const openedPaths: string[] = [];
-    let directory: LocalCreateDirectory | undefined;
-    const requireDirectory = (): LocalCreateDirectory => {
+    let directory: LocalAgentControlDirectory | undefined;
+    const requireDirectory = (): LocalAgentControlDirectory => {
       const current = directory;
       if (current === undefined)
         throw new Error("Local directory not supplied");
@@ -572,8 +644,7 @@ describe("persistent Local service owners", () => {
     };
     const openRuntime: OpenLocalServiceRuntime = async (options) => {
       if (options.agentControl !== undefined)
-        // SAFETY: This fixture supplies the service's Agent-create directory and exercises its required create method.
-        directory ??= options.agentControl as LocalCreateDirectory;
+        directory ??= options.agentControl;
       const databasePath =
         options.createRequestId === undefined
           ? (options.databasePath ?? join(root, "default.sqlite"))
@@ -595,6 +666,7 @@ describe("persistent Local service owners", () => {
         createSession: () => Promise.resolve("unused"),
         deleteSession: () => Promise.resolve(false),
         extensions: unusedExtensions,
+        name: "fake-agent",
         bindSessionPath: () => true,
         effectiveModel: fixtureEffectiveModel,
         ...fixtureModelControls,
@@ -618,8 +690,14 @@ describe("persistent Local service owners", () => {
         throw new Error("Local directory not supplied");
 
       const [first, concurrentRetry] = await Promise.all([
-        directory.create({ requestId: "request-one" }, signal),
-        directory.create({ requestId: "request-one" }, signal),
+        directory.create(
+          { requestId: "request-one", createdBy: creator },
+          signal,
+        ),
+        directory.create(
+          { requestId: "request-one", createdBy: creator },
+          signal,
+        ),
       ]);
       expect(first).toEqual(concurrentRetry);
       expect(first.agentId).toBe(
@@ -638,11 +716,17 @@ describe("persistent Local service owners", () => {
       const opened = await restartedDirectory.open(first.agentId, signal);
       await opened.release();
       await expect(
-        restartedDirectory.create({ requestId: "request-one" }, signal),
+        restartedDirectory.create(
+          { requestId: "request-one", createdBy: creator },
+          signal,
+        ),
       ).resolves.toEqual(first);
       expect(openedPaths).toHaveLength(4);
       await expect(
-        restartedDirectory.create({ requestId: "request-two" }, signal),
+        restartedDirectory.create(
+          { requestId: "request-two", createdBy: creator },
+          signal,
+        ),
       ).resolves.not.toEqual(first);
       expect(openedPaths).toHaveLength(5);
       expect(openedPaths[1]).toBe(openedPaths[3]);
@@ -651,7 +735,11 @@ describe("persistent Local service owners", () => {
         new Set(
           openedPaths
             .slice(1)
-            .filter((path) => path.includes("/.fungi/agents/")),
+            .filter(
+              (path) =>
+                path.includes("/.fungi/agents/") &&
+                path !== creatorDatabasePath,
+            ),
         ),
       ).toHaveProperty("size", 2);
     } finally {
@@ -677,13 +765,11 @@ it("scopes Agent control to project stores and retains service ownership", async
     mkdir(join(stores, "local_store_peer"), { recursive: true }),
     mkdir(foreign),
   ]);
-  await Promise.all([
-    writeFile(own, "fixture"),
-    writeFile(peer, "fixture"),
-    writeFile(join(foreign, "agent.sqlite"), "fixture"),
-  ]);
+  writeFreshStore(own, "owner agent");
+  writeFreshStore(peer, null);
+  await writeFile(join(foreign, "agent.sqlite"), "fixture");
   await symlink(foreign, join(stores, "foreign"));
-  let directory: AgentControlDirectory | undefined;
+  let directory: LocalAgentControlDirectory | undefined;
   let foreignHasControl = false;
   let opens = 0;
   let closes = 0;
@@ -704,6 +790,7 @@ it("scopes Agent control to project stores and retains service ownership", async
       createSession: () => Promise.resolve("unused"),
       deleteSession: () => Promise.resolve(false),
       extensions: unusedExtensions,
+      name: "fake-agent",
       bindSessionPath: () => true,
       effectiveModel: fixtureEffectiveModel,
       ...fixtureModelControls,
@@ -729,6 +816,17 @@ it("scopes Agent control to project stores and retains service ownership", async
     expect(
       (await directory.list(signal)).map((entry) => entry.agentId).sort(),
     ).toEqual(["local_store_owner", "local_store_peer"]);
+    expect(
+      (await directory.list(signal)).map(({ agentId, name }) => ({
+        agentId,
+        name,
+      })),
+    ).toEqual(
+      expect.arrayContaining([
+        { agentId: "local_store_owner", name: "owner agent" },
+        { agentId: "local_store_peer", name: "local_store_peer" },
+      ]),
+    );
     await expect(directory.open("local_store_foreign", signal)).rejects.toThrow(
       "outside this Local project",
     );
@@ -765,7 +863,7 @@ it("scopes Agent control to project stores and retains service ownership", async
 });
 
 it.each(["corrupt", "mixed"])(
-  "restores usable owners and prunes %s recovery references",
+  "handles %s recovery input without blocking usable Agents",
   async (kind) => {
     const root = await mkdtemp(join(tmpdir(), "fungi-service-restore-"));
     const good = join(root, "good.sqlite");
@@ -812,9 +910,12 @@ it.each(["corrupt", "mixed"])(
         effectiveModel: fixtureEffectiveModel,
         ...fixtureModelControls,
         ...fixtureMailControls,
+        // It holds work, so shutdown keeps its reference for the next start.
+        idle: () => Promise.resolve(false),
         getSession: (sessionId) =>
           // SAFETY: This fixture observes only the Session address.
           ({ address: `session:${sessionId}` }) as ShiitakeSession,
+        name: "fake-agent",
         bindSessionPath: () => true,
         close: () => {
           closed.push(databasePath);
@@ -830,25 +931,358 @@ it.each(["corrupt", "mixed"])(
       await owners.restore();
       expect(opened).toEqual(kind === "corrupt" ? [] : [good]);
       expect(logged).toHaveBeenCalled();
-      expect(JSON.parse(await readFile(recoveryPath, "utf8"))).toEqual(
-        kind === "corrupt" ? [] : [reference],
-      );
-      // A later client can still select, and the next service startup is clean.
+      if (kind === "corrupt")
+        expect(await readFile(recoveryPath, "utf8")).toBe("{invalid");
+      else
+        expect(JSON.parse(await readFile(recoveryPath, "utf8"))).toEqual([
+          reference,
+        ]);
+      // A later client can still select even when persistence is disabled.
       expect(
         (await owners.select({ ...reference, sessionId: "main" })).databasePath,
       ).toBe(good);
       expect(opened).toEqual([good]);
       await owners.close();
+      if (kind === "corrupt")
+        expect(await readFile(recoveryPath, "utf8")).toBe("{invalid");
       owners = createLocalServiceOwners(openRuntime, root);
       logged.mockClear();
       await owners.restore();
-      expect(opened).toEqual([good, good]);
-      expect(logged).not.toHaveBeenCalled();
+      expect(opened).toEqual(kind === "corrupt" ? [good] : [good, good]);
+      if (kind === "corrupt") expect(logged).toHaveBeenCalled();
+      else expect(logged).not.toHaveBeenCalled();
     } finally {
       await owners.close();
       logged.mockRestore();
       await rm(root, { recursive: true, force: true });
     }
-    expect(closed).toEqual([good, good]);
+    expect(closed).toEqual(kind === "corrupt" ? [good] : [good, good]);
   },
 );
+
+it("names the incompatible store instead of listing it by id", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "fungi-agent-legacy-")),
+  );
+  const path = join(
+    root,
+    ".fungi",
+    "agents",
+    "local_store_old",
+    "agent.sqlite",
+  );
+  try {
+    await mkdir(dirname(path), { recursive: true });
+    const database = new DatabaseSync(path);
+    try {
+      database.exec(
+        "CREATE TABLE private_local_identity (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), agent_id TEXT NOT NULL UNIQUE)",
+      );
+    } finally {
+      database.close();
+    }
+    expect(() => readPrivateLocalAgentProfile(path)).toThrow(
+      LocalStoreSchemaError,
+    );
+    expect(() => readPrivateLocalAgentProfile(path)).toThrow(
+      `Agent store ${path} is incompatible with this version of Fungi.`,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/** A Session that answers only its address; these proofs never read it. */
+function agentControlSession(sessionId: string): ShiitakeSession {
+  const unused = (): Promise<never> =>
+    Promise.reject(new Error("unused in the Agent-control proofs"));
+  return {
+    address: `session:${sessionId}`,
+    latestPending: unused,
+    withdraw: unused,
+    read: unused,
+    command: unused,
+    send: unused,
+    cancel: unused,
+    extension: () => ({ call: unused }),
+    modelPreference: {
+      read: () => Promise.resolve(null),
+      set: () => Promise.resolve(),
+    },
+    subscribe: () => {
+      throw new Error("unused in the Agent-control proofs");
+    },
+    watch: unused,
+    abort: () => Promise.resolve(),
+  };
+}
+
+describe("an Agent creating an Agent", () => {
+  const creator = "local_store_creator";
+
+  /** A project with one existing creator Agent and a fake owner of what each Agent (by id) holds. */
+  async function project(held: Readonly<Record<string, readonly string[]>>) {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "fungi-service-agent-ceiling-")),
+    );
+    const creatorStore = join(root, ".fungi", "agents", creator);
+    await mkdir(creatorStore, { recursive: true });
+    writeFreshStore(join(creatorStore, "agent.sqlite"), "maker");
+    const opened: Parameters<OpenLocalServiceRuntime>[0][] = [];
+    const enabled: {
+      store: string;
+      id: string;
+      requester: string | undefined;
+    }[] = [];
+    let directory: LocalAgentControlDirectory | undefined;
+    const owners = createLocalServiceOwners(
+      async (options) => {
+        opened.push(options);
+        if (options.agentControl !== undefined)
+          directory ??= options.agentControl;
+        return {
+          databasePath:
+            options.databasePath ??
+            (
+              await resolvePrivateLocalCreateStore(
+                root,
+                options.createRequestId ?? "unused",
+              )
+            ).databasePath,
+          agentId: "fixture-agent",
+          listSessions: () =>
+            Promise.resolve({ sessions: [], next: undefined }),
+          createSession: () => Promise.resolve("unused"),
+          deleteSession: () => Promise.resolve(false),
+          extensions: unusedExtensions,
+          name: "fake-agent",
+          bindSessionPath: () => true,
+          effectiveModel: fixtureEffectiveModel,
+          ...fixtureModelControls,
+          ...fixtureMailControls,
+          getSession: (sessionId: string): ShiitakeSession =>
+            agentControlSession(sessionId),
+          close: () => Promise.resolve(),
+        };
+      },
+      undefined,
+      {
+        assertHeldByAgent: (store, ids) => {
+          const holds = held[basename(store)] ?? [];
+          const missing = ids.filter((id) => !holds.includes(id));
+          return missing.length === 0
+            ? Promise.resolve()
+            : Promise.reject(
+                new LocalExtensionError(
+                  "not-held",
+                  `does not hold ${missing.join(", ")}`,
+                ),
+              );
+        },
+        enableAgent: (store, id, requester) => {
+          enabled.push({
+            store,
+            id,
+            requester: requester?.agentStoreDirectory,
+          });
+          return Promise.resolve({
+            revision: "r1",
+            capabilities: [],
+            skills: false,
+          });
+        },
+      },
+    );
+    await owners.select({
+      invocationRoot: root,
+      databasePath: join(creatorStore, "agent.sqlite"),
+      sessionId: "main",
+    });
+    if (directory === undefined) throw new Error("Local directory missing");
+    return { root, creatorStore, opened, enabled, directory, owners };
+  }
+
+  it("gives an Agent no more permissions than its maker: asking for what the creator lacks is refused and creates nothing", async () => {
+    const local = await project({});
+    try {
+      await expect(
+        local.directory.create(
+          {
+            requestId: "too-much",
+            createdBy: creator,
+            extensions: ["counter"],
+          },
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({
+        name: "AgentCreateRefused",
+        reason: "exceeds_creator",
+      });
+      await expect(
+        local.directory.create(
+          {
+            requestId: "too-much",
+            createdBy: creator,
+            extensions: ["counter"],
+          },
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow(/does not hold counter/u);
+      expect(local.enabled).toEqual([]);
+      expect(
+        local.opened.filter(({ createRequestId }) => createRequestId),
+      ).toEqual([]);
+      expect(await readdir(join(local.root, ".fungi", "agents"))).toEqual([
+        creator,
+      ]);
+    } finally {
+      await local.owners.close();
+      await rm(local.root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses the whole request when only some of the extensions are held", async () => {
+    const local = await project({ [creator]: ["held"] });
+    try {
+      await expect(
+        local.directory.create(
+          {
+            requestId: "partial",
+            createdBy: creator,
+            extensions: ["held", "lacking"],
+          },
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({ reason: "exceeds_creator" });
+      expect(local.enabled).toEqual([]);
+    } finally {
+      await local.owners.close();
+      await rm(local.root, { recursive: true, force: true });
+    }
+  });
+
+  it("lets an Agent pass down an extension it holds, records its creator, and copies nothing else", async () => {
+    const local = await project({ [creator]: ["counter", "notes"] });
+    try {
+      const made = await local.directory.create(
+        { requestId: "pass-down", createdBy: creator, extensions: ["counter"] },
+        new AbortController().signal,
+      );
+      const childStore = dirname(
+        (await resolvePrivateLocalCreateStore(local.root, "pass-down"))
+          .databasePath,
+      );
+      expect(made.agentId).toBe(childStore.split("/").at(-1));
+      expect(local.enabled).toEqual([
+        {
+          store: childStore,
+          id: "counter",
+          requester: local.creatorStore,
+        },
+      ]);
+      expect(
+        local.opened.find(({ createRequestId }) => createRequestId)?.createdBy,
+      ).toBe(creator);
+    } finally {
+      await local.owners.close();
+      await rm(local.root, { recursive: true, force: true });
+    }
+  });
+
+  it("starts a created Agent with the base roster only when no extensions are named", async () => {
+    const local = await project({});
+    try {
+      await local.directory.create(
+        { requestId: "floor", createdBy: creator },
+        new AbortController().signal,
+      );
+      expect(local.enabled).toEqual([]);
+    } finally {
+      await local.owners.close();
+      await rm(local.root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a create whose creating Agent is not in the project", async () => {
+    const local = await project({});
+    try {
+      await expect(
+        local.directory.create(
+          { requestId: "orphan", createdBy: "local_store_stranger" },
+          new AbortController().signal,
+        ),
+      ).rejects.toMatchObject({ reason: "no_creator" });
+      expect(
+        local.opened.filter(({ createRequestId }) => createRequestId),
+      ).toEqual([]);
+    } finally {
+      await local.owners.close();
+      await rm(local.root, { recursive: true, force: true });
+    }
+  });
+
+  it("lists who created an Agent, and nothing for an Agent a human made", async () => {
+    const local = await project({});
+    try {
+      const madeStore = join(
+        local.root,
+        ".fungi",
+        "agents",
+        "local_store_fixer",
+      );
+      await mkdir(madeStore, { recursive: true });
+      writeFreshStore(join(madeStore, "agent.sqlite"), "fixer", creator);
+      const listed = await local.directory.list(new AbortController().signal);
+      expect(
+        listed
+          .map(({ agentId, createdBy }) => ({ agentId, createdBy }))
+          .sort((a, b) => a.agentId.localeCompare(b.agentId)),
+      ).toEqual([
+        { agentId: creator, createdBy: null },
+        { agentId: "local_store_fixer", createdBy: creator },
+      ]);
+    } finally {
+      await local.owners.close();
+      await rm(local.root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails only the row of a store written before the current schema; the other Agents still list", async () => {
+    const local = await project({});
+    try {
+      const madeStore = join(
+        local.root,
+        ".fungi",
+        "agents",
+        "local_store_fixer",
+      );
+      await mkdir(madeStore, { recursive: true });
+      writeFreshStore(join(madeStore, "agent.sqlite"), "fixer", creator);
+      const oldStore = join(local.root, ".fungi", "agents", "local_store_old");
+      await mkdir(oldStore, { recursive: true });
+      new DatabaseSync(join(oldStore, "agent.sqlite")).close();
+      const log = vi.spyOn(globalThis.console, "error").mockReturnValue();
+      try {
+        const listed = await local.directory.list(new AbortController().signal);
+        expect(
+          listed
+            .map(({ agentId, unreadable }) => ({
+              agentId,
+              unreadable: unreadable !== undefined,
+            }))
+            .sort((a, b) => a.agentId.localeCompare(b.agentId)),
+        ).toEqual([
+          { agentId: creator, unreadable: false },
+          { agentId: "local_store_fixer", unreadable: false },
+          { agentId: "local_store_old", unreadable: true },
+        ]);
+        expect(log).toHaveBeenCalledTimes(1);
+      } finally {
+        log.mockRestore();
+      }
+    } finally {
+      await local.owners.close();
+      await rm(local.root, { recursive: true, force: true });
+    }
+  });
+});

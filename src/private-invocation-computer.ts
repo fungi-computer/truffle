@@ -1,5 +1,4 @@
 import { realpath } from "node:fs/promises";
-import { homedir } from "node:os";
 import { relative, resolve, sep } from "node:path";
 import process from "node:process";
 import * as ChildProcess from "effect/process/ChildProcess";
@@ -35,8 +34,20 @@ import {
   launchStdinSchema,
   maximumLaunchTextLength,
 } from "./private-local-exec-launch.js";
+import { privateLocalExecEnvironment } from "./private-local-exec-environment.js";
+import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
+import type { SandboxCommand } from "./private-local-containment.js";
+
+/** The host admits each launch; undefined is its explicit unavailable fallback. */
+export type LocalSandboxLaunch = (
+  cwd: string,
+  argv: readonly [string, ...string[]],
+) => SandboxCommand | undefined;
 
 const maximumStreamBytes = 64 * 1_024;
+/** Room inside the stream cap for the visible truncation marker. */
+const truncationMarkerReserveBytes = 256;
+const keptStreamBytes = maximumStreamBytes - truncationMarkerReserveBytes;
 const defaultCommandTimeoutMs = 180_000;
 /**
  * Keep in sync with the invocation deadline `private-local-runtime-host.ts`
@@ -101,11 +112,16 @@ const directRunInput = z
  * branch and the union is refused.
  */
 const execInput = z.union([shellRunInput, directRunInput]);
+const execTruncation = z.strictObject({
+  stream: z.enum(["stdout", "stderr"]),
+  keptBytes: z.number().int().nonnegative(),
+  totalBytes: z.number().int().positive(),
+});
 const commandOutputFields = {
   exitCode: z.number().int(),
   stdout: z.string(),
   stderr: z.string(),
-  truncated: z.boolean(),
+  truncated: z.union([z.literal(false), z.array(execTruncation).min(1)]),
 };
 const execOutput = z.discriminatedUnion("status", [
   z.strictObject({
@@ -132,15 +148,16 @@ function computerCapabilities(
       id: "exec",
       name: "exec",
       kind: "runtime",
-      // Kept terse: a long-rooted project (real test case: a nested nearly
-      // 200-byte root) plus this text must stay under Mycelium's 1000-char
-      // operation-description bound. Do not restate the full contract here;
-      // the JSON Schema parameters carry the exact shape.
-      description: `Shell, terminal, git, builds and checks. Computer root: ${root}. cwd must be absolute and remain inside this root; omission starts at the root. ~/$HOME use home. Or {executable,args}; stdin once, closed. exec stops its group, including nohup. timeoutMs default ${String(defaultCommandTimeoutMs)}, max ${String(maximumCommandTimeoutMs)} ms; invocation ${String(invocationDeadlineMs)} ms. Deadline returns partial output.${processes === undefined ? "" : ' Background start takes command or executable+args; {operation:"start",command} returns process.id; poll/wait: state, exitCode, output tail. wait <=60000 ms (default 10000); timedOut means wait expired. Cancelling wait keeps jobs alive. maxBytes <=64 KiB with offset/nextOffset; retain last 8 MiB (logStartOffset). kill stops group; list shows Session jobs. Delete/close stop jobs; restart drops IDs. Use wait, not sleep.'}`,
+      // A filesystem path has no place in the bounded discovery summary.
+      // Publish the exact root in the input schema, without truncating it.
+      description: `Shell, terminal, git, builds. cwd uses the root in the input schema. ~/$HOME use home. Or {executable,args}; stdin once, closed. exec kills its group at call end; nohup/& die. timeoutMs default ${String(defaultCommandTimeoutMs)}, max ${String(maximumCommandTimeoutMs)} ms; invocation ${String(invocationDeadlineMs)} ms; deadline returns partial output. Streams keep 64 KiB, then a [stdout|stderr truncated] line; redirect to a file or head/tail.${processes === undefined ? "" : ' Jobs: {operation:"start",command} or executable+args returns process.id; poll/wait: state, exitCode, tail. wait <=60000 ms; timedOut: wait expired. Cancelled wait keeps jobs. maxBytes <=64 KiB, offset/nextOffset; keeps last 8 MiB (logStartOffset). kill stops group; list: Session jobs. Delete/close stop jobs. Use wait, not sleep.'}`,
       parameters: structuredClone(
-        z.toJSONSchema(processes === undefined ? execInput : shellInput, {
-          io: "input",
-        }),
+        z.toJSONSchema(
+          (processes === undefined ? execInput : shellInput).describe(
+            `Computer root: ${root}. cwd must be absolute and remain inside this root; omission starts at the root.`,
+          ),
+          { io: "input" },
+        ),
       ),
       output: structuredClone(
         z.toJSONSchema(processes === undefined ? execOutput : shellOutput),
@@ -171,7 +188,7 @@ function commandTimeoutMessage(input: {
 type BoundedOutput = Readonly<{
   chunks: readonly Uint8Array[];
   byteLength: number;
-  truncated: boolean;
+  totalBytes: number;
 }>;
 export type ExecOutput = z.output<typeof execOutput>;
 
@@ -356,47 +373,68 @@ function nativeGroupFinalizer(process: ChildProcessSpawner.ChildProcessHandle) {
 }
 
 function captureBoundedOutput<E, R>(stream: Stream.Stream<Uint8Array, E, R>) {
-  const initial: BoundedOutput = {
-    chunks: [],
-    byteLength: 0,
-    truncated: false,
-  };
+  const initial: BoundedOutput = { chunks: [], byteLength: 0, totalBytes: 0 };
   return Stream.runFold(
     stream,
     () => initial,
     (captured, chunk) => {
-      if (captured.truncated) return captured;
-      const remaining = maximumStreamBytes - captured.byteLength;
-      if (chunk.byteLength <= remaining) {
-        return {
-          chunks: [...captured.chunks, chunk],
-          byteLength: captured.byteLength + chunk.byteLength,
-          truncated: false,
-        };
-      }
+      const remaining = keptStreamBytes - captured.byteLength;
+      const totalBytes = captured.totalBytes + chunk.byteLength;
+      if (remaining <= 0) return { ...captured, totalBytes };
+      const kept =
+        chunk.byteLength <= remaining ? chunk : chunk.slice(0, remaining);
       return {
-        chunks:
-          remaining === 0
-            ? captured.chunks
-            : [...captured.chunks, chunk.slice(0, remaining)],
-        byteLength: maximumStreamBytes,
-        truncated: true,
+        chunks: [...captured.chunks, kept],
+        byteLength: captured.byteLength + kept.byteLength,
+        totalBytes,
       };
     },
   );
 }
 
-function textOutput(captured: BoundedOutput) {
+/** Length of the longest prefix that does not end inside a UTF-8 character. */
+function completeUtf8Length(bytes: Uint8Array) {
+  let start = bytes.byteLength;
+  while (start > 0 && ((bytes[start - 1] ?? 0) & 0xc0) === 0x80) start -= 1;
+  if (start === 0) return 0;
+  const lead = bytes[start - 1] ?? 0;
+  const width = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+  return start - 1 + width <= bytes.byteLength ? bytes.byteLength : start - 1;
+}
+
+function kibibytes(bytes: number) {
+  return `${(bytes / 1_024).toFixed(1)} KiB`;
+}
+
+function textOutput(captured: BoundedOutput, stream: "stdout" | "stderr") {
   const bytes = new Uint8Array(captured.byteLength);
   let offset = 0;
   for (const chunk of captured.chunks) {
     bytes.set(chunk, offset);
     offset += chunk.byteLength;
   }
+  if (captured.totalBytes <= captured.byteLength) {
+    return { text: new TextDecoder().decode(bytes), truncation: [] };
+  }
+  const keptBytes = completeUtf8Length(bytes);
+  const text = new TextDecoder().decode(bytes.subarray(0, keptBytes));
   return {
-    text: new TextDecoder().decode(bytes),
-    truncated: captured.truncated,
+    text: `${text}\n[fungi: ${stream} truncated: ${kibibytes(keptBytes)} of ${kibibytes(captured.totalBytes)} shown; redirect to a file or use head/tail]`,
+    truncation: [
+      {
+        stream,
+        keptBytes,
+        totalBytes: captured.totalBytes,
+      },
+    ],
   };
+}
+
+function truncationReport(
+  ...parts: readonly (readonly z.output<typeof execTruncation>[])[]
+) {
+  const all = parts.flat();
+  return all.length === 0 ? (false as const) : all;
 }
 
 function commandResult(
@@ -404,14 +442,17 @@ function commandResult(
   stdout: BoundedOutput,
   stderr: BoundedOutput,
 ): ExecOutput {
-  const standardOutput = textOutput(stdout);
-  const standardError = textOutput(stderr);
+  const standardOutput = textOutput(stdout, "stdout");
+  const standardError = textOutput(stderr, "stderr");
   return {
     status: exitCode === 0 ? "completed" : "failed",
     exitCode,
     stdout: standardOutput.text,
     stderr: standardError.text,
-    truncated: standardOutput.truncated || standardError.truncated,
+    truncated: truncationReport(
+      standardOutput.truncation,
+      standardError.truncation,
+    ),
   };
 }
 
@@ -438,8 +479,14 @@ function buildRunCommand(
   request: z.output<typeof execInput>,
   cwd: string,
   executionPath: string,
+  home: string,
+  sandbox?: LocalSandboxLaunch,
 ): ChildProcess.Command {
-  const env = { PATH: executionPath, HOME: process.env.HOME ?? homedir() };
+  const env = privateLocalExecEnvironment(executionPath, {
+    HOME: home,
+    XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+    DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS,
+  });
   // Effect's own default stdin is an open "pipe" that nothing closes, so an
   // executable that reads stdin (`cat`, `python3 -`) would otherwise hang
   // for the full timeout. "ignore" gives it immediate EOF, matching the
@@ -448,19 +495,33 @@ function buildRunCommand(
     request.stdin === undefined
       ? "ignore"
       : Stream.make(new TextEncoder().encode(request.stdin));
-  return "command" in request
-    ? ChildProcess.make("sh", ["-c", request.command], {
-        cwd,
-        env,
-        extendEnv: false,
-        stdin,
-      })
-    : ChildProcess.make(request.executable, request.args, {
-        cwd,
-        env,
-        extendEnv: false,
-        stdin,
-      });
+  const argv: [string, ...string[]] =
+    "command" in request
+      ? ["sh", "-c", request.command]
+      : [request.executable, ...request.args];
+  // Admission happens before spawn and is never retried after an executable
+  // may have run. Folder validity and requireSandbox belong to the host.
+  const launch = sandbox?.(cwd, argv);
+  if (launch !== undefined) {
+    delete env.XDG_RUNTIME_DIR;
+    delete env.DBUS_SESSION_BUS_ADDRESS;
+  }
+  return ChildProcess.make(
+    launch?.executable ?? argv[0],
+    launch?.args ?? argv.slice(1),
+    {
+      cwd,
+      env: { ...env, ...launch?.environment },
+      extendEnv: false,
+      stdin,
+      additionalFds:
+        launch?.seccompFilter === undefined
+          ? undefined
+          : {
+              fd3: { type: "input", stream: Stream.make(launch.seccompFilter) },
+            },
+    },
+  );
 }
 
 /**
@@ -482,9 +543,17 @@ async function runCommandAtInvocationBoundary(
   request: z.output<typeof execInput>,
   cwd: string,
   executionPath: string,
+  home: string,
   signal: AbortSignal,
+  sandbox?: LocalSandboxLaunch,
 ): Promise<ExecOutput> {
-  const processCommand = buildRunCommand(request, cwd, executionPath);
+  const processCommand = buildRunCommand(
+    request,
+    cwd,
+    executionPath,
+    home,
+    sandbox,
+  );
   const timeoutMs = Math.min(request.timeoutMs, maximumCommandTimeoutMs);
   try {
     return await runPrivateInvocationProcess(
@@ -562,8 +631,8 @@ export function runPrivateInvocationProcess(
         if (timeoutMs === undefined)
           throw new Error("Missing command deadline");
         const elapsedMs = (yield* Clock.currentTimeMillis) - startedAt;
-        const standardOutput = textOutput(stdout);
-        const standardError = textOutput(stderr);
+        const standardOutput = textOutput(stdout, "stdout");
+        const standardError = textOutput(stderr, "stderr");
         return {
           status: "deadline_exceeded",
           timeoutMs,
@@ -579,7 +648,10 @@ export function runPrivateInvocationProcess(
                   timeoutMs,
                   requestedMs: describe.requestedMs ?? timeoutMs,
                 }),
-          truncated: standardOutput.truncated || standardError.truncated,
+          truncated: truncationReport(
+            standardOutput.truncation,
+            standardError.truncation,
+          ),
         } satisfies ExecOutput;
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
@@ -590,8 +662,10 @@ export function runPrivateInvocationProcess(
 async function execute(
   root: string,
   executionPath: string,
+  home: string,
   request: z.output<typeof execInput>,
   context: InvocationContext,
+  sandbox?: LocalSandboxLaunch,
 ): Promise<ExecOutput> {
   context.signal.throwIfAborted();
   const cwd = await resolveCwd(root, request.cwd);
@@ -600,7 +674,9 @@ async function execute(
     request,
     cwd,
     executionPath,
+    home,
     context.signal,
+    sandbox,
   );
 }
 
@@ -615,9 +691,13 @@ export async function createPrivateInvocationComputer(
     process.cwd(),
   ),
   processes?: PrivateLocalProcessScope,
+  /** Selected host home; standalone callers capture it before any await. */
+  home: string = capturePrivateLocalConfigRoot().home,
+  /** Native Local always supplies its live per-Agent admission callback. */
+  sandbox?: LocalSandboxLaunch,
 ): Promise<KnapsackComputer> {
-  const root = await realpath(resolve(invocationRoot));
   const path = parsePrivateLocalExecPath(executionPath);
+  const root = await realpath(resolve(invocationRoot));
   return Object.freeze({
     getCapabilities: () =>
       Promise.resolve(computerCapabilities(root, processes)),
@@ -650,7 +730,7 @@ export async function createPrivateInvocationComputer(
           },
         });
       if (request.operation === "run")
-        return execute(root, path, request, context);
+        return execute(root, path, home, request, context, sandbox);
       if (processes !== undefined)
         return jsonValueSchema.parse(
           await callBackgroundExec(
@@ -659,6 +739,7 @@ export async function createPrivateInvocationComputer(
             (requested) => resolveCwd(root, requested),
             path,
             context.signal,
+            sandbox,
           ),
         );
       throw new Error(`Computer capability is unavailable: ${selected}`);

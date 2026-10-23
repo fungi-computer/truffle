@@ -71,7 +71,9 @@ try {
   );
   const first = await settled();
   assert.equal((await readFile(root + "/proof.txt", "utf8")).trim(), "ok");
-  assert.equal(goal.view(first).value?.state, "complete");
+  // An achieved goal leaves the current slot and is kept as history.
+  assert.equal(goal.view(first).value?.goal, null);
+  assert.equal(goal.view(first).value?.ended.at(-1)?.outcome, "achieved");
   assert.ok(
     plan.view(first).value?.steps.every((step) => step.status === "completed"),
   );

@@ -12,8 +12,15 @@ import {
 import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import { join } from "node:path";
+import { PhotonImage } from "@cf-wasm/photon/node";
 import type { InvocationContext } from "@fungi.computer/mycelium";
-import { Knapsack, type FileToolName } from "@fungi.computer/knapsack";
+import {
+  Knapsack,
+  listInputSchema,
+  globInputSchema,
+  grepInputSchema,
+  type FileToolName,
+} from "@fungi.computer/knapsack";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 import { z } from "zod";
@@ -41,10 +48,41 @@ function invocation(signal = new AbortController().signal): InvocationContext {
   return { executionId: "local-files-proof", deadlineAt: null, signal };
 }
 
-async function direct(
+/** The real schema fills the defaults a model leaves out. */
+function listIn(
+  port: Awaited<ReturnType<typeof createPrivateInvocationFilesPort>>,
+  input: z.input<typeof listInputSchema>,
+  context: InvocationContext,
+) {
+  return port.list(listInputSchema.parse(input), context);
+}
+
+function globIn(
+  port: Awaited<ReturnType<typeof createPrivateInvocationFilesPort>>,
+  input: z.input<typeof globInputSchema>,
+  context: InvocationContext,
+) {
+  return port.glob(globInputSchema.parse(input), context);
+}
+
+function grepIn(
+  port: Awaited<ReturnType<typeof createPrivateInvocationFilesPort>>,
+  input: z.input<typeof grepInputSchema>,
+  context: InvocationContext,
+) {
+  return port.grep(grepInputSchema.parse(input), context);
+}
+
+async function directText(
   root: string,
   name: FileToolName,
-  args: { path: string; offset?: number; limit?: number; pattern?: string },
+  args: {
+    path: string;
+    offset?: number;
+    limit?: number;
+    pattern?: string;
+    include?: string;
+  },
 ) {
   const surface = Knapsack.files({
     port: await createPrivateInvocationFilesPort(root),
@@ -63,7 +101,15 @@ async function direct(
   if (part?.type !== "result") throw new Error("Missing direct result");
   const [content] = part.result.content;
   if (content?.type !== "text") throw new Error("Missing direct text");
-  return z.unknown().parse(JSON.parse(content.text));
+  return content.text;
+}
+
+async function direct(
+  root: string,
+  name: "read",
+  args: { path: string; offset?: number; limit?: number },
+) {
+  return z.unknown().parse(JSON.parse(await directText(root, name, args)));
 }
 
 describe("private invocation Files port", () => {
@@ -76,14 +122,17 @@ describe("private invocation Files port", () => {
     await writeFile(join(root, "page.txt"), "abcdefghij");
     await writeFile(join(root, "one.txt"), "needle\nneedle\n");
     await writeFile(join(root, "two.txt"), "needle\n");
-    for (const name of ["read", "list", "glob", "grep"] as const) {
-      const args =
-        name === "read"
-          ? { path: "escape.txt", limit: 4 }
-          : name === "list"
-            ? { path: "../direct-outside" }
-            : { path: outside, pattern: name === "glob" ? "*.txt" : "needle" };
-      await expect(direct(root, name, args)).rejects.toThrow(
+    const outsideCalls: readonly [
+      FileToolName,
+      Parameters<typeof directText>[2],
+    ][] = [
+      ["read", { path: "escape.txt", limit: 4 }],
+      ["list", { path: "../direct-outside" }],
+      ["glob", { path: outside, pattern: "*.txt" }],
+      ["grep", { path: outside, pattern: "needle" }],
+    ];
+    for (const [name, args] of outsideCalls) {
+      await expect(directText(root, name, args)).rejects.toThrow(
         "outside the invocation root",
       );
     }
@@ -94,33 +143,96 @@ describe("private invocation Files port", () => {
       nextOffset: 4,
       truncated: true,
     });
-    const listed = z
-      .object({ entries: z.array(z.unknown()), truncated: z.boolean() })
-      .parse(await direct(root, "list", { path: ".", limit: 1 }));
-    expect(listed.entries).toHaveLength(1);
-    expect(listed.truncated).toBe(true);
-    const globbed = z
-      .object({ matches: z.array(z.unknown()), truncated: z.boolean() })
-      .parse(
-        await direct(root, "glob", {
-          path: ".",
-          pattern: "*.txt",
-          limit: 1,
-        }),
+    const listed = await directText(root, "list", { path: ".", limit: 1 });
+    expect(listed.split("\n")).toHaveLength(2);
+    expect(listed).toContain("[truncated: result limit reached");
+    const globbed = await directText(root, "glob", {
+      path: ".",
+      pattern: "*.txt",
+      limit: 1,
+    });
+    expect(globbed.split("\n")).toHaveLength(2);
+    expect(globbed).toContain("[truncated: result limit reached");
+    const grepped = await directText(root, "grep", {
+      path: ".",
+      pattern: "needle",
+      limit: 1,
+    });
+    expect(grepped.split("\n")).toHaveLength(2);
+    expect(grepped).toMatch(/^[a-z]+\.txt:1: needle\n\[truncated/u);
+  });
+
+  it("shrinks png, jpeg, gif and webp files to JPEG image parts and refuses broken or oversized images", async () => {
+    const root = await temporaryDirectory("files-image");
+    const port = await createPrivateInvocationFilesPort(root);
+    // Banded noise: busy enough to stay above 512 KiB as a PNG, smooth
+    // enough to fit the budget at 512 px.
+    const pixels = new Uint8Array(1_200 * 900 * 4);
+    for (let index = 0; index < pixels.length; index += 1)
+      pixels[index] =
+        index % 4 === 3
+          ? 255
+          : (Math.floor(index / 4 / 1_200) * 37 +
+              (index % 4) * 91 +
+              ((index * 13) % 7)) %
+            256;
+    const source = new PhotonImage(pixels, 1_200, 900);
+    const images = {
+      "a.png": source.get_bytes(),
+      "b.jpg": source.get_bytes_jpeg(95),
+      "c.gif": Buffer.from(
+        "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+        "base64",
+      ),
+      "d.webp": source.get_bytes_webp(),
+    };
+    source.free();
+    // Above the 512 KiB the model may receive: only the shrink makes it readable.
+    expect(images["a.png"].byteLength).toBeGreaterThan(512 * 1_024);
+    for (const [name, bytes] of Object.entries(images)) {
+      await writeFile(join(root, name), bytes);
+      const read = await port.read(
+        { path: name, offset: 0, limit: 4 },
+        invocation(),
       );
-    expect(globbed.matches).toHaveLength(1);
-    expect(globbed.truncated).toBe(true);
-    const grepped = z
-      .object({ matches: z.array(z.unknown()), truncated: z.boolean() })
-      .parse(
-        await direct(root, "grep", {
-          path: ".",
-          pattern: "needle",
-          limit: 1,
-        }),
+      if (!("image" in read)) throw new Error(`${name} was not an image`);
+      expect(read.image.mimeType).toBe("image/jpeg");
+      expect(read.image.bytes).toBeLessThanOrEqual(100 * 1_024);
+      const fitted = PhotonImage.new_from_byteslice(
+        Buffer.from(read.image.data, "base64"),
       );
-    expect(grepped.matches).toHaveLength(1);
-    expect(grepped.truncated).toBe(true);
+      expect(Math.max(fitted.get_width(), fitted.get_height())).toBe(
+        name === "c.gif" ? 1 : 512,
+      );
+      fitted.free();
+    }
+    await writeFile(join(root, "gif.txt"), "GIF8 is the start of this text");
+    await expect(
+      port.read({ path: "gif.txt", offset: 0, limit: 4 }, invocation()),
+    ).resolves.toMatchObject({ content: "GIF8", truncated: true });
+    const result = await direct(root, "read", { path: "a.png", limit: 4 });
+    expect(result).toMatchObject({ mimeType: "image/jpeg" });
+    const signature = Buffer.from([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    ]);
+    await writeFile(
+      join(root, "broken.png"),
+      Buffer.concat([signature, Buffer.alloc(64)]),
+    );
+    await expect(
+      port.read({ path: "broken.png", offset: 0, limit: 4 }, invocation()),
+    ).rejects.toThrow(
+      "Image broken.png could not be decoded. Refusing to read it.",
+    );
+    await writeFile(
+      join(root, "big.png"),
+      Buffer.concat([signature, Buffer.alloc(16 * 1_024 * 1_024)]),
+    );
+    await expect(
+      port.read({ path: "big.png", offset: 0, limit: 4 }, invocation()),
+    ).rejects.toThrow(
+      `Image big.png is ${String(16 * 1_024 * 1_024 + 8)} bytes; the read limit is ${String(16 * 1_024 * 1_024)} bytes. Refusing to read it.`,
+    );
   });
 
   it("reads bounded UTF-8 pages through relative, absolute, and in-root symlink paths", async () => {
@@ -173,14 +285,15 @@ describe("private invocation Files port", () => {
       ).rejects.toThrow("outside the invocation root");
     }
     await expect(
-      port.glob(
+      globIn(
+        port,
         { path: "escape-directory", pattern: "*.txt", limit: 10 },
         invocation(),
       ),
     ).rejects.toThrow("outside the invocation root");
   });
 
-  it("caps list, glob, and grep after collecting one truncation witness", async () => {
+  it("caps one-level, name and content searches after collecting one truncation witness", async () => {
     const root = await temporaryDirectory("files-search");
     await mkdir(join(root, "nested"));
     await Promise.all([
@@ -190,18 +303,20 @@ describe("private invocation Files port", () => {
     ]);
     const port = await createPrivateInvocationFilesPort(root);
 
-    const listed = await port.list({ path: ".", limit: 2 }, invocation());
-    expect(listed.entries).toHaveLength(2);
-    expect(listed.truncated).toBe(true);
+    const listed = await listIn(port, { path: ".", limit: 2 }, invocation());
+    expect(listed.results).toHaveLength(2);
+    expect(listed.truncated).toBe("limit");
 
-    const globbed = await port.glob(
+    const globbed = await globIn(
+      port,
       { path: ".", pattern: "**/*.txt", limit: 2 },
       invocation(),
     );
-    expect(globbed.matches).toHaveLength(2);
-    expect(globbed.truncated).toBe(true);
+    expect(globbed.results).toHaveLength(2);
+    expect(globbed.truncated).toBe("limit");
 
-    const grepped = await port.grep(
+    const grepped = await grepIn(
+      port,
       {
         path: ".",
         pattern: "needle\\s+(one|two|three|four)",
@@ -211,11 +326,12 @@ describe("private invocation Files port", () => {
       },
       invocation(),
     );
-    expect(grepped.matches).toHaveLength(2);
-    expect(grepped.matches.every(({ line }) => line > 0)).toBe(true);
-    expect(grepped.truncated).toBe(true);
+    expect(grepped.results).toHaveLength(2);
+    expect(grepped.results.every(({ line }) => (line ?? 0) > 0)).toBe(true);
+    expect(grepped.truncated).toBe("limit");
     await expect(
-      port.grep(
+      grepIn(
+        port,
         {
           path: ".",
           pattern: "(needle)\\1",
@@ -234,7 +350,8 @@ describe("private invocation Files port", () => {
     const port = await createPrivateInvocationFilesPort(root);
 
     await expect(
-      port.grep(
+      grepIn(
+        port,
         {
           path: "direct.txt",
           pattern: "needle",
@@ -246,8 +363,8 @@ describe("private invocation Files port", () => {
       ),
     ).resolves.toEqual({
       path: "direct.txt",
-      matches: [{ path: "direct.txt", line: 2, text: "needle here" }],
-      truncated: false,
+      results: [{ path: "direct.txt", line: 2, text: "needle here" }],
+      truncated: null,
     });
   });
 
@@ -259,7 +376,8 @@ describe("private invocation Files port", () => {
     ]);
     const port = await createPrivateInvocationFilesPort(root);
     const grepBlankLines = (path: string) =>
-      port.grep(
+      grepIn(
+        port,
         {
           path,
           pattern: "^$",
@@ -272,13 +390,13 @@ describe("private invocation Files port", () => {
 
     await expect(grepBlankLines("terminal.txt")).resolves.toEqual({
       path: "terminal.txt",
-      matches: [],
-      truncated: false,
+      results: [],
+      truncated: null,
     });
     await expect(grepBlankLines("blank.txt")).resolves.toEqual({
       path: "blank.txt",
-      matches: [{ path: "blank.txt", line: 2, text: "" }],
-      truncated: false,
+      results: [{ path: "blank.txt", line: 2, text: "" }],
+      truncated: null,
     });
   });
 
@@ -290,14 +408,19 @@ describe("private invocation Files port", () => {
     const port = await createPrivateInvocationFilesPort(root);
 
     await expect(
-      port.glob({ path: "linked", pattern: "*.txt", limit: 10 }, invocation()),
+      globIn(
+        port,
+        { path: "linked", pattern: "*.txt", limit: 10 },
+        invocation(),
+      ),
     ).resolves.toEqual({
       path: "linked",
-      matches: [join("linked", "inside.txt")],
-      truncated: false,
+      results: [{ path: join("linked", "inside.txt"), type: "file" }],
+      truncated: null,
     });
     await expect(
-      port.grep(
+      grepIn(
+        port,
         {
           path: "linked",
           pattern: "needle",
@@ -309,14 +432,14 @@ describe("private invocation Files port", () => {
       ),
     ).resolves.toEqual({
       path: "linked",
-      matches: [
+      results: [
         {
           path: join("linked", "inside.txt"),
           line: 1,
           text: "linked needle",
         },
       ],
-      truncated: false,
+      truncated: null,
     });
   });
 
@@ -331,21 +454,22 @@ describe("private invocation Files port", () => {
     ]);
     const port = await createPrivateInvocationFilesPort(root);
 
-    const result = await port.glob(
+    const result = await globIn(
+      port,
       { path: ".", pattern: "**/*.txt", limit: 10 },
       invocation(),
     );
 
     expect(result.path).toBe(".");
-    expect(result.matches.toSorted()).toEqual([
+    expect(result.results.map(({ path }) => path).toSorted()).toEqual([
       join("a", "inside.txt"),
       join("b", "inside.txt"),
       join("target", "inside.txt"),
     ]);
-    expect(result.truncated).toBe(false);
+    expect(result.truncated).toBeNull();
   });
 
-  it("keeps useful directory grep results while reporting unreadable text coverage", async () => {
+  it("keeps useful directory grep results past oversized, invalid and unreadable files without calling that truncation", async () => {
     const root = await temporaryDirectory("files-grep-incomplete");
     await Promise.all([
       writeFile(join(root, "00-oversized.txt"), Buffer.alloc(128 * 1_024 + 1)),
@@ -357,7 +481,8 @@ describe("private invocation Files port", () => {
     const port = await createPrivateInvocationFilesPort(root);
 
     await expect(
-      port.grep(
+      grepIn(
+        port,
         {
           path: ".",
           pattern: "needle",
@@ -369,8 +494,8 @@ describe("private invocation Files port", () => {
       ),
     ).resolves.toEqual({
       path: ".",
-      matches: [{ path: "99-match.txt", line: 1, text: "a useful needle" }],
-      truncated: true,
+      results: [{ path: "99-match.txt", line: 1, text: "a useful needle" }],
+      truncated: null,
     });
   });
 
@@ -384,7 +509,8 @@ describe("private invocation Files port", () => {
     await chmod(join(root, "unreadable.txt"), 0o000);
     const port = await createPrivateInvocationFilesPort(root);
     const grep = (path: string) =>
-      port.grep(
+      grepIn(
+        port,
         {
           path,
           pattern: "needle",
@@ -406,23 +532,28 @@ describe("private invocation Files port", () => {
     });
   });
 
-  it("reports incomplete glob and grep coverage when candidate work is exhausted", async () => {
+  it("truncated is true when the scan's candidate bound cuts glob and grep", async () => {
     const root = await temporaryDirectory("files-scan-candidates");
     await Promise.all(
-      Array.from({ length: 257 }, async (_, index) =>
+      Array.from({ length: 11 }, async (_, index) =>
         writeFile(join(root, `${String(index).padStart(3, "0")}.txt`), ""),
       ),
     );
-    const port = await createPrivateInvocationFilesPort(root);
+    const port = await createPrivateInvocationFilesPort(root, {
+      candidates: 10,
+      bytes: 1_024,
+    });
 
     await expect(
-      port.glob(
+      globIn(
+        port,
         { path: ".", pattern: "never-match", limit: 256 },
         invocation(),
       ),
-    ).resolves.toEqual({ path: ".", matches: [], truncated: true });
+    ).resolves.toEqual({ path: ".", results: [], truncated: "scan" });
     await expect(
-      port.grep(
+      grepIn(
+        port,
         {
           path: ".",
           pattern: "never-match",
@@ -432,20 +563,24 @@ describe("private invocation Files port", () => {
         },
         invocation(),
       ),
-    ).resolves.toEqual({ path: ".", matches: [], truncated: true });
+    ).resolves.toEqual({ path: ".", results: [], truncated: "scan" });
   });
 
-  it("reports incomplete grep coverage when aggregate read work is exhausted", async () => {
+  it("truncated is true when the scan's byte bound cuts grep", async () => {
     const root = await temporaryDirectory("files-scan-bytes");
-    const content = Buffer.alloc(70 * 1_024, "x");
+    const content = Buffer.alloc(70, "x");
     await Promise.all([
       writeFile(join(root, "one.txt"), content),
       writeFile(join(root, "two.txt"), content),
     ]);
-    const port = await createPrivateInvocationFilesPort(root);
+    const port = await createPrivateInvocationFilesPort(root, {
+      candidates: 100,
+      bytes: 100,
+    });
 
     await expect(
-      port.grep(
+      grepIn(
+        port,
         {
           path: ".",
           pattern: "never-match",
@@ -455,7 +590,180 @@ describe("private invocation Files port", () => {
         },
         invocation(),
       ),
-    ).resolves.toEqual({ path: ".", matches: [], truncated: true });
+    ).resolves.toEqual({ path: ".", results: [], truncated: "scan" });
+  });
+
+  it("truncated is false when every result fits and no scan bound is hit", async () => {
+    const root = await temporaryDirectory("files-not-truncated");
+    await writeFile(join(root, "a.txt"), "needle\n");
+    await writeFile(join(root, "b.txt"), "needle\n");
+    const port = await createPrivateInvocationFilesPort(root);
+
+    await expect(
+      listIn(port, { path: ".", limit: 2 }, invocation()),
+    ).resolves.toMatchObject({ truncated: null });
+    await expect(
+      globIn(port, { path: ".", pattern: "*.txt", limit: 2 }, invocation()),
+    ).resolves.toMatchObject({ truncated: null });
+    await expect(
+      grepIn(
+        port,
+        {
+          path: ".",
+          pattern: "needle",
+          regex: false,
+          ignoreCase: false,
+          limit: 2,
+        },
+        invocation(),
+      ),
+    ).resolves.toMatchObject({ truncated: null });
+  });
+
+  describe("find in a real repository", () => {
+    async function repository() {
+      const root = await temporaryDirectory("files-real-repo");
+      await mkdir(join(root, ".git", "objects"), { recursive: true });
+      await writeFile(join(root, ".git", "HEAD"), "needle ref\n");
+      await writeFile(join(root, ".gitignore"), "node_modules/\n*.log\n");
+      await mkdir(join(root, "node_modules", "dep"), { recursive: true });
+      await Promise.all(
+        Array.from({ length: 300 }, async (_, index) =>
+          writeFile(
+            join(root, "node_modules", "dep", `file-${String(index)}.js`),
+            "needle in dependency\n",
+          ),
+        ),
+      );
+      await mkdir(join(root, "src"));
+      await writeFile(join(root, "src", "target.ts"), "const needle = 1;\n");
+      await writeFile(join(root, "src", "other.md"), "a needle in prose\n");
+      await writeFile(join(root, "src", "debug.log"), "needle log\n");
+      return await createPrivateInvocationFilesPort(root);
+    }
+    const paths = (found: { results: readonly { path: string }[] }) =>
+      found.results.map(({ path }) => path).toSorted();
+
+    it("lists one level without search arguments", async () => {
+      const port = await repository();
+
+      const root = await listIn(port, { path: "." }, invocation());
+      expect(root).toMatchObject({ path: ".", truncated: null });
+      expect(root.results).toEqual(
+        expect.arrayContaining([
+          { path: ".gitignore", type: "file" },
+          { path: "src", type: "directory" },
+        ]),
+      );
+      expect(paths(root)).toEqual([".gitignore", "src"]);
+      expect(paths(await listIn(port, { path: "src" }, invocation()))).toEqual([
+        "src/other.md",
+        "src/target.ts",
+      ]);
+    });
+
+    it("globs paths from the root", async () => {
+      const port = await repository();
+
+      await expect(
+        globIn(port, { path: ".", pattern: "**/*.ts" }, invocation()),
+      ).resolves.toEqual({
+        path: ".",
+        results: [{ path: "src/target.ts", type: "file" }],
+        truncated: null,
+      });
+    });
+
+    it("greps a string past a 300-file gitignored tree", async () => {
+      const port = await repository();
+
+      const found = await grepIn(
+        port,
+        { path: ".", pattern: "needle" },
+        invocation(),
+      );
+
+      expect(found.results).toEqual(
+        expect.arrayContaining([
+          { path: "src/target.ts", line: 1, text: "const needle = 1;" },
+        ]),
+      );
+      expect(paths(found)).toEqual(["src/other.md", "src/target.ts"]);
+      expect(found.truncated).toBeNull();
+    });
+
+    it("narrows grep matches with an include glob", async () => {
+      const port = await repository();
+
+      await expect(
+        grepIn(
+          port,
+          { path: ".", include: "**/*.md", pattern: "needle" },
+          invocation(),
+        ),
+      ).resolves.toEqual({
+        path: ".",
+        results: [{ path: "src/other.md", line: 1, text: "a needle in prose" }],
+        truncated: null,
+      });
+    });
+
+    it("never returns gitignored or .git entries from any mode", async () => {
+      const port = await repository();
+
+      for (const found of [
+        await listIn(port, { path: "." }, invocation()),
+        await globIn(port, { path: ".", pattern: "**" }, invocation()),
+        await grepIn(port, { path: ".", pattern: "needle" }, invocation()),
+        await grepIn(
+          port,
+          { path: ".", include: "**/*.log", pattern: "needle" },
+          invocation(),
+        ),
+      ]) {
+        expect(
+          found.results.filter(
+            ({ path }) =>
+              path.startsWith(".git/") ||
+              path === ".git" ||
+              path.includes("node_modules") ||
+              path.endsWith(".log"),
+          ),
+        ).toEqual([]);
+      }
+    });
+
+    it("honors nested .gitignore files, negation and subdirectory starts", async () => {
+      const root = await temporaryDirectory("files-nested-ignore");
+      await mkdir(join(root, "pkg", "build"), { recursive: true });
+      await writeFile(join(root, ".gitignore"), "*.tmp\n");
+      await writeFile(join(root, "pkg", ".gitignore"), "build/\n!keep.tmp\n");
+      await writeFile(join(root, "pkg", "build", "out.txt"), "needle\n");
+      await writeFile(join(root, "pkg", "drop.tmp"), "needle\n");
+      await writeFile(join(root, "pkg", "keep.tmp"), "needle\n");
+      await writeFile(join(root, "pkg", "src.txt"), "needle\n");
+      const port = await createPrivateInvocationFilesPort(root);
+
+      const found = await grepIn(
+        port,
+        { path: "pkg", pattern: "needle" },
+        invocation(),
+      );
+
+      expect(paths(found)).toEqual(["pkg/keep.tmp", "pkg/src.txt"]);
+    });
+
+    it("caps long matching lines at 500 characters in the tool output", async () => {
+      const root = await temporaryDirectory("files-long-line");
+      await writeFile(join(root, "wide.txt"), `needle ${"x".repeat(900)}\n`);
+
+      const text = await directText(root, "grep", {
+        path: ".",
+        pattern: "needle",
+      });
+
+      expect(text).toBe(`wide.txt:1: needle ${"x".repeat(493)}…`);
+    });
   });
 
   it("observes cancellation before bounded list, glob, and grep work", async () => {
@@ -465,13 +773,18 @@ describe("private invocation Files port", () => {
     const aborted = AbortSignal.abort(new Error("synthetic Files abort"));
 
     await expect(
-      port.list({ path: ".", limit: 1 }, invocation(aborted)),
+      listIn(port, { path: ".", limit: 1 }, invocation(aborted)),
     ).rejects.toThrow("synthetic Files abort");
     await expect(
-      port.glob({ path: ".", pattern: "*.txt", limit: 1 }, invocation(aborted)),
+      globIn(
+        port,
+        { path: ".", pattern: "*.txt", limit: 1 },
+        invocation(aborted),
+      ),
     ).rejects.toThrow("synthetic Files abort");
     await expect(
-      port.grep(
+      grepIn(
+        port,
         {
           path: ".",
           pattern: "needle",
@@ -498,7 +811,8 @@ describe("private invocation Files port", () => {
 
     try {
       await expect(
-        port.grep(
+        grepIn(
+          port,
           {
             path: "unsupported.sock",
             pattern: "needle",
@@ -510,7 +824,7 @@ describe("private invocation Files port", () => {
         ),
       ).rejects.toThrow("Files path is not a file or directory");
       await expect(
-        port.list({ path: ".", limit: 10 }, invocation()),
+        listIn(port, { path: ".", limit: 10 }, invocation()),
       ).rejects.toThrow("Files path has an unsupported filesystem type");
     } finally {
       await new Promise<undefined>((resolveClose) => {
@@ -539,8 +853,8 @@ describe("private invocation Files port", () => {
     await expect(readFile(target, "utf8")).resolves.toBe("after");
     expect((await stat(target)).mode & 0o777).toBe(0o640);
     expect((await lstat(link)).isSymbolicLink()).toBe(true);
-    const listed = await port.list({ path: ".", limit: 10 }, invocation());
-    expect(listed.entries.find(({ name }) => name === "link.txt")?.type).toBe(
+    const listed = await listIn(port, { path: ".", limit: 10 }, invocation());
+    expect(listed.results.find(({ path }) => path === "link.txt")?.type).toBe(
       "symlink",
     );
   });

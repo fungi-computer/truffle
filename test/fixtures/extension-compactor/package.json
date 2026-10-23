@@ -1,0 +1,15 @@
+{
+  "name": "fungi-compactor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./host": "./host.mjs"
+  },
+  "fungi": {
+    "id": "installed-compactor",
+    "capabilities": [
+      "compaction_handoff"
+    ]
+  }
+}

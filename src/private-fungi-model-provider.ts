@@ -6,6 +6,7 @@ import {
   readFungiAccountStatus,
 } from "./private-fungi-account.js";
 import { fungiHostedModels } from "./private-fungi-model-catalog.js";
+import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import {
   assertFungiModelsEnabled,
   createFungiModelApi,
@@ -14,8 +15,13 @@ import {
 
 /** The selected account Team owns the endpoint; the Hub owns the live model catalog. */
 export function createFungiModelProvider(
-  options: { credentialPath?: string; fetch?: FetchFunction } = {},
+  input: { credentialPath?: string; fetch?: FetchFunction } = {},
 ) {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   const oauth = createFungiAccountOAuth(options);
   return createProvider<"openai-completions">({
     id: "fungi",

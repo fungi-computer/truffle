@@ -57,6 +57,7 @@ it("answers a real Local workerd Ask through the public Session while execute wa
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),

@@ -8,9 +8,9 @@ import {
   realpath,
   rename,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Mycelium } from "@fungi.computer/mycelium";
@@ -26,6 +26,10 @@ import * as Schema from "effect/Schema";
 import lockfile from "proper-lockfile";
 import writeFileAtomic from "write-file-atomic";
 import { z } from "zod";
+import {
+  describeExtensionSkills,
+  type ExtensionSkillFolder,
+} from "./local-skill-source.js";
 
 /**
  * Installed Local extensions. One owner holds the package bytes under
@@ -33,6 +37,12 @@ import { z } from "zod";
  * project's client part and program launchers, and an Agent's tools, are
  * separate activations keyed by canonical path. Nothing under a project or
  * Agent store authorizes anything: a copied folder starts disabled.
+ *
+ * A package may also ship a `skills` folder. Its skills are read in place
+ * from the installed package (nothing is copied or symlinked) and only while
+ * the Agent's activation opts in, so disabling or removing the extension ends
+ * them. This covers Local installed extensions only; Hub-hosted extensions
+ * are not covered.
  */
 
 const capabilities = [
@@ -55,6 +65,8 @@ const revisionPattern = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u;
 const manifestSchema = z.strictObject({
   id: z.string().transform((value) => decodeExtensionId(value)),
   capabilities: z.array(z.enum(capabilities)).max(10).default([]),
+  /** Package-relative folder of skills, offered to an Agent that opts in. */
+  skills: z.string().startsWith("./").max(1_024).optional(),
   terminals: z
     .array(
       z.strictObject({
@@ -98,6 +110,7 @@ const revisionRecord = z.strictObject({
   terminals: z.array(terminalRecord),
   host: z.string().nullable(),
   client: z.string().nullable(),
+  skills: z.string().nullable(),
 });
 const installedSchema = z.strictObject({
   extensions: z.record(
@@ -117,6 +130,8 @@ const activationsSchema = z.strictObject({
       z.strictObject({
         revision: z.string(),
         capabilities: z.array(z.enum(capabilities)),
+        /** The opt-in to the revision's skills folder; separate from tools. */
+        skills: z.boolean(),
       }),
     ),
   ),
@@ -148,6 +163,8 @@ export type LocalExtensionFailureReason =
   | "not-installed"
   | "not-enabled"
   | "no-tools"
+  | "no-skills"
+  | "not-held"
   | "load";
 
 /** A typed refusal from the extension owner; never reported as usable. */
@@ -162,6 +179,35 @@ export class LocalExtensionError extends Error {
     super(message, options);
     this.reason = reason;
   }
+}
+
+/**
+ * An Agent holds an extension when its store has granted tools, covering every
+ * capability of the current revision. Opting into only the extension's skills
+ * is not holding it: skills carry no authority to hand its tools on.
+ */
+function assertAgentHolds(
+  held: Activations["agents"][string] | undefined,
+  installed: Installed,
+  ids: readonly string[],
+) {
+  const missing = ids.filter((id) => {
+    const activation = held?.[id];
+    if (activation === undefined || activation.capabilities.length === 0)
+      return true;
+    const entry = installed.extensions[id];
+    const needed =
+      (entry === undefined ? undefined : entry.revisions[entry.current])
+        ?.capabilities ?? [];
+    return !needed.every((capability) =>
+      activation.capabilities.includes(capability),
+    );
+  });
+  if (missing.length > 0)
+    throw new LocalExtensionError(
+      "not-held",
+      `An Agent cannot give ${missing.join(", ")} to another Agent: it does not hold ${missing.length === 1 ? "it" : "them"} itself`,
+    );
 }
 
 /**
@@ -180,6 +226,10 @@ export type LocalExtensionHostV1 = Readonly<{
 export type LocalExtensionFactoryV1 = (
   host: LocalExtensionHostV1,
 ) => RosteredExtensionV0 | Promise<RosteredExtensionV0>;
+
+/** What `add` reports: the summary plus the names of the skills it ships. */
+export type LocalInstalledExtension = LocalExtensionSummary &
+  Readonly<{ skills: readonly string[] }>;
 
 export type LocalExtensionSummary = Readonly<{
   id: string;
@@ -213,13 +263,15 @@ export type LocalProjectExtensions = Readonly<{
 export type LocalAgentExtensions = Readonly<{
   roster: readonly RosteredExtensionV0[];
   grants: readonly ExtensionGrantV0[];
+  /** Skills folders of extensions this Agent opted into, read in place. */
+  skills: readonly ExtensionSkillFolder[];
   /** Extensions left out of this Agent's roster, and why. */
   diagnostics: readonly Readonly<{ extensionId: string; error: Error }>[];
 }>;
 
 export type LocalExtensionsOptions = Readonly<{
-  /** The user home that owns `.fungi/extensions`; defaults to the OS home. */
-  home?: string | undefined;
+  /** The selected user home that owns `.fungi/extensions`. */
+  home: string;
 }>;
 
 function failure(cause: unknown) {
@@ -235,8 +287,8 @@ function absent(cause: unknown) {
 }
 
 /** Open the one extension owner for a user home. */
-export function localExtensions(options: LocalExtensionsOptions = {}) {
-  const root = join(resolve(options.home ?? homedir()), ".fungi", "extensions");
+export function localExtensions(options: LocalExtensionsOptions) {
+  const root = join(resolve(options.home), ".fungi", "extensions");
   const installedPath = join(root, "installed.json");
   const activationsPath = join(root, "activations.json");
 
@@ -244,6 +296,7 @@ export function localExtensions(options: LocalExtensionsOptions = {}) {
     path: string,
     schema: z.ZodType<T>,
     empty: T,
+    remedy: string,
   ): Promise<T> {
     let text: string;
     try {
@@ -252,12 +305,29 @@ export function localExtensions(options: LocalExtensionsOptions = {}) {
       if (absent(cause)) return empty;
       throw cause;
     }
-    return schema.parse(JSON.parse(text));
+    const parsed = schema.safeParse(JSON.parse(text));
+    if (!parsed.success)
+      throw new LocalExtensionError(
+        "install",
+        `${path} is from an earlier extension format; ${remedy}`,
+        { cause: parsed.error },
+      );
+    return parsed.data;
   }
   const readInstalled = () =>
-    readJson(installedPath, installedSchema, { extensions: {} });
+    readJson(
+      installedPath,
+      installedSchema,
+      { extensions: {} },
+      "delete it and run `fungi extension add` again",
+    );
   const readActivations = () =>
-    readJson(activationsPath, activationsSchema, { projects: {}, agents: {} });
+    readJson(
+      activationsPath,
+      activationsSchema,
+      { projects: {}, agents: {} },
+      "delete it, then re-enable your extensions",
+    );
 
   /** Serialize owner writes across CLI and service processes. */
   async function update<T>(
@@ -341,6 +411,41 @@ export function localExtensions(options: LocalExtensionsOptions = {}) {
     return path;
   }
 
+  /** A declared skills folder must be a directory inside the package. */
+  async function declaredSkills(
+    directory: string,
+    declared: string | undefined,
+  ) {
+    if (declared === undefined) return null;
+    const path = resolve(directory, declared);
+    if (!path.startsWith(`${directory}${sep}`))
+      throw new LocalExtensionError(
+        "manifest",
+        "skills must point inside its package",
+      );
+    try {
+      const real = await realpath(path);
+      if (!real.startsWith(`${await realpath(directory)}${sep}`))
+        throw new LocalExtensionError(
+          "manifest",
+          "skills must point inside its package",
+        );
+      if (!(await stat(real)).isDirectory())
+        throw new LocalExtensionError(
+          "artifact",
+          `The package declares skills but ${declared} is not a directory`,
+        );
+    } catch (cause) {
+      if (cause instanceof LocalExtensionError) throw cause;
+      throw new LocalExtensionError(
+        "artifact",
+        `The package declares skills but ${declared} is not in the installed package`,
+        { cause },
+      );
+    }
+    return path;
+  }
+
   return {
     root,
 
@@ -350,7 +455,7 @@ export function localExtensions(options: LocalExtensionsOptions = {}) {
      * is pinned to the commit Bun's lockfile resolved; updating is another
      * explicit `add`. Missing declared artifacts are a refusal.
      */
-    async add(source: string): Promise<LocalExtensionSummary> {
+    async add(source: string): Promise<LocalInstalledExtension> {
       await mkdir(join(root, "staging"), { recursive: true, mode: 0o700 });
       const staging = await mkdtemp(join(root, "staging", "install-"));
       try {
@@ -425,6 +530,24 @@ export function localExtensions(options: LocalExtensionsOptions = {}) {
           selected.pkg.exports,
           "./client",
         );
+        const skills = await declaredSkills(
+          selected.directory,
+          manifest.skills,
+        );
+        const skillNames =
+          skills === null
+            ? []
+            : (
+                await describeExtensionSkills(
+                  { extensionId: manifest.id, directory: skills },
+                  AbortSignal.timeout(10_000),
+                )
+              ).skills.map((skill) => skill.name);
+        if (skills !== null && skillNames.length === 0)
+          throw new LocalExtensionError(
+            "artifact",
+            `${manifest.id} declares skills but ${manifest.skills ?? ""} contains none`,
+          );
         if (manifest.capabilities.length > 0 && host === null)
           throw new LocalExtensionError(
             "artifact",
@@ -483,6 +606,10 @@ export function localExtensions(options: LocalExtensionsOptions = {}) {
             client === null
               ? null
               : join(target, client.slice(staging.length + sep.length)),
+          skills:
+            skills === null
+              ? null
+              : join(target, skills.slice(staging.length + sep.length)),
         };
         await update((installed) => {
           const existing = installed.extensions[manifest.id];
@@ -502,6 +629,7 @@ export function localExtensions(options: LocalExtensionsOptions = {}) {
           commit,
           capabilities: record.capabilities,
           terminals: record.terminals.map((terminal) => terminal.id),
+          skills: skillNames,
         };
       } finally {
         await rm(staging, { recursive: true, force: true });
@@ -569,24 +697,101 @@ export function localExtensions(options: LocalExtensionsOptions = {}) {
     },
 
     /**
+     * The one check that an Agent holds an extension: refuses with
+     * `not-held`, naming every id it lacks. Callers needing a whole request
+     * judged before any effect call this first; `enableAgent` applies it too.
+     */
+    async assertHeldByAgent(
+      agentStoreDirectory: string,
+      ids: readonly string[],
+    ) {
+      const store = await realpath(agentStoreDirectory);
+      const [installed, activations] = await Promise.all([
+        readInstalled(),
+        readActivations(),
+      ]);
+      assertAgentHolds(activations.agents[store], installed, ids);
+    },
+
+    /**
      * Grant one Agent store the current revision's declared capabilities.
      * Running work keeps its captured roster; the Agent applies this when it
-     * next opens.
+     * next opens. A human (the CLI) names no requester. When an Agent asks, it
+     * must hold the extension itself.
      */
-    async enableAgent(storeDirectory: string, id: string) {
+    async enableAgent(
+      storeDirectory: string,
+      id: string,
+      requester?: Readonly<{ agentStoreDirectory: string }>,
+    ) {
       const store = await realpath(storeDirectory);
+      const requesterStore =
+        requester === undefined
+          ? undefined
+          : await realpath(requester.agentStoreDirectory);
       return update((installed, activations) => {
+        if (requesterStore !== undefined)
+          assertAgentHolds(activations.agents[requesterStore], installed, [id]);
         const { revision, record } = currentRevision(installed, id);
         if (record.host === null || record.capabilities.length === 0)
           throw new LocalExtensionError(
             "no-tools",
             `Extension ${id} declares no Agent capabilities`,
           );
+        const skills =
+          activations.agents[store]?.[id]?.skills === true &&
+          record.skills !== null;
         activations.agents[store] = {
           ...activations.agents[store],
-          [id]: { revision, capabilities: record.capabilities },
+          [id]: { revision, capabilities: record.capabilities, skills },
         };
-        return { revision, capabilities: record.capabilities };
+        return { revision, capabilities: record.capabilities, skills };
+      });
+    },
+
+    /**
+     * Opt one Agent store into the skills the extension ships, without
+     * granting any tools. An existing activation keeps its revision and its
+     * capabilities; a new one carries none.
+     */
+    async enableAgentSkills(storeDirectory: string, id: string) {
+      const store = await realpath(storeDirectory);
+      return update((installed, activations) => {
+        const current = currentRevision(installed, id);
+        const prior = activations.agents[store]?.[id];
+        const revision = prior?.revision ?? current.revision;
+        const record = installed.extensions[id]?.revisions[revision];
+        if (!record?.skills)
+          throw new LocalExtensionError(
+            "no-skills",
+            `Extension ${id}@${revision} ships no skills`,
+          );
+        activations.agents[store] = {
+          ...activations.agents[store],
+          [id]: {
+            revision,
+            capabilities: prior?.capabilities ?? [],
+            skills: true,
+          },
+        };
+        return revision;
+      });
+    },
+
+    /**
+     * Turn only the skills off. Tools stay granted; an activation left with
+     * neither is removed.
+     */
+    async disableAgentSkills(storeDirectory: string, id: string) {
+      const store = await realpath(storeDirectory);
+      return update((_installed, activations) => {
+        const enabled = activations.agents[store];
+        const activation = enabled?.[id];
+        if (enabled === undefined || activation?.skills !== true) return false;
+        if (activation.capabilities.length === 0)
+          Reflect.deleteProperty(enabled, id);
+        else enabled[id] = { ...activation, skills: false };
+        return true;
       });
     },
 
@@ -646,78 +851,102 @@ export function localExtensions(options: LocalExtensionsOptions = {}) {
       return { clients, terminals, diagnostics };
     },
 
-    /**
-     * Load the Agent's enabled server extensions through their host factory.
-     * Each failure is isolated to its extension and reported.
-     */
-    async agent(
-      storeDirectory: string,
-      projectRoot: string,
-    ): Promise<LocalAgentExtensions> {
-      const store = await realpath(storeDirectory);
+    /** Capture validated records so one reload cannot mix file generations. */
+    async captureAgent() {
       const [installed, activations] = await Promise.all([
         readInstalled(),
         readActivations(),
       ]);
-      const roster: RosteredExtensionV0[] = [];
-      const grants: ExtensionGrantV0[] = [];
-      const diagnostics: { extensionId: string; error: Error }[] = [];
-      for (const [id, activation] of Object.entries(
-        activations.agents[store] ?? {},
-      )) {
-        const record = installed.extensions[id]?.revisions[activation.revision];
-        try {
-          if (record?.host === null || record === undefined)
-            throw new LocalExtensionError(
-              "not-installed",
-              `Extension ${id}@${activation.revision} is enabled but its host entry is not installed`,
-            );
-          const module = hostModuleSchema.parse(
-            await import(pathToFileURL(record.host).href),
-          );
-          const extension = await module.default({
-            runtimeDirectory: await runtimeDirectory(projectRoot, id),
-            defineExtension,
-            Mycelium,
-            z,
-          });
-          const parsed = rosteredSchema.parse(extension);
-          if (parsed.manifest.id !== id)
-            throw new LocalExtensionError(
-              "load",
-              `Extension ${id} host returned ${parsed.manifest.id}`,
-            );
-          const requested = new Set(parsed.manifest.requests);
-          roster.push(
-            z
-              .custom<RosteredExtensionV0>(
-                (value) => rosteredSchema.safeParse(value).success,
-              )
-              .parse(extension),
-          );
-          grants.push({
-            id: decodeExtensionId(id),
-            capabilities: activation.capabilities.filter((capability) =>
-              requested.has(capability),
-            ),
-          });
-        } catch (cause) {
-          diagnostics.push({
-            extensionId: id,
-            error:
-              cause instanceof LocalExtensionError
-                ? cause
-                : new LocalExtensionError(
-                    "load",
-                    `Extension ${id} could not load`,
-                    { cause: failure(cause) },
-                  ),
-          });
-        }
-      }
-      return { roster, grants, diagnostics };
+      return (storeDirectory: string, projectRoot: string) =>
+        loadAgent(installed, activations, storeDirectory, projectRoot);
+    },
+    async agent(storeDirectory: string, projectRoot: string) {
+      return loadAgent(
+        await readInstalled(),
+        await readActivations(),
+        storeDirectory,
+        projectRoot,
+      );
     },
   };
+
+  async function loadAgent(
+    installed: z.infer<typeof installedSchema>,
+    activations: z.infer<typeof activationsSchema>,
+    storeDirectory: string,
+    projectRoot: string,
+  ): Promise<LocalAgentExtensions> {
+    const store = await realpath(storeDirectory);
+    const roster: RosteredExtensionV0[] = [];
+    const grants: ExtensionGrantV0[] = [];
+    const skills: ExtensionSkillFolder[] = [];
+    const diagnostics: { extensionId: string; error: Error }[] = [];
+    for (const [id, activation] of Object.entries(
+      activations.agents[store] ?? {},
+    )) {
+      const record = installed.extensions[id]?.revisions[activation.revision];
+      try {
+        if (record === undefined)
+          throw new LocalExtensionError(
+            "not-installed",
+            `Extension ${id}@${activation.revision} is enabled but not installed`,
+          );
+        if (activation.skills && record.skills !== null)
+          skills.push({ extensionId: id, directory: record.skills });
+        // A skills-only activation grants no tools and loads no host code.
+        if (activation.capabilities.length === 0) continue;
+        if (record.host === null)
+          throw new LocalExtensionError(
+            "not-installed",
+            `Extension ${id}@${activation.revision} is enabled but its host entry is not installed`,
+          );
+        const module = hostModuleSchema.parse(
+          await import(pathToFileURL(record.host).href),
+        );
+        const extension = await module.default({
+          runtimeDirectory: await runtimeDirectory(projectRoot, id),
+          defineExtension,
+          Mycelium,
+          z,
+        });
+        const parsed = rosteredSchema.parse(extension);
+        if (parsed.manifest.id !== id)
+          throw new LocalExtensionError(
+            "load",
+            `Extension ${id} host returned ${parsed.manifest.id}`,
+          );
+        const requested = new Set(parsed.manifest.requests);
+        roster.push(
+          z
+            .custom<RosteredExtensionV0>(
+              (value) => rosteredSchema.safeParse(value).success,
+            )
+            .parse(extension),
+        );
+        grants.push({
+          id: decodeExtensionId(id),
+          capabilities: activation.capabilities.filter((capability) =>
+            requested.has(capability),
+          ),
+        });
+      } catch (cause) {
+        diagnostics.push({
+          extensionId: id,
+          error:
+            cause instanceof LocalExtensionError
+              ? cause
+              : new LocalExtensionError(
+                  "load",
+                  `Extension ${id} could not load`,
+                  { cause: failure(cause) },
+                ),
+        });
+      }
+    }
+    // Same skill name in two extensions: the lower extension id wins, always.
+    skills.sort((a, b) => a.extensionId.localeCompare(b.extensionId));
+    return { roster, grants, skills, diagnostics };
+  }
 }
 
 export type LocalExtensions = ReturnType<typeof localExtensions>;

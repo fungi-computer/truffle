@@ -132,7 +132,6 @@ it.each([false, true])(
           "agents.createSession",
           "agents.sessions",
           "agents.read",
-          "agents.send",
           "agents.cancel",
           "agents.wait",
           "fungiMcp.execute",
@@ -140,6 +139,10 @@ it.each([false, true])(
           "forage.describe",
         ])
           expect(lease.catalog.describe({ path }).kind).toBe("operation");
+        for (const path of ["agents.send", "agents.recall"])
+          expect(() => lease.catalog.describe({ path })).toThrow(
+            `Unknown target: ${path}`,
+          );
         expect(() => lease.catalog.describe({ path: "home.exec" })).toThrow(
           "Unknown target: home.exec",
         );

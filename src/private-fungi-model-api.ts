@@ -1,5 +1,6 @@
 import process from "node:process";
 import { fungiAccountFetch } from "./private-fungi-account.js";
+import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import { FungiSignInRequiredError } from "./private-fungi-auth-error.js";
 import {
   hasApi,
@@ -87,16 +88,15 @@ export function fungiModelFetch(
   baseUrl: string,
   teamName: string,
   fetchImpl: FetchFunction = globalThis.fetch,
-  credentialPath?: string,
+  credentialPath: string = capturePrivateLocalConfigRoot().credentialPath,
 ): FetchFunction {
   const base = parseFungiMcpEndpoint(baseUrl);
   if (!/^\/api\/v1\/teams\/[^/]+$/u.test(base.pathname))
     throw new Error("Fungi model requests require a selected Team");
-  const accountOptions: Parameters<typeof fungiAccountFetch>[1] = {
+  const accountOptions = {
     fetch: fetchImpl,
+    credentialPath,
   };
-  if (credentialPath !== undefined)
-    accountOptions.credentialPath = credentialPath;
   const accountFetch = fungiAccountFetch(base.origin, accountOptions);
   const transport = async (
     input: Parameters<FetchFunction>[0],
@@ -148,7 +148,7 @@ export function fungiModelFetch(
 /** Pi owns streaming; this adapter owns Fungi's destination, incident policy and refusals. */
 export function createFungiModelApi(
   resolveTeamName: (baseUrl: string) => Promise<string>,
-  credentialPath?: string,
+  credentialPath: string = capturePrivateLocalConfigRoot().credentialPath,
 ): ProviderStreams {
   const fetchFor = (
     baseUrl: string,

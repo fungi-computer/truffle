@@ -1,7 +1,15 @@
 import type { Model, ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { z } from "zod";
 
-const levels = z.enum(["minimal", "low", "medium", "high", "xhigh", "max"]);
+/** The thinking levels a Local model may offer. */
+export const thinkingLevelSchema = z.enum([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
 const catalogSchema = z.object({
   object: z.literal("list"),
   data: z
@@ -12,7 +20,7 @@ const catalogSchema = z.object({
         name: z.string().min(1).max(256),
         context_window: z.number().int().positive(),
         max_output_tokens: z.number().int().positive(),
-        reasoning_levels: z.array(levels).max(6),
+        reasoning_levels: z.array(thinkingLevelSchema).max(6),
         input: z.array(z.literal("text")).length(1),
         default: z.boolean(),
         cost: z.object({

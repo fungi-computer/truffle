@@ -1,8 +1,10 @@
 import { logEvent } from "./log-event.js";
 import {
-  fungiMcpSelectionSchema,
-  readFungiMcpSelection,
-} from "./private-fungi-mcp-selection.js";
+  capturePrivateLocalConfigRoot,
+  type PrivateLocalConfigRoot,
+} from "./private-local-config-root.js";
+import { readFungiMcpSelection } from "./private-fungi-mcp-selection.js";
+import { fungiMcpSelectionSchema } from "./private-fungi-mcp-selection-schema.js";
 import type { PrivateLocalShiitakeWorkerInput } from "./private-local-shiitake-host.js";
 import { readFile } from "node:fs/promises";
 import process from "node:process";
@@ -43,6 +45,7 @@ export type OpenWorkerBatch = typeof openPrivateLocalBunShiitakeWorkerBatch;
 
 export type PrivateLocalWorkerServerIo = Readonly<{
   cwd: string;
+  home?: string;
   stdout?: Output | undefined;
   signals?: Signals | undefined;
 }>;
@@ -60,7 +63,11 @@ function parseWorkers(value: unknown, filePath: string) {
   }));
 }
 
-async function readWorkers(filePath: string, cwd: string) {
+async function readWorkers(
+  filePath: string,
+  cwd: string,
+  configRoot: PrivateLocalConfigRoot,
+) {
   const absolutePath = resolve(cwd, filePath);
   let value: unknown;
   try {
@@ -68,14 +75,20 @@ async function readWorkers(filePath: string, cwd: string) {
   } catch (cause) {
     throw new Error("Could not read workers file: " + absolutePath, { cause });
   }
-  const workers: PrivateLocalShiitakeWorkerInput[] = [];
+  const workers = [];
   for (const { name, owner } of parseWorkers(value, absolutePath)) {
     const { fungiMcp, ...local } = owner;
-    let configured: PrivateLocalShiitakeWorkerInput["owner"] = local;
+    let configured: PrivateLocalShiitakeWorkerInput["owner"] &
+      Readonly<{ configRoot: PrivateLocalConfigRoot }> = {
+      ...local,
+      configRoot,
+    };
     if (fungiMcp !== undefined)
       configured = {
         ...configured,
-        fungiMcp: readFungiMcpSelection(fungiMcp),
+        fungiMcp: readFungiMcpSelection(fungiMcp, {
+          credentialPath: configRoot.credentialPath,
+        }),
       };
     workers.push({ name, owner: configured });
   }
@@ -109,7 +122,8 @@ export async function runPrivateLocalWorkerServer(
     return openPrivateLocalBunShiitakeWorkerBatch(...args);
   },
 ): Promise<void> {
-  const workers = await readWorkers(workersFile, io.cwd);
+  const root = capturePrivateLocalConfigRoot(io.home);
+  const workers = await readWorkers(workersFile, io.cwd, root);
   const stdout = io.stdout ?? process.stdout;
   const signals = io.signals ?? process;
   const stopped = Promise.withResolvers<undefined>();

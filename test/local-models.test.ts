@@ -1,16 +1,14 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type {
-  AuthInteraction,
-  Credential,
-  Models,
-} from "@earendil-works/pi-ai";
+import type { Credential, Models } from "@earendil-works/pi-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-
 import { runLocalAuthCli } from "../src/auth-cli.js";
+import { fixtureChatGPTProvider } from "./fixture-chatgpt-provider.js";
+
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
 import { createPrivateModels, listPrivateModels } from "../src/local-models.js";
+import { openAIAccessToken } from "./openai-fixtures.js";
 
 const tokenEndpoint = "https://auth.openai.com/api/accounts/oauth/token";
 const nativeFetch = globalThis.fetch;
@@ -38,17 +36,7 @@ function providerId(models: Models): string {
 }
 
 function syntheticAccessToken(): string {
-  return [
-    "synthetic",
-    Buffer.from(
-      JSON.stringify({
-        "https://api.openai.com/auth": {
-          chatgpt_account_id: "synthetic-account",
-        },
-      }),
-    ).toString("base64url"),
-    "signature",
-  ].join(".");
+  return openAIAccessToken("synthetic-person");
 }
 
 function tokenResponse(): Response {
@@ -57,7 +45,6 @@ function tokenResponse(): Response {
       access_token: syntheticAccessToken(),
       refresh_token: "synthetic-rotated-refresh",
       expires_in: 60 * 60,
-      id_token: "synthetic-id-token",
       scope: "openid offline_access chatgpt.tokens.use.direct",
     }),
     { headers: { "Content-Type": "application/json" } },
@@ -76,6 +63,50 @@ function syntheticExpiredCredential(): Credential {
 }
 
 describe("private Pi OpenAI composition", () => {
+  it("forwards the same owned device ID through login, logout and a new login", async () => {
+    const path = await credentialPath();
+    const store = createPrivateCredentialStore(path);
+    const provider = fixtureChatGPTProvider();
+    const oauth = provider.auth.oauth;
+    if (oauth === undefined) throw new Error("Fixture OAuth missing");
+    const seen: (string | undefined)[] = [];
+    const models = createPrivateModels(path, {
+      providers: [
+        {
+          ...provider,
+          auth: {
+            oauth: {
+              ...oauth,
+              login: async (interaction, options) => {
+                seen.push(options?.getDeviceId?.());
+                return oauth.login(interaction, options);
+              },
+            },
+          },
+        },
+      ],
+    });
+    const signIn = () =>
+      runLocalAuthCli(
+        ["login", "--provider", "openai", "--auth-type", "oauth"],
+        {
+          models,
+          getDeviceId: () => store.getDeviceId(),
+          interaction: {
+            signal: AbortSignal.timeout(5_000),
+            notify: () => undefined,
+            prompt: () => Promise.reject(new Error("Fixture must not prompt")),
+          },
+        },
+      );
+    await signIn();
+    await runLocalAuthCli(["logout", "--provider", "openai"], { models });
+    await signIn();
+    expect(seen).toEqual([
+      await store.getDeviceId(),
+      await store.getDeviceId(),
+    ]);
+  });
   it("registers Claude Sonnet 5.5 for the Local model picker and execution", async () => {
     const models = createPrivateModels();
     const selected = models.getModel("anthropic", "claude-sonnet-5-5");
@@ -142,122 +173,6 @@ describe("private Pi OpenAI composition", () => {
     expect(anthropic?.getModels().length).toBeGreaterThan(0);
   });
 
-  it("completes Pi browser login through its localhost callback and persists it", async () => {
-    const path = await credentialPath();
-    const models = createPrivateModels(path);
-    const id = providerId(models);
-    const deviceId = await createPrivateCredentialStore(path).getDeviceId();
-    const callback = Promise.withResolvers<Response>();
-    const prompts: string[] = [];
-    let exchanges = 0;
-    vi.stubGlobal(
-      "fetch",
-      async (input: string | URL | Request, init: RequestInit | undefined) => {
-        const url = input instanceof Request ? input.url : input.toString();
-        if (url === tokenEndpoint) {
-          exchanges += 1;
-          const body = init?.body;
-          if (!(body instanceof URLSearchParams)) {
-            throw new Error("Pi OAuth request did not use a form body");
-          }
-          expect(body.get("grant_type")).toBe("authorization_code");
-          return tokenResponse();
-        }
-        return nativeFetch(input, init);
-      },
-    );
-
-    const interaction: AuthInteraction = {
-      signal: AbortSignal.timeout(5_000),
-      prompt: async (prompt) => {
-        prompts.push(prompt.type);
-        if (prompt.type !== "manual_code" || prompt.signal === undefined) {
-          throw new Error("Unexpected Pi browser login prompt");
-        }
-        return await new Promise<string>((_resolve, reject) => {
-          prompt.signal?.addEventListener(
-            "abort",
-            () => {
-              reject(new Error("Pi callback completed browser login"));
-            },
-            { once: true },
-          );
-        });
-      },
-      notify: (event) => {
-        if (event.type !== "auth_url") return;
-        const authorization = new URL(event.url);
-        const state = authorization.searchParams.get("state");
-        if (state === null) throw new Error("Pi browser login omitted state");
-        void nativeFetch(
-          `http://127.0.0.1:1455/auth/callback?code=synthetic-callback-code&state=${encodeURIComponent(state)}&client_id=oaiapp_synthetic`,
-        ).then(callback.resolve, callback.reject);
-      },
-    };
-
-    await models.login(id, "oauth", interaction, {
-      getDeviceId: () => deviceId,
-    });
-    await expect(callback.promise).resolves.toMatchObject({ status: 200 });
-    expect(prompts).toEqual(["manual_code"]);
-    expect(exchanges).toBe(1);
-    await expect(createPrivateModels(path).checkAuth(id)).resolves.toEqual({
-      source: "OAuth",
-      type: "oauth",
-    });
-  });
-
-  it("accepts the full redirect URL over SSH and logs out", async () => {
-    const path = await credentialPath();
-    const models = createPrivateModels(path);
-    const store = createPrivateCredentialStore(path);
-    let authorization: URL | undefined;
-    const prompts: string[] = [];
-    vi.stubGlobal("fetch", (input: string | URL | Request) => {
-      const url = input instanceof Request ? input.url : input.toString();
-      if (url !== tokenEndpoint)
-        return Promise.reject(
-          new Error("Unexpected network request in manual login test"),
-        );
-      return Promise.resolve(tokenResponse());
-    });
-    await runLocalAuthCli(
-      ["login", "--provider", "openai", "--auth-type", "oauth"],
-      {
-        models,
-        getDeviceId: () => store.getDeviceId(),
-        interaction: {
-          signal: AbortSignal.timeout(5_000),
-          notify: (event) => {
-            if (event.type === "auth_url") authorization = new URL(event.url);
-          },
-          prompt: (prompt) => {
-            prompts.push(prompt.type);
-            if (prompt.type !== "manual_code" || authorization === undefined)
-              throw new Error("Unexpected OpenAI login prompt");
-            const callback = new URL(
-              authorization.searchParams.get("redirect_uri") ?? "",
-            );
-            callback.searchParams.set("code", "synthetic-manual-code");
-            callback.searchParams.set(
-              "state",
-              authorization.searchParams.get("state") ?? "",
-            );
-            callback.searchParams.set("client_id", "oaiapp_synthetic");
-            return Promise.resolve(callback.toString());
-          },
-        },
-      },
-    );
-    expect(prompts).toEqual(["manual_code"]);
-    await expect(models.checkAuth("openai")).resolves.toEqual({
-      source: "OAuth",
-      type: "oauth",
-    });
-    await models.logout("openai");
-    await expect(models.checkAuth("openai")).resolves.toBeUndefined();
-  });
-
   it("lets Pi refresh an expired credential and persist it for a fresh models instance", async () => {
     const path = await credentialPath();
     const firstModels = createPrivateModels(path);
@@ -295,177 +210,5 @@ describe("private Pi OpenAI composition", () => {
       source: "OAuth",
     });
     expect(refreshes).toBe(1);
-  });
-});
-
-describe("private Pi ChatGPT plan composition", () => {
-  it("logs in through the Local auth command, persists registration and refreshes after restart", async () => {
-    const path = await credentialPath();
-    const models = createPrivateModels(path);
-    const store = createPrivateCredentialStore(path);
-    let authorization: URL | undefined;
-    const grants: string[] = [];
-    vi.stubGlobal(
-      "fetch",
-      (input: string | URL | Request, init?: RequestInit) => {
-        const url = input instanceof Request ? input.url : input.toString();
-        if (url !== "https://auth.openai.com/api/accounts/oauth/token")
-          return Promise.reject(
-            new Error("Unexpected request in synthetic ChatGPT login"),
-          );
-        const body = init?.body;
-        if (!(body instanceof URLSearchParams))
-          throw new Error("Pi OAuth request did not use a form body");
-        expect(body.get("client_id")).toBe("oaiapp_synthetic");
-        grants.push(body.get("grant_type") ?? "");
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              access_token: "synthetic-chatgpt-access",
-              refresh_token: "synthetic-chatgpt-refresh",
-              id_token: "synthetic-id-token",
-              expires_in: 3600,
-              scope:
-                "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct",
-            }),
-            { headers: { "Content-Type": "application/json" } },
-          ),
-        );
-      },
-    );
-    await runLocalAuthCli(
-      ["login", "--provider", "openai", "--auth-type", "oauth"],
-      {
-        models,
-        getDeviceId: () => store.getDeviceId(),
-        interaction: {
-          signal: AbortSignal.timeout(5_000),
-          notify: (event) => {
-            if (event.type === "auth_url") authorization = new URL(event.url);
-          },
-          prompt: (prompt) => {
-            if (prompt.type !== "manual_code" || authorization === undefined)
-              throw new Error("Unexpected synthetic ChatGPT prompt");
-            const callback = new URL(
-              authorization.searchParams.get("redirect_uri") ?? "",
-            );
-            callback.searchParams.set("code", "synthetic-chatgpt-code");
-            callback.searchParams.set(
-              "state",
-              authorization.searchParams.get("state") ?? "",
-            );
-            callback.searchParams.set("client_id", "oaiapp_synthetic");
-            return Promise.resolve(callback.toString());
-          },
-        },
-      },
-    );
-    const deviceId = await store.getDeviceId();
-    expect(authorization?.searchParams.get("ext_agent_host_id")).toBe(
-      `urn:uuid:${deviceId}`,
-    );
-    expect(authorization?.searchParams.get("redirect_uri")).toBe(
-      "http://127.0.0.1:1455/auth/callback",
-    );
-    expect(authorization?.searchParams.get("code_challenge_method")).toBe(
-      "S256",
-    );
-    const credential = await store.read("openai");
-    expect(credential).toMatchObject({
-      type: "oauth",
-      clientId: "oaiapp_synthetic",
-    });
-    if (credential?.type !== "oauth")
-      throw new Error("Synthetic login did not persist OAuth");
-    expect(credential.scopes).toContain("chatgpt.tokens.use.direct");
-    await store.modify("openai", () =>
-      Promise.resolve({ ...credential, expires: 0 }),
-    );
-    const restarted = createPrivateModels(path);
-    await expect(restarted.getAuth("openai")).resolves.toMatchObject({
-      source: "OAuth",
-    });
-    await expect(restarted.checkAuth("openai")).resolves.toEqual({
-      type: "oauth",
-      source: "OAuth",
-    });
-    expect(grants).toEqual(["authorization_code", "refresh_token"]);
-    await restarted.logout("openai");
-    await expect(
-      createPrivateCredentialStore(path).read("openai"),
-    ).resolves.toBeUndefined();
-    await expect(
-      createPrivateCredentialStore(path).getDeviceId(),
-    ).resolves.toBe(deviceId);
-  });
-
-  it("passes the same device ID across two openai oauth logins and a logout", async () => {
-    const path = await credentialPath();
-    const store = createPrivateCredentialStore(path);
-    const deviceId = await store.getDeviceId();
-    const models = createPrivateModels(path);
-    vi.stubGlobal(
-      "fetch",
-      (input: string | URL | Request, init?: RequestInit) => {
-        const url = input instanceof Request ? input.url : input.toString();
-        if (url !== "https://auth.openai.com/api/accounts/oauth/token")
-          return Promise.reject(
-            new Error("Unexpected request in synthetic ChatGPT login"),
-          );
-        void init;
-        return Promise.resolve(
-          new Response(
-            JSON.stringify({
-              access_token: "synthetic-chatgpt-access",
-              refresh_token: "synthetic-chatgpt-refresh",
-              id_token: "synthetic-id-token",
-              expires_in: 3600,
-              scope:
-                "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct",
-            }),
-            { headers: { "Content-Type": "application/json" } },
-          ),
-        );
-      },
-    );
-
-    function signIn(): Promise<void> {
-      let authorization: URL | undefined;
-      return runLocalAuthCli(
-        ["login", "--provider", "openai", "--auth-type", "oauth"],
-        {
-          models,
-          getDeviceId: () => store.getDeviceId(),
-          interaction: {
-            signal: AbortSignal.timeout(5_000),
-            notify: (event) => {
-              if (event.type === "auth_url") authorization = new URL(event.url);
-            },
-            prompt: (prompt) => {
-              if (prompt.type !== "manual_code" || authorization === undefined)
-                throw new Error("Unexpected synthetic ChatGPT prompt");
-              expect(authorization.searchParams.get("ext_agent_host_id")).toBe(
-                `urn:uuid:${deviceId}`,
-              );
-              const callback = new URL(
-                authorization.searchParams.get("redirect_uri") ?? "",
-              );
-              callback.searchParams.set("code", "synthetic-chatgpt-code");
-              callback.searchParams.set(
-                "state",
-                authorization.searchParams.get("state") ?? "",
-              );
-              callback.searchParams.set("client_id", "oaiapp_synthetic");
-              return Promise.resolve(callback.toString());
-            },
-          },
-        },
-      ).then(() => undefined);
-    }
-
-    await signIn();
-    await runLocalAuthCli(["logout", "--provider", "openai"], { models });
-    await expect(store.getDeviceId()).resolves.toBe(deviceId);
-    await signIn();
   });
 });

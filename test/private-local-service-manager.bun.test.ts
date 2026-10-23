@@ -1,5 +1,6 @@
 import { logEvent } from "../src/log-event.js";
 import { localServiceIds } from "../src/private-local-service-ids.js";
+import { readOwnProcessStart } from "../src/private-local-process-identity.js";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,13 +10,22 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { serve } from "bun";
 import { z } from "zod";
 
-import { createPrivateLocalServiceManager } from "../src/private-local-service.js";
+import {
+  createPrivateLocalServiceManager,
+  LocalAgentSelectionAmbiguous,
+  LocalServiceUnreadableResponse,
+} from "../src/private-local-service.js";
 import {
   acquireServiceLock,
   handshake,
+  privateLocalServiceProtocol,
   readServiceRecord,
   serviceDirectory,
+  type ServiceRecord,
 } from "../src/private-local-service-discovery.js";
+
+// The test process stands in for the recorded service process.
+const testProcessStart = await readOwnProcessStart();
 
 describe("private Local service manager", () => {
   it("resume can start a fresh service from a refused recorded service without logging errors", async () => {
@@ -26,8 +36,12 @@ describe("private Local service manager", () => {
       port: 0,
       fetch: (): Response => new Response(),
     });
-    const record = {
+    const record: ServiceRecord = {
       serviceId: localServiceIds.service.generate(),
+      protocol: privateLocalServiceProtocol,
+      version: "source",
+      pid: process.pid,
+      startedAt: testProcessStart,
       baseUrl: server.url.origin,
     };
     await server.stop(true);
@@ -58,8 +72,12 @@ describe("private Local service manager", () => {
         port: 0,
         fetch: (): Response => new Response(),
       });
-      const record = {
+      const record: ServiceRecord = {
         serviceId: localServiceIds.service.generate(),
+        protocol: privateLocalServiceProtocol,
+        version: "source",
+        pid: process.pid,
+        startedAt: testProcessStart,
         baseUrl: server.url.origin,
       };
       await server.stop(true);
@@ -72,7 +90,9 @@ describe("private Local service manager", () => {
         const manager = createPrivateLocalServiceManager({ directory });
         expect(await manager.status()).toBeUndefined();
         if (liveOwner) {
-          await assert.rejects(manager.stop(), /not answering/u);
+          // The lease, not HTTP readiness, authorizes termination. This
+          // fixture owns it inside the test process, so the self guard wins.
+          await assert.rejects(manager.stop(), /runs inside this process/u);
           expect(await readServiceRecord(directory)).toEqual(record);
         } else {
           expect(await manager.stop()).toEqual({
@@ -94,56 +114,6 @@ describe("private Local service manager", () => {
     },
   );
 
-  it.each([
-    { client: "unbundled installation", buildId: undefined, accepted: false },
-    { client: "different bundle", buildId: "b".repeat(64), accepted: false },
-    { client: "matching bundle", buildId: "a".repeat(64), accepted: true },
-  ])(
-    "checks the running build for a $client without stopping it",
-    async ({ buildId, accepted }) => {
-      const root = await mkdtemp(join(tmpdir(), "fungi-service-build-"));
-      const directory = await serviceDirectory(join(root, "service"));
-      const serviceId = localServiceIds.service.generate();
-      let stopRequests = 0;
-      const server = serve({
-        hostname: "127.0.0.1",
-        port: 0,
-        fetch(request): Response {
-          if (new URL(request.url).pathname.endsWith("/stop"))
-            stopRequests += 1;
-          return Response.json({
-            serviceId,
-            baseUrl: server.url.origin,
-            buildId: "a".repeat(64),
-          });
-        },
-      });
-      const previous = process.env.FUNGI_BUNDLED_BUILD_ID;
-      if (buildId === undefined) delete process.env.FUNGI_BUNDLED_BUILD_ID;
-      else process.env.FUNGI_BUNDLED_BUILD_ID = buildId;
-      try {
-        await writeFile(
-          join(directory, "service.json"),
-          JSON.stringify({ serviceId, baseUrl: server.url.origin }),
-        );
-        const manager = createPrivateLocalServiceManager({ directory });
-        if (accepted)
-          expect(await manager.start()).toMatchObject({ serviceId });
-        else
-          await assert.rejects(
-            manager.start(),
-            /different Fungi build.*fungi stop.*Saved Sessions/u,
-          );
-        expect(await manager.status()).toMatchObject({ serviceId });
-        expect(stopRequests).toBe(0);
-      } finally {
-        if (previous === undefined) delete process.env.FUNGI_BUNDLED_BUILD_ID;
-        else process.env.FUNGI_BUNDLED_BUILD_ID = previous;
-        await server.stop(true);
-        await rm(root, { recursive: true, force: true });
-      }
-    },
-  );
   it("does not spawn a replacement over an untracked older owner", async () => {
     const root = await mkdtemp(join(tmpdir(), "fungi-service-legacy-start-"));
     const directory = await serviceDirectory(join(root, "service"));
@@ -155,6 +125,35 @@ describe("private Local service manager", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+  it("names an older service whose service.json has no PID, and its own stop route, instead of a schema error", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fungi-service-without-pid-"));
+    const directory = await serviceDirectory(join(root, "service"));
+    // The record an older service wrote before the PID was recorded.
+    const serviceId = localServiceIds.service.generate();
+    const baseUrl = "http://127.0.0.1:43127";
+    await writeFile(
+      join(directory, "service.json"),
+      JSON.stringify({ serviceId, baseUrl }),
+    );
+    try {
+      const manager = createPrivateLocalServiceManager({
+        directory,
+        executable: join(directory, "must-not-spawn"),
+      });
+      const named = (error: Error) =>
+        error.name !== "ZodError" &&
+        error.message.includes(`${serviceId} on port 43127`) &&
+        error.message.includes(
+          `curl -X POST ${baseUrl}/service/${serviceId}/stop`,
+        ) &&
+        error.message.includes(`--internal-service ${directory}`) &&
+        error.message.includes(`delete ${join(directory, "service.json")}`);
+      await assert.rejects(manager.start(), named);
+      await assert.rejects(manager.stop(), named);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
   it("explains a store held by another service when resume selects it", async () => {
     const root = await mkdtemp(join(tmpdir(), "fungi-service-store-in-use-"));
     const directory = await serviceDirectory(join(root, "service"));
@@ -162,14 +161,31 @@ describe("private Local service manager", () => {
     const baseUrl = "http://127.0.0.1:43123";
     await writeFile(
       join(directory, "service.json"),
-      JSON.stringify({ serviceId, baseUrl }),
+      JSON.stringify({
+        serviceId,
+        protocol: privateLocalServiceProtocol,
+        version: "source",
+        pid: process.pid,
+        startedAt: testProcessStart,
+        baseUrl,
+      }),
     );
     const originalFetch = globalThis.fetch;
     globalThis.fetch = Object.assign(
       (input: string | URL | Request) => {
         const path = new URL(z.string().parse(input)).pathname;
         if (path.endsWith("/status"))
-          return Promise.resolve(Response.json({ serviceId, baseUrl }));
+          return Promise.resolve(
+            Response.json({
+              diagnostics: { state: "active" },
+              serviceId,
+              protocol: privateLocalServiceProtocol,
+              version: "source",
+              pid: process.pid,
+              startedAt: testProcessStart,
+              baseUrl,
+            }),
+          );
         return Promise.resolve(
           Response.json({ code: "store_in_use" }, { status: 409 }),
         );
@@ -187,6 +203,148 @@ describe("private Local service manager", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+  it("names the saved Agents and the flags that choose one when select finds several", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fungi-service-ambiguous-"));
+    const directory = await serviceDirectory(join(root, "service"));
+    const serviceId = localServiceIds.service.generate();
+    const baseUrl = "http://127.0.0.1:43125";
+    await writeFile(
+      join(directory, "service.json"),
+      JSON.stringify({
+        serviceId,
+        protocol: privateLocalServiceProtocol,
+        version: "source",
+        pid: process.pid,
+        startedAt: testProcessStart,
+        baseUrl,
+      }),
+    );
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = Object.assign(
+      (input: string | URL | Request) => {
+        const path = new URL(z.string().parse(input)).pathname;
+        if (path.endsWith("/status"))
+          return Promise.resolve(
+            Response.json({
+              diagnostics: { state: "active" },
+              serviceId,
+              protocol: privateLocalServiceProtocol,
+              version: "source",
+              pid: process.pid,
+              startedAt: testProcessStart,
+              baseUrl,
+            }),
+          );
+        return Promise.resolve(
+          Response.json(
+            {
+              code: "agent_selection_ambiguous",
+              agentIds: ["local_store_first", "local_store_second"],
+            },
+            { status: 409 },
+          ),
+        );
+      },
+      { preconnect: originalFetch.preconnect },
+    );
+    try {
+      const manager = createPrivateLocalServiceManager({ directory });
+      await assert.rejects(
+        manager.connect({ invocationRoot: root }),
+        (error) =>
+          error instanceof LocalAgentSelectionAmbiguous &&
+          /local_store_first, local_store_second.*--agent.*--db/su.test(
+            error.message,
+          ),
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  describe("a select the service refuses", () => {
+    async function connectAnsweredBy(answer: Response) {
+      const root = await mkdtemp(join(tmpdir(), "fungi-service-refused-"));
+      const directory = await serviceDirectory(join(root, "service"));
+      const serviceId = localServiceIds.service.generate();
+      const baseUrl = "http://127.0.0.1:43126";
+      await writeFile(
+        join(directory, "service.json"),
+        JSON.stringify({
+          serviceId,
+          protocol: privateLocalServiceProtocol,
+          version: "source",
+          pid: process.pid,
+          startedAt: testProcessStart,
+          baseUrl,
+        }),
+      );
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = Object.assign(
+        (input: string | URL | Request) => {
+          const path = new URL(z.string().parse(input)).pathname;
+          if (path.endsWith("/status"))
+            return Promise.resolve(
+              Response.json({
+                diagnostics: { state: "active" },
+                serviceId,
+                protocol: privateLocalServiceProtocol,
+                version: "source",
+                pid: process.pid,
+                startedAt: testProcessStart,
+                baseUrl,
+              }),
+            );
+          return Promise.resolve(answer);
+        },
+        { preconnect: originalFetch.preconnect },
+      );
+      try {
+        const manager = createPrivateLocalServiceManager({ directory });
+        return await manager.connect({ invocationRoot: root }).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      } finally {
+        globalThis.fetch = originalFetch;
+        await rm(root, { recursive: true, force: true });
+      }
+    }
+    it("shows the service's own message for an unexpected failure", async () => {
+      const error = await connectAnsweredBy(
+        Response.json(
+          { code: "internal_error", error: "store could not be opened" },
+          { status: 500 },
+        ),
+      );
+      expect(error).toEqual(
+        new Error(
+          "Local service selection failed (500): store could not be opened",
+        ),
+      );
+    });
+    it("raises a typed error when a failure carries no readable body", async () => {
+      const error = await connectAnsweredBy(
+        new Response("Internal Server Error", { status: 500 }),
+      );
+      expect(error).toBeInstanceOf(LocalServiceUnreadableResponse);
+      expect(error).toMatchObject({ status: 500 });
+    });
+    it("raises the same typed error when the body is JSON of the wrong shape", async () => {
+      const error = await connectAnsweredBy(
+        Response.json({ message: "boom" }, { status: 500 }),
+      );
+      expect(error).toBeInstanceOf(LocalServiceUnreadableResponse);
+    });
+    it("does not read an Agent-selection answer without its Agents as an MCP conflict", async () => {
+      const error = await connectAnsweredBy(
+        Response.json({ code: "agent_selection_ambiguous" }, { status: 409 }),
+      );
+      expect(error).toEqual(
+        new Error("Local service sent an unreadable Agent selection"),
+      );
+    });
+  });
   describe("a live service that misses its handshake", () => {
     async function liveSlowService(answerAfter: number) {
       const root = await mkdtemp(join(tmpdir(), "fungi-service-busy-"));
@@ -195,7 +353,14 @@ describe("private Local service manager", () => {
       const baseUrl = "http://127.0.0.1:43124";
       await writeFile(
         join(directory, "service.json"),
-        JSON.stringify({ serviceId, baseUrl }),
+        JSON.stringify({
+          serviceId,
+          protocol: privateLocalServiceProtocol,
+          version: "source",
+          pid: process.pid,
+          startedAt: testProcessStart,
+          baseUrl,
+        }),
       );
       // The live service's lifetime lease, held exactly as its listener does.
       const releaseOwner = await acquireServiceLock(directory, "owner");
@@ -205,7 +370,17 @@ describe("private Local service manager", () => {
         (_input: string | URL | Request, init?: RequestInit) => {
           statusRequests += 1;
           if (statusRequests > answerAfter)
-            return Promise.resolve(Response.json({ serviceId, baseUrl }));
+            return Promise.resolve(
+              Response.json({
+                diagnostics: { state: "active" },
+                serviceId,
+                protocol: privateLocalServiceProtocol,
+                version: "source",
+                pid: process.pid,
+                startedAt: testProcessStart,
+                baseUrl,
+              }),
+            );
           // An overloaded service accepts the connection but answers late.
           return new Promise<Response>((_resolve, reject) => {
             init?.signal?.addEventListener("abort", () => {
@@ -270,7 +445,6 @@ describe("private Local service manager", () => {
     let selectRequests = 0;
     let discoverRequests = 0;
     const selectedPaths: string[] = [];
-    let stopRequests = 0;
     let oversizedInspection = false;
     const server = serve({
       hostname: "127.0.0.1",
@@ -279,9 +453,13 @@ describe("private Local service manager", () => {
         const path = new URL(request.url).pathname;
         if (path === `/service/${serviceId}/status`)
           return Response.json({
+            diagnostics: { state: "active" },
             serviceId,
+            protocol: privateLocalServiceProtocol,
+            version: buildId,
+            pid: process.pid,
+            startedAt: testProcessStart,
             baseUrl: server.url.origin,
-            buildId,
           });
         if (path === `/service/${serviceId}/select`) {
           selectRequests += 1;
@@ -293,14 +471,21 @@ describe("private Local service manager", () => {
             agentId: "local_store_fixture",
             databasePath: join(root, "agent.sqlite"),
             sessionId: "conversation",
-            routePath: "/agents/0",
+            routePath: "/agents/00000000-0000-4000-8000-000000000001",
           });
         }
         if (path === `/service/${serviceId}/discover`) {
           discoverRequests += 1;
           return Response.json({
             root,
-            agentCount: 1,
+            agents: [
+              {
+                agentId: "root",
+                databasePath: join(root, "agent.sqlite"),
+                sessionCount: 1,
+                updatedAt: 2,
+              },
+            ],
             sessions: [
               {
                 databasePath: join(root, "agent.sqlite"),
@@ -318,7 +503,7 @@ describe("private Local service manager", () => {
             agentId: "local_store_fixture",
             databasePath: join(root, "agent.sqlite"),
             sessionId: "session_fresh",
-            routePath: "/agents/0",
+            routePath: "/agents/00000000-0000-4000-8000-000000000001",
           });
         }
         if (path === `/service/${serviceId}/inspect`) {
@@ -334,11 +519,12 @@ describe("private Local service manager", () => {
             })
             .parse(await request.json());
           return Response.json({
+            diagnostics: { state: "active" },
             selected: {
               agentId: "local_store_fixture",
               databasePath: join(root, "agent.sqlite"),
               sessionId: body.sessionId,
-              routePath: "/agents/0",
+              routePath: "/agents/00000000-0000-4000-8000-000000000001",
             },
             snapshot: {
               sessionId: body.sessionId,
@@ -355,6 +541,7 @@ describe("private Local service manager", () => {
                 lastModelChoiceSequence: null,
                 compaction: null,
               },
+              toolOutput: [],
               progress: null,
               extensions: {},
               attention: [],
@@ -371,14 +558,17 @@ describe("private Local service manager", () => {
               reasoning: ["low", "medium"],
             },
           ]);
-        if (path === `/service/${serviceId}/stop`) {
-          stopRequests += 1;
-          return new Response(null, { status: 202 });
-        }
         return new Response(null, { status: 404 });
       },
     });
-    const record = { serviceId, baseUrl: server.url.origin };
+    const record: ServiceRecord = {
+      serviceId,
+      protocol: privateLocalServiceProtocol,
+      version: buildId,
+      pid: process.pid,
+      startedAt: testProcessStart,
+      baseUrl: server.url.origin,
+    };
     await writeFile(join(directory, "service.json"), JSON.stringify(record), {
       mode: 0o600,
     });
@@ -389,7 +579,7 @@ describe("private Local service manager", () => {
         directory,
         executionPath: "/toolchain/a:/usr/bin",
       });
-      expect((await manager.status())?.buildId).toBe(buildId);
+      expect((await manager.status())?.version).toBe(buildId);
       const otherClient = createPrivateLocalServiceManager({
         directory,
         executionPath: "/toolchain/b:/usr/bin",
@@ -439,7 +629,7 @@ describe("private Local service manager", () => {
       ]);
       expect(selectRequests).toBe(3);
       expect(connection.session.address).toBe(
-        `${server.url.origin}/service/${serviceId}/agents/0/sessions/conversation`,
+        `${server.url.origin}/service/${serviceId}/agents/00000000-0000-4000-8000-000000000001/sessions/conversation`,
       );
       await connection.close();
       const inspected = await manager.inspect({
@@ -464,11 +654,13 @@ describe("private Local service manager", () => {
       expect(fresh.databasePath).toBe(connection.databasePath);
       expect(fresh.sessionId).toBe("session_fresh");
       expect(fresh.session.address).toContain(
-        "/agents/0/sessions/session_fresh",
+        "/agents/00000000-0000-4000-8000-000000000001/sessions/session_fresh",
       );
       await fresh.close();
-      await manager.stop(localServiceIds.service.generate());
-      expect(stopRequests).toBe(0);
+      // Another client's expected identity never stops this service.
+      expect(await manager.stop(localServiceIds.service.generate())).toEqual({
+        kind: "replaced",
+      });
       expect(await handshake(record)).toBe(true);
     } catch (cause) {
       logEvent("manager-proof.behaviour", cause);
@@ -501,5 +693,113 @@ describe("private Local service manager", () => {
         : new Error("Manager test failed", { cause: testFailure });
     if (cleanupFailures.length > 0)
       throw new AggregateError(cleanupFailures, "Manager test cleanup failed");
+  });
+
+  it("archives through the service, lists archived Agents, and surfaces a typed refusal", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fungi-service-archive-"));
+    const directory = await serviceDirectory(join(root, "service"));
+    const serviceId = localServiceIds.service.generate();
+    const archives: unknown[] = [];
+    const discoveries: unknown[] = [];
+    const server = serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(request: Request): Promise<Response> {
+        const path = new URL(request.url).pathname;
+        if (path === "/service/" + serviceId + "/status")
+          return Response.json({
+            diagnostics: { state: "active" },
+            serviceId,
+            protocol: privateLocalServiceProtocol,
+            version: "source",
+            pid: process.pid,
+            startedAt: testProcessStart,
+            baseUrl: server.url.origin,
+          });
+        if (path === "/service/" + serviceId + "/discover") {
+          discoveries.push(await request.json());
+          return Response.json({
+            root,
+            agents: [
+              {
+                agentId: "local_store_fixer",
+                name: "fixer",
+                createdBy: "Shiitake",
+                databasePath: join(root, "agent.sqlite"),
+                sessionCount: 1,
+              },
+            ],
+            sessions: [],
+            problems: [],
+          });
+        }
+        if (path === "/service/" + serviceId + "/archive") {
+          const body = z
+            .looseObject({ agentId: z.string() })
+            .parse(await request.json());
+          archives.push(body);
+          if (body.agentId === "local_store_busy")
+            return Response.json(
+              {
+                code: "agent_archive_refused",
+                reason: "running",
+                error: "command command_9 is running; cancel it first",
+              },
+              { status: 409 },
+            );
+          return new Response(null, { status: 204 });
+        }
+        return new Response(null, { status: 404 });
+      },
+    });
+    await writeFile(
+      join(directory, "service.json"),
+      JSON.stringify({
+        serviceId,
+        protocol: privateLocalServiceProtocol,
+        version: "source",
+        pid: process.pid,
+        startedAt: testProcessStart,
+        baseUrl: server.url.origin,
+      }),
+      { mode: 0o600 },
+    );
+    try {
+      const manager = createPrivateLocalServiceManager({ directory });
+      const listed = await manager.discover(root, { archived: true });
+      expect(listed.agents[0]).toMatchObject({
+        name: "fixer",
+        createdBy: "Shiitake",
+      });
+      await manager.discover(root);
+      expect(discoveries).toEqual([
+        { invocationRoot: root, archived: true },
+        { invocationRoot: root, archived: false },
+      ]);
+      await manager.archive({
+        invocationRoot: root,
+        agentId: "local_store_fixer",
+        archived: true,
+      });
+      await assert.rejects(
+        manager.archive({
+          invocationRoot: root,
+          agentId: "local_store_busy",
+          archived: true,
+        }),
+        {
+          name: "AgentArchiveRefused",
+          reason: "running",
+          message: "command command_9 is running; cancel it first",
+        },
+      );
+      expect(archives).toEqual([
+        { invocationRoot: root, agentId: "local_store_fixer", archived: true },
+        { invocationRoot: root, agentId: "local_store_busy", archived: true },
+      ]);
+    } finally {
+      await server.stop(true);
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });

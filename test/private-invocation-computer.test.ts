@@ -40,7 +40,18 @@ const execResultSchema = z.strictObject({
   exitCode: z.number().int(),
   stdout: z.string(),
   stderr: z.string(),
-  truncated: z.boolean(),
+  truncated: z.union([
+    z.literal(false),
+    z
+      .array(
+        z.strictObject({
+          stream: z.enum(["stdout", "stderr"]),
+          keptBytes: z.number().int(),
+          totalBytes: z.number().int(),
+        }),
+      )
+      .min(1),
+  ]),
 });
 
 afterEach(async () => {
@@ -278,6 +289,18 @@ describe("private invocation Computer", () => {
     ).rejects.toThrow("Computer capability is unavailable");
   });
 
+  it("tells the model that nohup does not survive the exec call", async () => {
+    const computer = await createPrivateInvocationComputer(
+      await temporaryDirectory("computer-nohup-doc"),
+    );
+    const [capability] = z
+      .array(z.record(z.string(), z.unknown()))
+      .parse(await computer.getCapabilities(new AbortController().signal));
+    expect(capability?.description).toContain(
+      "exec kills its group at call end; nohup/& die.",
+    );
+  });
+
   it("advertises a bounded command timeout that leaves headroom under the sandbox deadline", async () => {
     const computer = await createPrivateInvocationComputer(
       await temporaryDirectory("computer-timeout-schema"),
@@ -360,8 +383,42 @@ describe("private invocation Computer", () => {
       command: "head -c 70000 /dev/zero | tr '\\0' x",
     });
     expect(truncated.status).toBe("completed");
-    expect(truncated.stdout).toMatch(/^x+$/u);
-    expect(truncated.truncated).toBe(true);
+    expect(truncated.stdout).toMatch(
+      /^x+\n\[fungi: stdout truncated: [\d.]+ KiB of 68\.4 KiB shown; redirect to a file or use head\/tail\]$/u,
+    );
+    expect(Buffer.byteLength(truncated.stdout)).toBeLessThanOrEqual(64 * 1024);
+    expect(truncated.stderr).toBe("");
+    expect(truncated.truncated).toEqual([
+      { stream: "stdout", keptBytes: 64 * 1024 - 256, totalBytes: 70000 },
+    ]);
+  });
+
+  it("says when stderr is cut and keeps stdout whole", async () => {
+    const computer = await createPrivateInvocationComputer(
+      await temporaryDirectory("computer-stderr-cut"),
+    );
+    const result = await call(computer, {
+      command: "printf ok; head -c 900000 /dev/zero | tr '\\0' e >&2",
+    });
+    expect(result.stdout).toBe("ok");
+    expect(result.stderr).toMatch(
+      /\n\[fungi: stderr truncated: [\d.]+ KiB of 878\.9 KiB shown; redirect to a file or use head\/tail\]$/u,
+    );
+    expect(Buffer.byteLength(result.stderr)).toBeLessThanOrEqual(64 * 1024);
+    expect(result.truncated).toEqual([
+      { stream: "stderr", keptBytes: 64 * 1024 - 256, totalBytes: 900000 },
+    ]);
+  });
+
+  it("documents the stream cap in the exec tool description", async () => {
+    const computer = await createPrivateInvocationComputer(
+      await temporaryDirectory("computer-description"),
+    );
+    const [capability] = z
+      .array(z.record(z.string(), z.unknown()))
+      .parse(await computer.getCapabilities(new AbortController().signal));
+    expect(capability?.description).toContain("64 KiB");
+    expect(capability?.description).toContain("head/tail");
   });
 
   it("expands tilde and HOME consistently in the restricted Computer shell", async () => {
@@ -584,7 +641,7 @@ describe("private invocation Computer", () => {
       ).resolves.toMatchObject({ status: "completed" });
     });
 
-    it("restricts env to PATH and HOME, keeps the selected client PATH, and never leaks a host secret", async () => {
+    it("restricts env to PATH, HOME and the user session locators, keeps the selected client PATH, and never leaks a host secret", async () => {
       const root = await temporaryDirectory("computer-direct-env");
       const toolchain = join(root, "toolchain");
       await mkdir(toolchain);
@@ -610,7 +667,16 @@ describe("private invocation Computer", () => {
           .filter((line) => line.length > 0)
           .map((line) => line.slice(0, line.indexOf("=")))
           .sort();
-        expect(names).toEqual(["HOME", "PATH"]);
+        expect(names).toEqual(
+          [
+            "HOME",
+            "PATH",
+            ...(process.env.XDG_RUNTIME_DIR ? ["XDG_RUNTIME_DIR"] : []),
+            ...(process.env.DBUS_SESSION_BUS_ADDRESS
+              ? ["DBUS_SESSION_BUS_ADDRESS"]
+              : []),
+          ].sort(),
+        );
         expect(envLines.stdout).toContain(`PATH=${toolchain}:/usr/bin:/bin`);
         expect(envLines.stdout).not.toContain("must-not-reach-direct-exec");
         // The direct form resolves a bare executable name through the same

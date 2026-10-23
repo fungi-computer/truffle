@@ -1,4 +1,5 @@
 import type { FetchLike } from "@modelcontextprotocol/client";
+import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import {
   readFungiAccountStatus,
   readFungiAccountTeams,
@@ -47,6 +48,8 @@ export const fungiAccountCommandHelp = `Usage: fungi account [--json]
        fungi account teams [--json]
        fungi account use-team <team-id>
        fungi account balance [--json]
+       fungi account prepare-credential --provider anthropic|openai
+       fungi account use-credential --provider anthropic|openai --from-file -
 
 Read the signed-in Fungi account without exposing its credentials. The plain
 command shows the Hub and the Team that pays for models; teams lists your
@@ -64,9 +67,10 @@ export async function runFungiAccountCommand(
   command: FungiAccountCommand,
   options: FungiAccountCommandOptions,
 ): Promise<void> {
-  const owner: AccountOwnerOptions = {};
-  if (options.credentialPath !== undefined)
-    owner.credentialPath = options.credentialPath;
+  const owner: AccountOwnerOptions = {
+    credentialPath:
+      options.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   if (options.fetch !== undefined) owner.fetch = options.fetch;
   const emit = (reply: AccountReply, text: string) => {
     options.stdout.write(

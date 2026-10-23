@@ -107,7 +107,7 @@ export async function openPrivateLocalShiitakeHost(
 ): Promise<PrivateLocalShiitakeHost> {
   const owner = await openHost(input);
   const routes = createShiitakeHttpRoutes(
-    owner.getSession,
+    (sessionId) => owner.getSession(sessionId),
     owner.listSessions,
     owner.createSession,
     owner.deleteSession,
@@ -253,7 +253,7 @@ export async function openPrivateLocalShiitakeWorkerBatch(
       const owner = await openHost(input.owner);
       owners.push({ name: input.name, owner });
       const routes = createShiitakeHttpRoutes(
-        owner.getSession,
+        (sessionId) => owner.getSession(sessionId),
         owner.listSessions,
         owner.createSession,
         owner.deleteSession,

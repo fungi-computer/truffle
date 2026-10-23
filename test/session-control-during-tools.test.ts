@@ -79,6 +79,7 @@ it.each([false, true])(
           const first = acquired++ === 0;
           return Promise.resolve({
             model: faux.model,
+            retryable: () => false,
             stream: faux.stream,
             release: () => {
               if (first && holdCleanup) {

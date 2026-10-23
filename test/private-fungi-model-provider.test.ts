@@ -2,8 +2,16 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
+import { createModels } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import { fauxModelSource, memoryHost } from "@fungi.computer/shiitake/testing";
+import type { ModelPreference } from "@fungi.computer/shiitake/model-preference";
 import { createPrivateModels, listPrivateModels } from "../src/local-models.js";
-import { switchFungiAccountTeam } from "../src/private-fungi-account.js";
+import {
+  createFungiAccountCredentialStore,
+  switchFungiAccountTeam,
+} from "../src/private-fungi-account.js";
+import { createFungiModelProvider } from "../src/private-fungi-model-provider.js";
 import {
   createPrivateLocalModelSource,
   openPrivateLocalRuntimeHost,
@@ -82,6 +90,151 @@ const catalog = {
     },
   ],
 };
+
+it.each(["explicit", "fallback"] as const)(
+  "observes context with an empty authenticated Fungi catalog (%s) without preparing a model",
+  async (selection) => {
+    const path = await signedIn();
+    const requested: string[] = [];
+    const credentials = createFungiAccountCredentialStore({
+      credentialPath: path,
+    });
+    const credentialRead = vi.spyOn(credentials, "read");
+    const models = createModels({ credentials });
+    vi.stubGlobal("fetch", (input: string | URL | Request) => {
+      requested.push(input instanceof Request ? input.url : String(input));
+      return Promise.resolve(Response.json(catalog));
+    });
+    models.setProvider(
+      createFungiModelProvider({
+        credentialPath: path,
+      }),
+    );
+    expect(models.getModels("fungi")).toEqual([]);
+    const refresh = vi.spyOn(models, "refresh");
+    const checkAuth = vi.spyOn(models, "checkAuth");
+    const getAuth = vi.spyOn(models, "getAuth");
+    const local = createPrivateLocalModelSource(
+      models,
+      selection === "explicit" ? "fungi" : undefined,
+      selection === "explicit" ? "@fungi/luna" : undefined,
+      "context-observation",
+    );
+    const describe = local.describe;
+    if (describe === undefined) throw new Error("Local description is missing");
+    // Seed real settled context with the credential-free maintained faux source.
+    // All footer descriptions still go through the real Local model owner.
+    const seeded = fauxModelSource([fauxAssistantMessage("Settled context.")]);
+    const acquire = vi.spyOn(seeded, "acquire");
+    const host = await memoryHost({
+      model: { acquire: seeded.acquire, describe },
+    });
+    try {
+      const session = host.agent.session("observational-context");
+      await session.send("Keep context.", { requestId: "seed-context" });
+      await host.settle("observational-context");
+      expect(acquire).toHaveBeenCalledTimes(1);
+      const snapshot = await session.read();
+      expect(snapshot.context?.tokens).toBeGreaterThan(0);
+      expect(refresh).not.toHaveBeenCalled();
+      expect(checkAuth).not.toHaveBeenCalled();
+      expect(getAuth).not.toHaveBeenCalled();
+      expect(credentialRead).not.toHaveBeenCalled();
+      expect(requested).toEqual([]);
+      expect(acquire).toHaveBeenCalledTimes(1);
+      expect(snapshot.context?.window).toBeNull();
+      expect(models.getModels("fungi")).toEqual([]);
+    } finally {
+      await host.close();
+    }
+  },
+);
+
+it("observes changing Agent defaults and Session overrides from acquired catalog facts without auth", async () => {
+  const path = await signedIn();
+  const fetch = vi.fn(() =>
+    Promise.resolve(
+      Response.json({
+        ...catalog,
+        data: [
+          ...catalog.data,
+          {
+            ...catalog.data[0],
+            id: "@fungi/small",
+            name: "Small",
+            context_window: 30_000,
+            max_output_tokens: 1_000,
+            default: false,
+          },
+        ],
+      }),
+    ),
+  );
+  vi.stubGlobal("fetch", fetch);
+  const models = createPrivateModels(path);
+  let agent: ModelPreference | null = {
+    providerId: "fungi",
+    modelId: "@fungi/luna",
+  };
+  const source = createPrivateLocalModelSource(
+    models,
+    undefined,
+    undefined,
+    "observed-default",
+    undefined,
+    { agent: () => agent },
+  );
+  const describe = source.describe;
+  if (describe === undefined) throw new Error("Local description is missing");
+  const input = {
+    sessionId: "observed-default",
+    preference: null,
+    signal: new AbortController().signal,
+  };
+  const refresh = vi.spyOn(models, "refresh");
+  const checkAuth = vi.spyOn(models, "checkAuth");
+  const acquired = await source.acquire(input);
+  try {
+    expect(acquired.model.id).toBe("@fungi/luna");
+    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(checkAuth).toHaveBeenCalled();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  } finally {
+    await acquired.release();
+  }
+  refresh.mockClear();
+  checkAuth.mockClear();
+  fetch.mockClear();
+  await expect(describe(input)).resolves.toEqual({ contextWindow: 1_050_000 });
+  agent = { providerId: "fungi", modelId: "@fungi/small" };
+  await expect(describe(input)).resolves.toEqual({ contextWindow: 30_000 });
+  await expect(
+    describe({
+      ...input,
+      preference: { providerId: "fungi", modelId: "@fungi/luna" },
+    }),
+  ).resolves.toEqual({ contextWindow: 1_050_000 });
+  await expect(
+    describe({
+      ...input,
+      preference: { providerId: "fungi", modelId: "@fungi/not-discovered" },
+    }),
+  ).resolves.toEqual({ contextWindow: null });
+  // A populated catalog is not evidence that a fallback provider is signed in.
+  agent = null;
+  await expect(describe(input)).resolves.toEqual({ contextWindow: null });
+  expect(refresh).not.toHaveBeenCalled();
+  expect(checkAuth).not.toHaveBeenCalled();
+  expect(fetch).not.toHaveBeenCalled();
+  agent = { providerId: "fungi", modelId: "@fungi/small" };
+  const next = await source.acquire(input);
+  try {
+    expect(next.model.id).toBe("@fungi/small");
+    expect(next.model.contextWindow).toBe(30_000);
+  } finally {
+    await next.release();
+  }
+});
 
 it("lists the refreshed hosted catalog through the signed-in Team, using Hub limits and prices", async () => {
   const path = await signedIn();
@@ -284,7 +437,6 @@ it("opens an explicitly selected Fungi model after refreshing its live catalog",
   const host = await openPrivateLocalRuntimeHost(
     {
       invocationRoot: dirname(path),
-      modelSettingsPath: join(dirname(path), "shiitake.json"),
       providerId: "fungi",
       modelId: "@fungi/luna",
     },
@@ -362,7 +514,6 @@ it("uses the Hub default for a new Agent and preserves explicit and saved model 
   const host = await openPrivateLocalRuntimeHost(
     {
       invocationRoot: dirname(path),
-      modelSettingsPath: join(dirname(path), "shiitake.json"),
     },
     models,
   );
@@ -404,7 +555,6 @@ it("keeps an explicit Fungi choice when unreachable and retries there after reco
   const host = await openPrivateLocalRuntimeHost(
     {
       invocationRoot: dirname(path),
-      modelSettingsPath: join(dirname(path), "shiitake.json"),
       providerId: "fungi",
       modelId: "@fungi/luna",
     },

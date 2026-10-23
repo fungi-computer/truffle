@@ -7,7 +7,10 @@ import type { FilesPatch, FilesPort } from "@fungi.computer/knapsack";
 import type { InvocationContext } from "@fungi.computer/mycelium";
 import { parsePatch } from "diff";
 import * as Stream from "effect/Stream";
-import { runPrivateInvocationProcess } from "./private-invocation-computer.js";
+import {
+  runPrivateInvocationProcess,
+  type LocalSandboxLaunch,
+} from "./private-invocation-computer.js";
 
 function patchExecutable(): string {
   if (process.env.FUNGI_BUNDLED_CLI) {
@@ -50,6 +53,7 @@ async function unifiedDiffContext(
       { path, offset: 0, limit: maximumPatchBytes },
       context,
     );
+    if ("image" in current) throw new Error(`${path} is an image, not text`);
     const lines = current.content.split(/\r?\n/u);
     const from = Math.min(
       Math.max(0, hunk.oldStart - 3),
@@ -72,6 +76,7 @@ async function unifiedDiffContext(
 export async function createPrivateFilesPatch(
   root: string,
   read: FilesPort["read"],
+  sandbox?: LocalSandboxLaunch,
 ): Promise<FilesPatch | undefined> {
   const executable = patchExecutable();
   try {
@@ -86,10 +91,31 @@ export async function createPrivateFilesPatch(
     const bytes = new TextEncoder().encode(patch);
     if (bytes.byteLength > maximumPatchBytes)
       throw new Error("Patch exceeds the 128 KiB input bound");
-    const command = ChildProcess.make(executable, {
-      cwd: root,
-      stdin: Stream.make(bytes),
-    });
+    const launch = sandbox?.(root, [executable]);
+    const env: NodeJS.ProcessEnv = { ...process.env, ...launch?.environment };
+    if (launch !== undefined) {
+      delete env.XDG_RUNTIME_DIR;
+      delete env.DBUS_SESSION_BUS_ADDRESS;
+    }
+    const command = ChildProcess.make(
+      launch?.executable ?? executable,
+      launch?.args ?? [],
+      {
+        cwd: root,
+        env,
+        extendEnv: false,
+        stdin: Stream.make(bytes),
+        additionalFds:
+          launch?.seccompFilter === undefined
+            ? undefined
+            : {
+                fd3: {
+                  type: "input",
+                  stream: Stream.make(launch.seccompFilter),
+                },
+              },
+      },
+    );
     const result = await runPrivateInvocationProcess(
       command,
       context.signal,

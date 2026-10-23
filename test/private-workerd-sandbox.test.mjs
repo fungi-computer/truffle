@@ -291,12 +291,8 @@ describe("private local workerd Sandbox", () => {
             truncated: false,
           });
         },
-        list: (input) =>
-          Promise.resolve({ path: input.path, entries: [], truncated: false }),
-        glob: (input) =>
-          Promise.resolve({ path: input.path, matches: [], truncated: false }),
-        grep: (input) =>
-          Promise.resolve({ path: input.path, matches: [], truncated: false }),
+        find: (input) =>
+          Promise.resolve({ path: input.path, results: [], truncated: null }),
         replace: (input) =>
           Promise.resolve({ path: input.path, bytes: input.content.length }),
       },
@@ -361,10 +357,10 @@ describe("private local workerd Sandbox", () => {
         /NoSuchOperationError: No such operation files\.remove.*forage\.search/u,
     },
     {
-      name: "suggests files.list for a nonexistent forage operation",
-      code: 'async () => await forage.files_list({ path: "." })',
+      name: "suggests files.glob for a nonexistent forage operation",
+      code: 'async () => await forage.files_glob({ path: ".", pattern: "*.txt" })',
       error:
-        /NoSuchOperationError: No such operation forage\.files_list.*files\.list/u,
+        /NoSuchOperationError: No such operation forage\.files_glob.*files\.glob/u,
     },
     {
       name: "suggests files.read for a misspelled Files operation",
@@ -398,12 +394,8 @@ describe("private local workerd Sandbox", () => {
             truncated: false,
           });
         },
-        list: (input) =>
-          Promise.resolve({ path: input.path, entries: [], truncated: false }),
-        glob: (input) =>
-          Promise.resolve({ path: input.path, matches: [], truncated: false }),
-        grep: (input) =>
-          Promise.resolve({ path: input.path, matches: [], truncated: false }),
+        find: (input) =>
+          Promise.resolve({ path: input.path, results: [], truncated: null }),
         replace: (input) =>
           Promise.resolve({ path: input.path, bytes: input.content.length }),
       },

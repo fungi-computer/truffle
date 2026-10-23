@@ -1,6 +1,11 @@
 import { correlationKey } from "@fungi.computer/cairn";
+import { createHash } from "node:crypto";
+import {
+  machineEnrollmentRecordSchema,
+  type MachineEnrollmentRecord,
+  type LocalMachineEnrollment,
+} from "./private-local-mesh-record.js";
 import { chmod, mkdir, open, type FileHandle } from "node:fs/promises";
-import { homedir } from "node:os";
 import { dirname, isAbsolute, resolve } from "node:path";
 import type {
   ApiKeyCredential,
@@ -55,7 +60,7 @@ const apiKeyCredentialSchema = z
     if (input.env !== undefined) credential.env = input.env;
     return credential;
   });
-const oauthCredentialSchema = z
+export const oauthCredentialSchema = z
   .object({
     type: z.literal("oauth"),
     refresh: credentialStringSchema,
@@ -82,10 +87,22 @@ const oauthCredentialSchema = z
 const credentialSchema = z.discriminatedUnion("type", [
   apiKeyCredentialSchema,
   oauthCredentialSchema,
+  machineEnrollmentRecordSchema,
 ]);
+const machineRecordId = (origin: string) =>
+  `machine-enrollment:${createHash("sha256").update(origin).digest("hex")}`;
 const credentialMapSchema = z
   .record(providerIdSchema, credentialSchema)
   .superRefine((credentials, context) => {
+    for (const [id, record] of Object.entries(credentials))
+      if (
+        record.type === "machine_enrollment" &&
+        id !== machineRecordId(record.origin)
+      )
+        context.addIssue({
+          code: "custom",
+          message: "Machine enrollment origin does not match its record",
+        });
     if (Object.keys(credentials).length > maximumCredentialEntries) {
       context.addIssue({
         code: "custom",
@@ -95,7 +112,7 @@ const credentialMapSchema = z
   });
 const missingFileErrorSchema = z.object({ code: z.literal("ENOENT") });
 
-type CredentialMap = Record<string, Credential>;
+type CredentialMap = Record<string, Credential | MachineEnrollmentRecord>;
 export type AtomicWrite = (
   path: string,
   content: string,
@@ -106,8 +123,29 @@ export type AtomicWrite = (
   }>,
 ) => Promise<void>;
 
+/** The signed-in credential that must still own an enrollment origin. */
+export type MachineEnrollmentOwner = Readonly<{
+  providerId: string;
+  /** Throws unless this credential owns the origin being edited. */
+  admit: (current: Credential | undefined) => void;
+}>;
+
 /** A host-private Pi credential store selected by one absolute filesystem path. */
 export type PrivateCredentialStore = CredentialStore & {
+  readMachineEnrollments(): Promise<MachineEnrollmentRecord[]>;
+  /**
+   * Edit one origin's enrollments under the file lock. An empty result removes
+   * the record. When the origin belongs to a signed-in credential, `owner`
+   * admits that credential under the same lock before anything is written.
+   */
+  modifyMachineEnrollments(
+    origin: string,
+    edit: (
+      current: readonly LocalMachineEnrollment[],
+    ) => LocalMachineEnrollment[],
+    owner?: MachineEnrollmentOwner,
+  ): Promise<void>;
+  removeMachineEnrollments(origin: string): Promise<boolean>;
   /** Stable host identity supplied to Pi's ChatGPT sign-in, never a credential. */
   getDeviceId(): Promise<string>;
   /** Revoke or validate current custody under the same lock, then delete it atomically. */
@@ -119,7 +157,7 @@ export type PrivateCredentialStore = CredentialStore & {
 };
 
 /** Resolve the host-owned default path without consulting project or Agent Home state. */
-export function resolveDefaultCredentialPath(home = homedir()): string {
+export function resolveDefaultCredentialPath(home: string): string {
   if (!isAbsolute(home)) {
     throw new Error("Default credential home must be absolute");
   }
@@ -137,7 +175,8 @@ function ownCredential(
   if (credentials === undefined || !Object.hasOwn(credentials, providerId)) {
     return undefined;
   }
-  return credentials[providerId];
+  const record = credentials[providerId];
+  return record?.type === "machine_enrollment" ? undefined : record;
 }
 
 function parseCredentials(serialized: string): CredentialMap {
@@ -161,7 +200,7 @@ function parseCredentials(serialized: string): CredentialMap {
  * Internal constructor permits one focused write-failure test while the public
  * package surface remains the Pi CredentialStore factory below.
  */
-export class FileCredentialStore implements CredentialStore {
+export class FileCredentialStore implements PrivateCredentialStore {
   readonly #path: string;
   readonly #writeAtomic: AtomicWrite;
 
@@ -220,10 +259,11 @@ export class FileCredentialStore implements CredentialStore {
     options?.signal?.throwIfAborted();
     const credentials = await this.#readCredentials();
     if (credentials === undefined) return [];
-    return Object.entries(credentials).map(([providerId, credential]) => ({
-      providerId,
-      type: credential.type,
-    }));
+    return Object.entries(credentials).flatMap(([providerId, credential]) =>
+      credential.type === "machine_enrollment"
+        ? []
+        : [{ providerId, type: credential.type }],
+    );
   }
 
   async modify(
@@ -237,6 +277,10 @@ export class FileCredentialStore implements CredentialStore {
     return await this.#withLock(async () => {
       options?.signal?.throwIfAborted();
       const credentials = (await this.#readCredentials()) ?? {};
+      if (credentials[providerId]?.type === "machine_enrollment")
+        throw credentialStoreError(
+          "A model credential cannot replace a machine enrollment",
+        );
       const current = ownCredential(credentials, providerId);
       const next = await callback(current);
       options?.signal?.throwIfAborted();
@@ -262,6 +306,61 @@ export class FileCredentialStore implements CredentialStore {
     options?: AuthOperationOptions,
   ): Promise<void> {
     await this.remove(providerId, () => Promise.resolve(), options);
+  }
+
+  async readMachineEnrollments(): Promise<MachineEnrollmentRecord[]> {
+    return Object.values((await this.#readCredentials()) ?? {}).filter(
+      (record): record is MachineEnrollmentRecord =>
+        record.type === "machine_enrollment",
+    );
+  }
+
+  async modifyMachineEnrollments(
+    origin: string,
+    edit: (
+      current: readonly LocalMachineEnrollment[],
+    ) => LocalMachineEnrollment[],
+    owner?: MachineEnrollmentOwner,
+  ): Promise<void> {
+    await this.#withLock(async () => {
+      const credentials = (await this.#readCredentials()) ?? {};
+      owner?.admit(ownCredential(credentials, owner.providerId));
+      const id = machineRecordId(origin);
+      const previous = credentials[id];
+      if (previous !== undefined && previous.type !== "machine_enrollment")
+        throw credentialStoreError("Machine enrollment record is occupied");
+      const enrollments = edit(previous?.enrollments ?? []);
+      const others = Object.fromEntries(
+        Object.entries(credentials).filter(([key]) => key !== id),
+      );
+      await this.#replace(
+        this.#validateCredentials(
+          enrollments.length === 0
+            ? others
+            : {
+                ...others,
+                [id]: machineEnrollmentRecordSchema.parse({
+                  type: "machine_enrollment",
+                  origin,
+                  enrollments,
+                }),
+              },
+        ),
+      );
+    });
+  }
+
+  async removeMachineEnrollments(origin: string): Promise<boolean> {
+    return this.#withLock(async () => {
+      const credentials = await this.#readCredentials();
+      const id = machineRecordId(origin);
+      if (credentials?.[id]?.type !== "machine_enrollment") return false;
+      const next = Object.fromEntries(
+        Object.entries(credentials).filter(([key]) => key !== id),
+      );
+      await this.#replace(this.#validateCredentials(next));
+      return true;
+    });
   }
 
   async remove<T>(
@@ -357,7 +456,7 @@ export class FileCredentialStore implements CredentialStore {
 
 /** Create the one private Pi CredentialStore selected by the local host. */
 export function createPrivateCredentialStore(
-  path = resolveDefaultCredentialPath(),
+  path: string,
 ): PrivateCredentialStore {
   return new FileCredentialStore(path);
 }

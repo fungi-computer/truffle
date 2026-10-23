@@ -60,6 +60,7 @@ it("reopens a persisted retry and delivers it to the addressed recipient once", 
         acquire: () =>
           Promise.resolve({
             model: faux.model,
+            retryable: () => false,
             stream: faux.stream,
             release: () => Promise.resolve(),
           }),
@@ -189,6 +190,7 @@ it.each([
             acquire: () =>
               Promise.resolve({
                 model: faux.model,
+                retryable: () => false,
                 stream: faux.stream,
                 release: () => Promise.resolve(),
               }),
@@ -234,6 +236,7 @@ it.each([
             acquire: () =>
               Promise.resolve({
                 model: faux.model,
+                retryable: () => false,
                 stream: faux.stream,
                 release: () => Promise.resolve(),
               }),

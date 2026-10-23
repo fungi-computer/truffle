@@ -59,6 +59,69 @@ function options(
 }
 
 describe("Local auth CLI", () => {
+  describe("API key prompt", () => {
+    function keyLogin(answer: string) {
+      const stored: ApiKeyCredential[] = [];
+      const providerLogin = vi.fn(
+        async (auth: AuthInteraction): Promise<ApiKeyCredential> => {
+          const key = await auth.prompt({
+            type: "secret",
+            message: "Enter OpenAI API key",
+          });
+          return { key, type: "api_key" };
+        },
+      );
+      const login = vi.fn<AuthModels["login"]>(async (_id, _type, auth) => {
+        const credential = await providerLogin(auth);
+        stored.push(credential);
+        return credential;
+      });
+      const notices: string[] = [];
+      const interaction: AuthInteraction = {
+        prompt: vi.fn(() => Promise.resolve(answer)),
+        notify: vi.fn((event: Parameters<AuthInteraction["notify"]>[0]) => {
+          if (event.type === "info") notices.push(event.message);
+        }),
+      };
+      const models: AuthModels = {
+        getProviders: () => [
+          provider("openai", {
+            apiKey: {
+              name: "OpenAI API key",
+              login: providerLogin,
+              resolve: noAuth,
+            },
+          }),
+        ],
+        checkAuth: vi.fn(),
+        login,
+        logout: vi.fn(),
+      };
+      const run = runLocalAuthCli(
+        ["login", "--provider", "openai", "--auth-type", "api_key"],
+        options(models, interaction),
+      );
+      return { run, stored, notices };
+    }
+
+    it.each(["", "   ", "\t\n"])(
+      "refuses a blank API key (%j) with No key entered and stores nothing",
+      async (blank) => {
+        const { run, stored, notices } = keyLogin(blank);
+        await expect(run).rejects.toThrow("No key entered");
+        expect(stored).toEqual([]);
+        expect(notices.join("\n")).not.toContain("login complete");
+      },
+    );
+
+    it("still completes with a non-empty API key", async () => {
+      const { run, stored, notices } = keyLogin("synthetic-api-key");
+      await run;
+      expect(stored).toEqual([{ key: "synthetic-api-key", type: "api_key" }]);
+      expect(notices.join("\n")).toContain("login complete");
+    });
+  });
+
   it("selects among actual providers and dispatches API-key login", async () => {
     const providerLogin = vi.fn(() => Promise.resolve(apiKeyCredential()));
     const providers = [
@@ -180,6 +243,7 @@ describe("Local auth CLI", () => {
       expect.any(Object),
     );
     expect(login.mock.calls[0]?.[3]?.getDeviceId).toBeTypeOf("function");
+    expect(login.mock.calls[0]?.[3]?.agentName).toBe("Shiitake");
   });
 
   it("stamps the resolved provider's display name onto an auth_url notice", async () => {

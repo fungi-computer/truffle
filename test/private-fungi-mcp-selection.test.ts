@@ -3,10 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
-import {
-  fungiMcpSelectionSchema,
-  readFungiMcpSelection,
-} from "../src/private-fungi-mcp-selection.js";
+import { readFungiMcpSelection } from "../src/private-fungi-mcp-selection.js";
+import { fungiMcpSelectionSchema } from "../src/private-fungi-mcp-selection-schema.js";
 import { privateFungiAccountOAuthProvider } from "../src/private-fungi-account.js";
 
 describe("private hosted Computer OAuth selection", () => {

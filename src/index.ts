@@ -2,6 +2,19 @@ export {
   createPrivateCredentialStore,
   resolveDefaultCredentialPath,
 } from "./private-file-credential-store.js";
+export type {
+  McpFormApprovalRequest,
+  McpFormApprovalDecision,
+  McpFormAnswerResult,
+} from "./private-mcp-form-contract.js";
+export {
+  McpFormApprovalRequestSchema,
+  mcpFormApprovalContract,
+} from "./private-mcp-form-contract.js";
+export type {
+  McpFormApprovalRefusal,
+  RequestMcpFormApproval,
+} from "./private-mcp-form-elicitation.js";
 export type { PrivateCredentialStore } from "./private-file-credential-store.js";
 export {
   createPrivateModels,
@@ -9,7 +22,11 @@ export {
   listPrivateModels,
   type PrivateLocalModelChoice,
 } from "./local-models.js";
-export { defaultLocalModel } from "./private-local-default-model.js";
+export {
+  resolveAgentStartupModel,
+  type LocalStartupModel,
+  type LocalStartupModelSource,
+} from "./private-local-startup-model.js";
 export { createPrivateInvocationFilesPort } from "./private-invocation-files.js";
 export { createPrivateInvocationComputer } from "./private-invocation-computer.js";
 export { ensurePrivateLocalGitExclude } from "./private-local-git-exclude.js";
@@ -34,6 +51,15 @@ export {
 } from "./fungi-account-command.js";
 export type { PrivateFungiMcpConnectionOptions } from "./private-fungi-mcp-connection.js";
 export { parseFungiMcpEndpoint } from "./private-fungi-mcp-endpoint.js";
+export { readProjectFungiMcpSelection } from "./private-fungi-mcp-selection.js";
+export {
+  fungiMcpSelectionSchema,
+  type PrivateFungiMcpSelection,
+} from "./private-fungi-mcp-selection-schema.js";
+export {
+  saveOysterMcpKey,
+  OysterMcpKeyRejectedError,
+} from "./private-oyster-mcp-auth.js";
 export {
   attachPrivateLocalComputer,
   detachPrivateLocalComputer,
@@ -60,13 +86,20 @@ export {
 } from "./private-local-shiitake-host.js";
 export {
   createPrivateLocalServiceManager,
+  LocalAgentSelectionAmbiguous,
+  LocalServiceUnreadableResponse,
   LocalSessionPathConflict,
   runPrivateLocalWorkerServer,
   type PrivateLocalServiceConnection,
   type PrivateLocalServiceManager,
   type PrivateLocalServiceRequestOptions,
+  type PrivateLocalDiscoveryOptions,
+  type PrivateLocalArchiveRequest,
   type PrivateLocalServiceSelection,
   type PrivateLocalServiceStatus,
+  type ServiceDiagnosticsStatus,
+  type ServiceDiagnosticsFailureCode,
+  type PrivateLocalAgentChoice,
   type PrivateLocalSessionChoice,
   type PrivateLocalSessionDiscovery,
   type PrivateLocalSessionInspection,
@@ -84,3 +117,8 @@ export {
 } from "./private-team-computers.js";
 
 export { runTrackerGitCredential } from "./tracker-git-credential.js";
+export {
+  activateSubscriptionCredential,
+  CredentialActivationError,
+} from "./subscription-activation.js";
+export { prepareSubscriptionIdentity } from "./subscription-identity.js";

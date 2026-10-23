@@ -12,6 +12,11 @@ import {
 import { Mycelium, type CapabilitySource } from "@fungi.computer/mycelium";
 import { z } from "zod";
 import { parseFungiMcpEndpoint } from "./private-fungi-mcp-endpoint.js";
+import {
+  registerMcpFormElicitation,
+  McpFormApprovalError,
+  type RequestMcpFormApproval,
+} from "./private-mcp-form-elicitation.js";
 
 const localPackage = z
   .looseObject({ version: z.string().min(1) })
@@ -50,8 +55,11 @@ export function fungiMcpReachableFetch(
   fetchImpl: FetchLike = fetch,
 ): FetchLike {
   return async (url, init) => {
+    const target = new URL(url instanceof Request ? url.url : String(url));
+    if (target.origin !== endpoint.origin)
+      throw new Error("Refusing an MCP request outside the selected origin");
     try {
-      const response = await fetchImpl(url, init);
+      const response = await fetchImpl(url, { ...init, redirect: "error" });
       const authorization = new Headers(init?.headers).get("Authorization");
       if (response.status === 401 && authorization?.startsWith("Bearer "))
         rejectedAccess.set(response, authorization.slice(7));
@@ -66,9 +74,12 @@ export function fungiMcpReachableFetch(
 /** Host-held selection and credentials; neither enters the model's arguments. */
 export type PrivateFungiMcpConnectionOptions = Readonly<{
   endpoint: URL;
+  authentication?: "oyster-key" | undefined;
   authProvider: AuthProvider | OAuthClientProvider;
   /** The maintained transport's fetch seam, also used by the local caller proof. */
   fetch?: FetchLike;
+  /** Trusted human interaction; never supplied by model arguments. */
+  requestApproval?: RequestMcpFormApproval | undefined;
 }>;
 
 /**
@@ -84,9 +95,14 @@ export function createPrivateFungiMcpConnection(
 
   return {
     id: "fungi-mcp",
-    acquire: async ({ signal }) => {
+    acquire: async ({ signal, session }) => {
       signal.throwIfAborted();
       const client = new Client(fungiMcpClientInfo);
+      const forms = registerMcpFormElicitation(
+        client,
+        options.requestApproval,
+        session?.sessionId,
+      );
       const transportOptions: StreamableHTTPClientTransportOptions = {
         authProvider: options.authProvider,
         fetch,
@@ -118,12 +134,23 @@ export function createPrivateFungiMcpConnection(
                         return z
                           .json()
                           .parse(
-                            await client.callTool(
-                              { name: "execute", arguments: input },
-                              { signal: context.signal },
+                            await forms.run(context.signal, (signal) =>
+                              client.callTool(
+                                { name: "execute", arguments: input },
+                                { signal },
+                              ),
                             ),
                           );
                       } catch (cause) {
+                        if (cause instanceof McpFormApprovalError)
+                          return {
+                            isError: true,
+                            content: [{ type: "text", text: cause.message }],
+                            structuredContent: {
+                              kind: cause.kind,
+                              reason: cause.reason,
+                            },
+                          };
                         // Report uncertainty as a failed MCP result so the caller
                         // can distinguish it from a successful remote result.
                         // Replaying arbitrary JavaScript here could duplicate work.
@@ -168,12 +195,16 @@ export function createPrivateFungiMcpConnection(
               }),
             ],
           },
-          release: () => client.close(),
+          release: () => {
+            forms.close();
+            return client.close();
+          },
         };
       } catch (error) {
+        forms.close();
         await client.close();
+        if (error instanceof UnauthorizedError) throw error;
         if (
-          error instanceof UnauthorizedError ||
           error instanceof FungiSignInRequiredError ||
           z.object({ status: z.literal(401) }).safeParse(error).success
         )

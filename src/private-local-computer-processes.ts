@@ -1,7 +1,10 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import {
+  spawn,
+  type ChildProcess,
+  type StdioOptions,
+} from "node:child_process";
 import { closeSync, openSync, readSync, writeSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
@@ -13,6 +16,11 @@ import {
   launchStdinSchema,
   maximumLaunchTextLength,
 } from "./private-local-exec-launch.js";
+import { privateLocalExecEnvironment } from "./private-local-exec-environment.js";
+import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
+import { Writable } from "node:stream";
+import type { SandboxCommand } from "./private-local-containment.js";
+import type { LocalSandboxLaunch } from "./private-invocation-computer.js";
 
 /**
  * Background processes of the local Computer: the one owner of "a command that
@@ -265,38 +273,63 @@ class ManagedProcess {
     readonly cwd: string,
     logDirectory: string,
     executionPath: string,
+    home: string,
+    launch?: SandboxCommand,
   ) {
     this.command = describeCommandSpec(spec);
     this.logPath = join(logDirectory, `${this.id}.log`);
     this.#fd = openSync(this.logPath, "wx+", 0o600);
     const closed = Promise.withResolvers<undefined>();
     this.closed = closed.promise;
-    const env = { PATH: executionPath, HOME: process.env.HOME ?? homedir() };
+    const env = privateLocalExecEnvironment(executionPath, {
+      HOME: home,
+      XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+      DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS,
+    });
+    if (launch !== undefined) {
+      delete env.XDG_RUNTIME_DIR;
+      delete env.DBUS_SESSION_BUS_ADDRESS;
+      Object.assign(env, launch.environment);
+    }
     try {
       // Its own process group, so neither exec's finalizer nor this host's
       // terminal signals reach it; kill() owns ending the whole group.
-      this.#child =
+      const argv: [string, ...string[]] =
         spec.kind === "shell"
-          ? spawn("sh", ["-c", spec.command], {
-              cwd,
-              env,
-              detached: true,
-              stdio: [
-                spec.stdin === undefined ? "ignore" : "pipe",
-                "pipe",
-                "pipe",
-              ],
-            })
-          : spawn(spec.executable, spec.args, {
-              cwd,
-              env,
-              detached: true,
-              stdio: [
-                spec.stdin === undefined ? "ignore" : "pipe",
-                "pipe",
-                "pipe",
-              ],
-            });
+          ? ["sh", "-c", spec.command]
+          : [spec.executable, ...spec.args];
+      const stdio: StdioOptions = [
+        spec.stdin === undefined ? "ignore" : "pipe",
+        "pipe",
+        "pipe",
+      ];
+      if (launch?.seccompFilter !== undefined) stdio.push("pipe");
+      this.#child = spawn(
+        launch?.executable ?? argv[0],
+        launch?.args ?? argv.slice(1),
+        {
+          cwd,
+          env,
+          detached: true,
+          stdio,
+        },
+      );
+      if (launch?.seccompFilter !== undefined) {
+        const filter = this.#child.stdio[3];
+        if (!(filter instanceof Writable)) {
+          this.#child.kill("SIGKILL");
+          throw new Error("Local sandbox filter input fd3 is unavailable");
+        }
+        // A failed filter delivery cannot become a bare retry or an unhandled
+        // stream error. The existing process owner records and reaps failure.
+        filter.on("error", (error) => {
+          this.#append(
+            Buffer.from(`\n[fungi: sandbox filter failed: ${error.message}]\n`),
+          );
+          this.killNow();
+        });
+        filter.end(launch.seccompFilter);
+      }
       // Finite stdin, delivered once and closed; never an interactive
       // protocol. `end()` writes the bytes and closes the write side. A
       // child that exits or closes its own stdin before the payload drains
@@ -475,6 +508,7 @@ export type PrivateLocalProcessScope = Readonly<{
     spec: PrivateLocalProcessCommandSpec,
     cwd: string,
     executionPath: string,
+    sandbox?: LocalSandboxLaunch,
   ) => Promise<PrivateLocalProcess>;
   status: (id: string) => PrivateLocalProcess;
   list: () => readonly PrivateLocalProcess[];
@@ -496,6 +530,8 @@ export type PrivateLocalComputerProcesses = Readonly<{
   scope: (key: string) => PrivateLocalProcessScope;
   /** Stop every process of one scope and remove its logs (Session ended). */
   disposeScope: (key: string) => Promise<void>;
+  /** Whether any background process of any scope is still running. */
+  running: () => boolean;
   /** Stop every process, remove every log, and refuse new starts. */
   close: () => Promise<void>;
 }>;
@@ -503,6 +539,7 @@ export type PrivateLocalComputerProcesses = Readonly<{
 /** Open the background-process owner for one invocation root. */
 export function createPrivateLocalComputerProcesses(
   root: string,
+  home: string = capturePrivateLocalConfigRoot().home,
 ): PrivateLocalComputerProcesses {
   const logDirectory = join(root, ".fungi", "processes");
   const scopes = new Map<string, Map<string, ManagedProcess>>();
@@ -538,7 +575,7 @@ export function createPrivateLocalComputerProcesses(
       return record;
     };
     return Object.freeze({
-      start: async (spec, cwd, executionPath) => {
+      start: async (spec, cwd, executionPath, sandbox) => {
         if (closed) throw new Error("Local Computer processes are closed");
         const records = owned();
         const running = [...records.values()].filter((r) => r.running).length;
@@ -565,11 +602,18 @@ export function createPrivateLocalComputerProcesses(
           process.on("exit", killAllNow);
           exitHook = true;
         }
+        const argv: [string, ...string[]] =
+          spec.kind === "shell"
+            ? ["sh", "-c", spec.command]
+            : [spec.executable, ...spec.args];
+        const launch = sandbox?.(cwd, argv);
         const started = new ManagedProcess(
           spec,
           cwd,
           logDirectory,
           executionPath,
+          home,
+          launch,
         );
         records.set(started.id, started);
         return started.snapshot();
@@ -612,6 +656,7 @@ export function createPrivateLocalComputerProcesses(
       scopes.delete(key);
       if (owned !== undefined) await dispose(owned);
     },
+    running: () => all().some((record) => record.running),
     close: async () => {
       closed = true;
       const owned = [...scopes.values()];
@@ -662,6 +707,7 @@ export async function callBackgroundExec(
   resolveCwd: (requested: string | undefined) => Promise<string>,
   executionPath: string,
   signal: AbortSignal,
+  sandbox?: LocalSandboxLaunch,
 ): Promise<z.output<typeof backgroundExecOutput>> {
   signal.throwIfAborted();
   if (request.operation === "list") return { processes: [...scope.list()] };
@@ -672,7 +718,9 @@ export async function callBackgroundExec(
     case "start": {
       const cwd = await resolveCwd(request.cwd);
       signal.throwIfAborted();
-      id = (await scope.start(toCommandSpec(request), cwd, executionPath)).id;
+      id = (
+        await scope.start(toCommandSpec(request), cwd, executionPath, sandbox)
+      ).id;
       break;
     }
     case "wait":

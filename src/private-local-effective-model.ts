@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { thinkingLevelSchema } from "./private-fungi-model-catalog.js";
+
 /** Secret-free model status published by the Local owner for one Session. */
 export const privateLocalEffectiveModelSchema = z.strictObject({
   agentName: z.literal("Shiitake"),
@@ -11,6 +13,8 @@ export const privateLocalEffectiveModelSchema = z.strictObject({
     kind: z.enum(["oauth", "api_key", "missing"]),
     source: z.string().min(1).max(160),
   }),
+  /** The resolved thinking level a run would use; absent when the model has none. */
+  reasoning: thinkingLevelSchema.optional(),
   label: z.string().min(1).max(640),
 });
 

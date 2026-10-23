@@ -12,6 +12,7 @@ import {
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import process from "node:process";
+import { dirname, resolve } from "node:path";
 import {
   auth,
   Client,
@@ -37,13 +38,23 @@ import type {
   OAuthAuth,
 } from "@earendil-works/pi-ai";
 import { createPrivateCredentialStore } from "./private-file-credential-store.js";
+import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import { parseFungiMcpEndpoint } from "./private-fungi-mcp-endpoint.js";
 import { logEvent } from "./log-event.js";
+import {
+  machineEnrollmentAuthoritySchema,
+  machineEnrollmentRecordKind,
+  type LocalMachineEnrollmentAccount,
+} from "./private-local-mesh-record.js";
 import {
   fungiMcpClientInfo,
   fungiMcpReachableFetch,
   rejectedFungiMcpAccess,
 } from "./private-fungi-mcp-connection.js";
+import {
+  signOutFungiThroughLocalService,
+  type FungiAccountLogoutResult,
+} from "./private-fungi-service-logout.js";
 
 const credentialId = "fungi";
 const localScopes =
@@ -86,20 +97,29 @@ const teamChoiceSchema = z.object({
 });
 export type FungiAccountTeam = z.output<typeof teamChoiceSchema>;
 
-const savedCredentialSchema = z.looseObject({
-  type: z.literal("oauth"),
-  access: z.string(),
-  refresh: z.string(),
-  expires: z.number(),
-  clientId: z.string().min(1).optional(),
-  issuer: z.url().optional(),
-  clientInformation: z.json().optional(),
-  tokens: z.json().optional(),
-  codeVerifier: z.string().optional(),
-  localBackends: z.array(localBackendRecordSchema).max(16).optional(),
-  team: teamChoiceSchema.optional(),
-  teamCount: z.number().int().min(0).max(1000).optional(),
-});
+const savedCredentialSchema = z
+  .looseObject({
+    type: z.literal("oauth"),
+    access: z.string(),
+    refresh: z.string(),
+    expires: z.number(),
+    clientId: z.string().min(1).optional(),
+    issuer: z.url().optional(),
+    clientInformation: z.json().optional(),
+    tokens: z.json().optional(),
+    codeVerifier: z.string().optional(),
+    localBackends: z.array(localBackendRecordSchema).max(16).optional(),
+    team: teamChoiceSchema.optional(),
+    teamCount: z.number().int().min(0).max(1000).optional(),
+  })
+  .transform((credential) => {
+    // Preview credentials saved device enrollments here without an issuer
+    // binding, private keys included. They cannot be attributed to an issuer,
+    // so they are never read and the next write of this credential drops them.
+    const current = { ...credential };
+    delete current.machineEnrollments;
+    return current;
+  });
 
 type SavedCredential = z.infer<typeof savedCredentialSchema>;
 export type PrivateFungiAccountOAuthProviderOptions = {
@@ -132,12 +152,12 @@ function localClientMetadata(redirectUrl: string): OAuthClientMetadata {
   };
 }
 
-function credentialStore(path?: string) {
+function credentialStore(path: string) {
   return createPrivateCredentialStore(path);
 }
 
 async function readCredential(
-  path?: string,
+  path: string,
 ): Promise<SavedCredential | undefined> {
   const credential = await credentialStore(path).read(credentialId);
   if (credential?.type !== "oauth") return undefined;
@@ -147,9 +167,87 @@ async function readCredential(
   return result.data;
 }
 
+/**
+ * Enrollment uses the account file and lock, without Pi's selected-payer view.
+ * Fungi enrollments are partitioned by issuer in the origin-keyed enrollment
+ * records: only the signed-in issuer's partition is ever read for dialing, so
+ * a switch never lends one issuer's Team or device identifiers to another,
+ * and signing in to an issuer again finds its own partition.
+ */
+export function createLocalMachineEnrollmentAccount(
+  credentialPath: string,
+): LocalMachineEnrollmentAccount {
+  return {
+    read: async () => {
+      const saved = await readCredential(credentialPath);
+      const records =
+        await credentialStore(credentialPath).readMachineEnrollments();
+      const issuer =
+        saved?.issuer !== undefined && saved.access !== ""
+          ? saved.issuer
+          : undefined;
+      const partition = records.find(
+        (record) =>
+          record.origin === issuer &&
+          machineEnrollmentRecordKind(record) === "oauth",
+      );
+      return [
+        ...(issuer !== undefined
+          ? [
+              {
+                kind: "oauth" as const,
+                origin: issuer,
+                enrollments: partition?.enrollments ?? [],
+              },
+            ]
+          : []),
+        ...records.flatMap((record) =>
+          machineEnrollmentRecordKind(record) === "oyster"
+            ? [
+                {
+                  kind: "oyster" as const,
+                  origin: record.origin,
+                  enrollments: record.enrollments,
+                },
+              ]
+            : [],
+        ),
+      ];
+    },
+    update: async (rawAuthority, edit) => {
+      const authority = machineEnrollmentAuthoritySchema.parse(rawAuthority);
+      if (authority.kind === "oyster") {
+        await credentialStore(credentialPath).modifyMachineEnrollments(
+          authority.origin,
+          edit,
+        );
+        return;
+      }
+      await credentialStore(credentialPath).modifyMachineEnrollments(
+        authority.origin,
+        edit,
+        {
+          providerId: credentialId,
+          admit: (current) => {
+            const parsed = savedCredentialSchema.safeParse(current);
+            if (
+              !parsed.success ||
+              parsed.data.access === "" ||
+              parsed.data.issuer !== authority.origin
+            )
+              throw new Error(
+                "Fungi sign-in changed before machine enrollment was persisted",
+              );
+          },
+        },
+      );
+    },
+  };
+}
+
 async function updateCredential(
   patch: Partial<SavedCredential>,
-  path?: string,
+  path: string,
 ): Promise<void> {
   const store = credentialStore(path);
   await store.modify(credentialId, (current) => {
@@ -213,7 +311,7 @@ function respond(
 
 /** Persisted OAuth state uses Local's existing owner-only Pi credential file. */
 export function privateFungiAccountOAuthProvider(
-  options: PrivateFungiAccountOAuthProviderOptions = {},
+  input: PrivateFungiAccountOAuthProviderOptions = {},
 ): OAuthClientProvider & {
   saveClientInformation(
     information: StoredOAuthClientInformation,
@@ -221,6 +319,11 @@ export function privateFungiAccountOAuthProvider(
   expectedState(): string | undefined;
   authorizationUrl(): URL | undefined;
 } {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   const interactive = options.interactive ?? false;
   const credentialPath = options.credentialPath;
   const issuer = options.issuer ?? options.endpoint?.origin;
@@ -438,11 +541,28 @@ export type PrivateFungiAccountLoginOptions = {
   openBrowser?: (url: URL) => void;
 };
 
-export type PrivateFungiAccountLogoutResult = Readonly<{
-  kind: "not-logged-in" | "removed" | "revoked";
-  message: string;
-  unconfirmedComputers: readonly Readonly<{ name: string; url: string }>[];
-}>;
+export type PrivateFungiAccountLogoutResult = FungiAccountLogoutResult;
+
+/** An in-process account change the service owner reacts to. */
+export type FungiAccountChange = Readonly<{ type: "signed-out" }>;
+const accountOwners = new Map<
+  string,
+  (event: FungiAccountChange) => Promise<void>
+>();
+
+/** Installed only by the service holding this home's owner lease. */
+export function registerFungiAccountOwner(
+  credentialPath: string,
+  changed: (event: FungiAccountChange) => Promise<void>,
+): () => void {
+  const path = resolve(credentialPath);
+  if (accountOwners.has(path))
+    throw new Error("Fungi account already has an in-process owner");
+  accountOwners.set(path, changed);
+  return () => {
+    accountOwners.delete(path);
+  };
+}
 
 function logoutResult(
   kind: PrivateFungiAccountLogoutResult["kind"],
@@ -553,7 +673,7 @@ async function revokeSavedGrant(
 
 async function removeSavedLogin(
   saved: SavedCredential,
-  options: { credentialPath?: string; fetch?: FetchLike },
+  options: { credentialPath: string; fetch?: FetchLike },
 ): Promise<PrivateFungiAccountLogoutResult> {
   const pending = pendingLogouts(options.credentialPath);
   const unconfirmed: { name: string; url: string }[] = [];
@@ -618,6 +738,10 @@ async function removeSavedLogin(
       return value;
     },
   );
+  // Publish after the committed removal, before remote revocation can stall.
+  await accountOwners.get(resolve(options.credentialPath))?.({
+    type: "signed-out",
+  });
   if (latest === undefined || latest.refresh === "")
     return logoutResult("not-logged-in", saved.issuer, unconfirmed);
   let revoked = await revokeSavedGrant(latest, options.fetch);
@@ -646,8 +770,13 @@ export type FungiAccountStatus = {
 
 /** Non-secret status of the shared Fungi account. */
 export async function readFungiAccountStatus(
-  options: { credentialPath?: string } = {},
+  input: { credentialPath?: string } = {},
 ): Promise<FungiAccountStatus | undefined> {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   const saved = await readCredential(options.credentialPath);
   if (saved?.issuer === undefined || saved.access === "") return undefined;
   const status: FungiAccountStatus = {
@@ -660,20 +789,81 @@ export async function readFungiAccountStatus(
 }
 
 /**
- * Remove the saved Fungi MCP login for the endpoint's origin and ask that
- * issuer to revoke its refresh grant. A login for another origin is kept.
+ * Ask the running Local account owner to remove this origin's login and revoke
+ * its refresh grant. Without a service, clear offline; never start one for
+ * logout. A login for another origin is kept. Explicit standalone stores have
+ * no service home; clients with a custom service directory name it explicitly.
  */
 export async function signOutFungiAccount(
   rawEndpoint?: string | URL,
-  options: { credentialPath?: string; fetch?: FetchLike } = {},
+  input: {
+    credentialPath?: string;
+    serviceDirectory?: string;
+    fetch?: FetchLike;
+  } = {},
 ): Promise<PrivateFungiAccountLogoutResult> {
+  const credentialPath = resolve(
+    input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  );
+  if (accountOwners.has(credentialPath))
+    return await signOutOwnedFungiAccount(rawEndpoint, {
+      ...input,
+      credentialPath,
+    });
+  // The ordinary CLI supplies this canonical path, including for an explicitly
+  // selected home. Do not reselect ambient HOME after that boundary.
+  const root = capturePrivateLocalConfigRoot(
+    dirname(dirname(dirname(credentialPath))),
+  );
+  const directory =
+    input.serviceDirectory ??
+    (root.credentialPath === credentialPath
+      ? root.serviceDirectory
+      : undefined);
+  if (directory !== undefined) {
+    return await signOutFungiThroughLocalService(rawEndpoint, {
+      ...input,
+      credentialPath,
+      directory,
+      clearOffline: signOutOwnedFungiAccount,
+    });
+  }
+  // Explicit standalone credential stores have no service home. A client using
+  // a custom service directory supplies it above; the server checks the path.
+  return await signOutOwnedFungiAccount(rawEndpoint, {
+    ...input,
+    credentialPath,
+  });
+}
+
+/** Store mutation for the service owner or a verified no-service caller. */
+export async function signOutOwnedFungiAccount(
+  rawEndpoint?: string | URL,
+  input: { credentialPath?: string; fetch?: FetchLike } = {},
+): Promise<PrivateFungiAccountLogoutResult> {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   const saved = await readCredential(options.credentialPath);
   const origin =
     rawEndpoint === undefined
       ? saved?.issuer
       : validateEndpoint(rawEndpoint).origin;
-  if (saved === undefined || saved.issuer !== origin)
-    return logoutResult("not-logged-in", origin);
+  const removedMachine =
+    origin !== undefined &&
+    (await credentialStore(options.credentialPath).removeMachineEnrollments(
+      origin,
+    ));
+  if (saved === undefined || saved.issuer !== origin) {
+    if (removedMachine)
+      await accountOwners.get(resolve(options.credentialPath))?.({
+        type: "signed-out",
+      });
+    // Local custody ended; this is not a claim of remote device revocation.
+    return logoutResult(removedMachine ? "removed" : "not-logged-in", origin);
+  }
   return removeSavedLogin(saved, options);
 }
 
@@ -761,10 +951,15 @@ export function fungiMcpTeamEndpoint(rawEndpoint: string | URL) {
 
 /** The machine's attached folders, as Local keeps them. */
 export async function readFungiMcpLocalBackends(
-  options: Readonly<{ credentialPath?: string }> = {},
+  input: Readonly<{ credentialPath?: string }> = {},
 ): Promise<
   Readonly<{ issuer: string | undefined; backends: LocalBackendRecord[] }>
 > {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   const saved = await readCredential(options.credentialPath);
   return {
     issuer: saved?.issuer,
@@ -775,8 +970,13 @@ export async function readFungiMcpLocalBackends(
 /** Replace the attached folder records in the owner-only credential file. */
 export async function writeFungiMcpLocalBackends(
   update: (current: readonly LocalBackendRecord[]) => LocalBackendRecord[],
-  options: Readonly<{ credentialPath?: string }> = {},
+  input: Readonly<{ credentialPath?: string }> = {},
 ): Promise<void> {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   await credentialStore(options.credentialPath).modify(
     credentialId,
     (current) => {
@@ -796,7 +996,7 @@ export async function writeFungiMcpLocalBackends(
 /** A new session, never the saved family ID, authorizes delayed logout cleanup. */
 async function retryPendingLogout(
   endpoint: URL,
-  options: PrivateFungiAccountLoginOptions,
+  options: PrivateFungiAccountLoginOptions & { credentialPath: string },
 ): Promise<void> {
   try {
     const saved = await readCredential(options.credentialPath);
@@ -839,8 +1039,13 @@ async function retryPendingLogout(
 /** Complete first-party registration and OAuth authorization in a foreground TUI. */
 export async function signInFungiAccount(
   rawEndpoint: string | URL,
-  options: PrivateFungiAccountLoginOptions = {},
+  input: PrivateFungiAccountLoginOptions = {},
 ): Promise<void> {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   options.signal?.throwIfAborted();
   const endpoint = validateEndpoint(rawEndpoint);
   // Check the Hub before offering a browser handoff or replacing a saved login.
@@ -937,12 +1142,11 @@ export async function signInFungiAccount(
   const redirectUrl = `${callbackOrigin}${callbackPath}`;
   const providerOptions: PrivateFungiAccountOAuthProviderOptions = {
     interactive: true,
+    credentialPath: options.credentialPath,
     endpoint,
     redirectUrl,
     openBrowser: launchBrowser,
   };
-  if (options.credentialPath !== undefined)
-    providerOptions.credentialPath = options.credentialPath;
   const provider = privateFungiAccountOAuthProvider(providerOptions);
   // The browser is opened only after this handler is attached.
   server.on("request", (request: IncomingMessage, response: ServerResponse) => {
@@ -1085,7 +1289,7 @@ const teamPageSchema = z.looseObject({
 /** Read current memberships; the selected model Team never changes project MCP addressing. */
 async function accountTeams(
   rawHub: string | URL,
-  options: { credentialPath?: string; fetch?: FetchLike; signal?: AbortSignal },
+  options: { credentialPath: string; fetch?: FetchLike; signal?: AbortSignal },
 ): Promise<FungiAccountTeam[]> {
   const issuer = validateEndpoint(rawHub).origin;
   const teams: FungiAccountTeam[] = [];
@@ -1118,7 +1322,7 @@ async function saveSelectedTeam(
   issuer: string,
   team: FungiAccountTeam,
   teamCount: number,
-  credentialPath?: string,
+  credentialPath: string,
 ) {
   await credentialStore(credentialPath).modify(credentialId, (current) => {
     const saved = savedCredentialSchema.parse(current);
@@ -1134,7 +1338,7 @@ async function saveSelectedTeam(
 
 async function chooseFungiAccountTeam(
   rawHub: string | URL,
-  options: PrivateFungiAccountLoginOptions,
+  options: PrivateFungiAccountLoginOptions & { credentialPath: string },
 ) {
   const issuer = validateEndpoint(rawHub).origin;
   const teams = await accountTeams(issuer, options);
@@ -1153,8 +1357,13 @@ async function chooseFungiAccountTeam(
 /** Switch only to a fresh membership; failure preserves the prior selected Team. */
 export async function switchFungiAccountTeam(
   teamId: string,
-  options: { credentialPath?: string; fetch?: FetchLike } = {},
+  input: { credentialPath?: string; fetch?: FetchLike } = {},
 ): Promise<void> {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   const saved = await readCredential(options.credentialPath);
   if (saved?.issuer === undefined)
     throw new Error("Sign in to Fungi to choose a Team");
@@ -1177,8 +1386,13 @@ export type FungiAccountTeams = Readonly<{
 
 /** Fresh memberships for the saved account, with the Team that pays for models. */
 export async function readFungiAccountTeams(
-  options: { credentialPath?: string; fetch?: FetchLike } = {},
+  input: { credentialPath?: string; fetch?: FetchLike } = {},
 ): Promise<FungiAccountTeams> {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   const saved = await readCredential(options.credentialPath);
   if (saved?.issuer === undefined || saved.access === "")
     throw new Error("Sign in to Fungi to list your Teams");
@@ -1231,8 +1445,13 @@ export type FungiTeamBalance =
     }>;
 
 export async function readFungiTeamBalance(
-  options: { credentialPath?: string; fetch?: FetchLike } = {},
+  input: { credentialPath?: string; fetch?: FetchLike } = {},
 ): Promise<FungiTeamBalance> {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   const saved = await readCredential(options.credentialPath);
   if (saved?.issuer === undefined || saved.access === "")
     throw new Error("Sign in to Fungi to read your Team balance");
@@ -1362,7 +1581,7 @@ function cachedFungiAccess(
  */
 export async function freshFungiAccess(
   rawHub: string | URL,
-  options: {
+  input: {
     credentialPath?: string;
     fetch?: FetchLike;
     signal?: AbortSignal;
@@ -1370,6 +1589,11 @@ export async function freshFungiAccess(
     rejectedAccess?: string;
   } = {},
 ): Promise<string> {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   const issuer = validateEndpoint(rawHub).origin;
   options.signal?.throwIfAborted();
   const cached = await readCredential(options.credentialPath);
@@ -1396,12 +1620,17 @@ export async function freshFungiAccess(
 /** Retry an explicitly refused request once; the cloned body is replayable. */
 export function fungiAccountFetch(
   rawHub: string | URL,
-  options: {
+  input: {
     credentialPath?: string;
     fetch?: FetchLike;
     signal?: AbortSignal;
   } = {},
 ): typeof globalThis.fetch {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   const issuer = validateEndpoint(rawHub).origin;
   const transport = ownFungiFetch(issuer, options.fetch, options.signal);
   const requestWithRetry = async (
@@ -1452,12 +1681,17 @@ export function fungiAccountFetch(
 /** The SDK owns exactly one retry; this hook rotates only the refused credential. */
 export function fungiMcpAccountAuth(
   endpoint: URL,
-  options: {
+  input: {
     credentialPath?: string;
     fetch?: FetchLike;
     signal?: AbortSignal;
   } = {},
 ): AuthProvider {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   let lastToken: string | undefined;
   return {
     token: async () => {
@@ -1484,8 +1718,13 @@ export function fungiAccountTeam(credential: Credential): FungiAccountTeam {
 
 /** Pi uses its own locked modify; this owner supplies the same refresh as MCP. */
 export function createFungiAccountOAuth(
-  options: { credentialPath?: string; fetch?: FetchLike } = {},
+  input: { credentialPath?: string; fetch?: FetchLike } = {},
 ): OAuthAuth {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   return {
     name: "Fungi",
     loginLabel: "Sign in to Fungi",
@@ -1538,8 +1777,13 @@ export function createFungiAccountOAuth(
 
 /** Pi deletion clears Local custody and reports unconfirmed remote revocation. */
 export function createFungiAccountCredentialStore(
-  options: { credentialPath?: string; fetch?: FetchLike } = {},
+  input: { credentialPath?: string; fetch?: FetchLike } = {},
 ): CredentialStore {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   const store = credentialStore(options.credentialPath);
   return {
     async read(id, operation) {

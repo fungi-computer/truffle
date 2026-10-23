@@ -154,6 +154,7 @@ async function executeAs(storeDirectory: string, code: string) {
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),
@@ -203,6 +204,18 @@ test("a Git source with a missing built entry is refused, never reported usable"
   expect(await owner.list()).toEqual([]);
 });
 
+test("the extension owner retains its selected home after ambient HOME changes", async () => {
+  const previous = process.env.HOME;
+  try {
+    process.env.HOME = join(scratch, "other-home");
+    expect(owner.root).toBe(join(home, ".fungi", "extensions"));
+    expect(await owner.list()).toEqual([]);
+  } finally {
+    if (previous === undefined) delete process.env.HOME;
+    else process.env.HOME = previous;
+  }
+});
+
 test("installs the Git package pinned to its resolved commit; enables the project and one Agent", async () => {
   await cp(join(fixture, "package.json"), join(work, "package.json"));
   const commit = publish("counter 1.0.0");
@@ -227,6 +240,32 @@ test("installs the Git package pinned to its resolved commit; enables the projec
   );
   await owner.enableProject(project, "counter");
   await owner.enableAgent(agentA, "counter");
+});
+
+test("an Agent enabling an extension on another Agent must hold it; a human enabling need not", async () => {
+  const target = join(project, ".fungi", "agents", "local_store_c");
+  await mkdir(target, { recursive: true });
+  // agentB holds nothing, so it cannot give counter away.
+  const refused = await owner
+    .enableAgent(target, "counter", { agentStoreDirectory: agentB })
+    .catch((cause: unknown) => cause);
+  expect(refused instanceof LocalExtensionError && refused.reason).toBe(
+    "not-held",
+  );
+  const lacking = await owner
+    .assertHeldByAgent(target, ["counter"])
+    .catch((cause: unknown) => cause);
+  expect(lacking instanceof LocalExtensionError && lacking.reason).toBe(
+    "not-held",
+  );
+  // agentA holds counter, so it can.
+  await owner.enableAgent(target, "counter", { agentStoreDirectory: agentA });
+  await owner.assertHeldByAgent(target, ["counter"]);
+  await owner.disableAgent(target, "counter");
+  // A human (the CLI) names no requester and holds nothing itself.
+  await owner.enableAgent(target, "counter");
+  await owner.assertHeldByAgent(target, ["counter"]);
+  await owner.disableAgent(target, "counter");
 });
 
 test("the project launcher runs the program; only the enabled Agent's execute calls reach it", async () => {
@@ -325,6 +364,7 @@ test("an upgrade keeps the accepted revision until re-enabled; disable and remov
   expect(await owner.enableAgent(agentA, "counter")).toEqual({
     revision: upgraded,
     capabilities: ["run_tools", "prompt"],
+    skills: false,
   });
   expect(await owner.disableAgent(agentA, "counter")).toBe(true);
   expect((await owner.agent(agentA, project)).roster).toEqual([]);

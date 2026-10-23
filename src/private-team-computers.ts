@@ -1,6 +1,7 @@
 import { setTimeout as delay } from "node:timers/promises";
 import type { FetchLike } from "@modelcontextprotocol/client";
 import { z } from "zod";
+import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import {
   callFungiMcpTeamControl,
   fungiMcpTeamEndpoint,
@@ -85,8 +86,13 @@ async function directory(endpoint: URL, options: Options) {
 /** Team directory and real runtime liveness, using Local's existing authenticated MCP transport. */
 export async function listPrivateTeamComputers(
   rawEndpoint: string,
-  options: Options = {},
+  input: Options = {},
 ) {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   const { endpoint } = fungiMcpTeamEndpoint(rawEndpoint);
   const computers = await directory(endpoint, options);
   const rows = [];
@@ -108,8 +114,13 @@ export async function listPrivateTeamComputers(
 export async function startPrivateTeamComputer(
   rawEndpoint: string,
   name: string,
-  options: Options & Readonly<{ onState: (state: ComputerState) => void }>,
+  input: Options & Readonly<{ onState: (state: ComputerState) => void }>,
 ) {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   const { endpoint } = fungiMcpTeamEndpoint(rawEndpoint);
   const computers = await directory(endpoint, options);
   const matches = computers.filter(

@@ -1,4 +1,5 @@
 import { localServiceIds } from "../src/private-local-service-ids.js";
+import { readOwnProcessStart } from "../src/private-local-process-identity.js";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,11 +11,17 @@ import { serve } from "bun";
 import {
   acquireServiceLock,
   handshake,
+  liveServiceStatusSchema,
+  privateLocalServiceProtocol,
   readLiveServiceStatus,
   readServiceRecord,
   removeOwnedServiceRecord,
   serviceDirectory,
+  type ServiceRecord,
 } from "../src/private-local-service-discovery.js";
+
+// The test process stands in for the recorded service process.
+const testProcessStart = await readOwnProcessStart();
 
 describe("private Local service discovery", () => {
   it("classifies a refused recorded service without logging raw errors", async () => {
@@ -23,8 +30,12 @@ describe("private Local service discovery", () => {
       port: 0,
       fetch: (): Response => new Response(),
     });
-    const record = {
+    const record: ServiceRecord = {
       serviceId: localServiceIds.service.generate(),
+      protocol: privateLocalServiceProtocol,
+      version: "source",
+      pid: process.pid,
+      startedAt: testProcessStart,
       baseUrl: server.url.origin,
     };
     await server.stop(true);
@@ -104,8 +115,12 @@ describe("private Local service discovery", () => {
   it("does not remove a newer service record when an orphan exits", async () => {
     const root = await mkdtemp(join(tmpdir(), "fungi-service-record-handoff-"));
     const oldServiceId = localServiceIds.service.generate();
-    const next = {
+    const next: ServiceRecord = {
       serviceId: localServiceIds.service.generate(),
+      protocol: privateLocalServiceProtocol,
+      version: "source",
+      pid: process.pid,
+      startedAt: testProcessStart,
       baseUrl: "http://127.0.0.1:43210",
     };
     await writeFile(join(root, "service.json"), JSON.stringify(next));
@@ -126,11 +141,26 @@ describe("private Local service discovery", () => {
       hostname: "127.0.0.1",
       port: 0,
       fetch: (): Response =>
-        Response.json({ serviceId, baseUrl: server.url.origin }),
+        Response.json({
+          diagnostics: { state: "active" },
+          serviceId,
+          protocol: privateLocalServiceProtocol,
+          version: "source",
+          pid: process.pid,
+          startedAt: testProcessStart,
+          baseUrl: server.url.origin,
+        }),
     });
     await writeFile(
       join(directory, "service.json"),
-      JSON.stringify({ serviceId, baseUrl: server.url.origin }),
+      JSON.stringify({
+        serviceId,
+        protocol: privateLocalServiceProtocol,
+        version: "source",
+        pid: process.pid,
+        startedAt: testProcessStart,
+        baseUrl: server.url.origin,
+      }),
       { mode: 0o600 },
     );
     try {
@@ -143,6 +173,8 @@ describe("private Local service discovery", () => {
           serviceId: localServiceIds.service.generate(),
         }),
       ).toBe(false);
+      // A recorded PID the live service does not claim is never signalled.
+      expect(await handshake({ ...record, pid: process.pid + 1 })).toBe(false);
     } finally {
       await server.stop(true);
       await rm(root, { recursive: true, force: true });
@@ -156,6 +188,10 @@ describe("private Local service discovery", () => {
       join(root, "service.json"),
       JSON.stringify({
         serviceId: localServiceIds.service.generate(),
+        protocol: privateLocalServiceProtocol,
+        version: "source",
+        pid: process.pid,
+        startedAt: testProcessStart,
         baseUrl: "https://example.com",
       }),
     );
@@ -165,4 +201,26 @@ describe("private Local service discovery", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+});
+
+it("live decoding refuses missing diagnostics and unknown failure codes", () => {
+  const identity = {
+    protocol: privateLocalServiceProtocol,
+    serviceId: localServiceIds.service.generate(),
+    pid: process.pid,
+    version: "source",
+    startedAt: "owned-fixture",
+    baseUrl: "http://127.0.0.1:12345",
+  };
+  expect(liveServiceStatusSchema.safeParse(identity).success).toBe(false);
+  expect(
+    liveServiceStatusSchema.safeParse({
+      ...identity,
+      diagnostics: {
+        state: "failed",
+        code: "private arbitrary cause",
+        since: "now",
+      },
+    }).success,
+  ).toBe(false);
 });

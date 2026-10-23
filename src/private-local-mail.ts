@@ -1,11 +1,13 @@
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
 import {
   BirdDogError,
+  hasPendingDelivery,
   make as makeBirdDog,
   type BirdDogEffect,
+  type EffectBirdDogOptions,
 } from "@fungi.computer/bird-dog/effect";
 import * as Effect from "effect/Effect";
-import type { DatabaseSync } from "node:sqlite";
+import type { PrivateSqliteDatabase } from "./private-sqlite-owner.js";
 import type { Accepted } from "@fungi.computer/shiitake";
 import { messageAuthor } from "@fungi.computer/agar/agents";
 import { z } from "zod";
@@ -25,8 +27,66 @@ function storeFailure(cause: unknown): BirdDogError {
   return new BirdDogError("local mail store is unavailable", { cause });
 }
 
+/** The Agent store's BirdDog outbox rows. */
+function localOutbox(
+  database: PrivateSqliteDatabase,
+): EffectBirdDogOptions["outbox"] {
+  return {
+    read: (key: string) =>
+      Effect.try({
+        try: () => {
+          const statement = database.prepare(
+            "SELECT value FROM local_birddog_outbox WHERE key = ?",
+          );
+          const row = outboxValue.safeParse(statement.get(key));
+          return row.success ? row.data.value : undefined;
+        },
+        catch: storeFailure,
+      }),
+    put: (key, value) =>
+      Effect.try({
+        try: () => {
+          database
+            .prepare(
+              "INSERT INTO local_birddog_outbox (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            )
+            .run(key, value);
+        },
+        catch: storeFailure,
+      }),
+    list: (limit, afterKey) =>
+      Effect.try({
+        try: () =>
+          outboxRows.parse(
+            database
+              .prepare(
+                "SELECT key, value FROM local_birddog_outbox WHERE (? IS NULL OR key > ?) ORDER BY key LIMIT ?",
+              )
+              .all(afterKey ?? null, afterKey ?? null, limit),
+          ),
+        catch: storeFailure,
+      }),
+    delete: (key) =>
+      Effect.try({
+        try: () => {
+          database
+            .prepare("DELETE FROM local_birddog_outbox WHERE key = ?")
+            .run(key);
+        },
+        catch: storeFailure,
+      }),
+  };
+}
+
+/** Whether this Agent's outbox still owes any reply a delivery attempt. */
+export function hasPrivateLocalPendingMail(
+  database: PrivateSqliteDatabase,
+): Promise<boolean> {
+  return Effect.runPromise(hasPendingDelivery(localOutbox(database)));
+}
+
 export function createPrivateLocalMailRoom(
-  database: DatabaseSync,
+  database: PrivateSqliteDatabase,
   options: PrivateLocalMailOptions,
 ): BirdDogEffect {
   database.exec(
@@ -34,51 +94,7 @@ export function createPrivateLocalMailRoom(
   );
   const room = Effect.runSync(
     makeBirdDog({
-      outbox: {
-        read: (key: string) =>
-          Effect.try({
-            try: () => {
-              const statement = database.prepare(
-                "SELECT value FROM local_birddog_outbox WHERE key = ?",
-              );
-              const row = outboxValue.safeParse(statement.get(key));
-              return row.success ? row.data.value : undefined;
-            },
-            catch: storeFailure,
-          }),
-        put: (key, value) =>
-          Effect.try({
-            try: () => {
-              database
-                .prepare(
-                  "INSERT INTO local_birddog_outbox (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                )
-                .run(key, value);
-            },
-            catch: storeFailure,
-          }),
-        list: (limit, afterKey) =>
-          Effect.try({
-            try: () =>
-              outboxRows.parse(
-                database
-                  .prepare(
-                    "SELECT key, value FROM local_birddog_outbox WHERE (? IS NULL OR key > ?) ORDER BY key LIMIT ?",
-                  )
-                  .all(afterKey ?? null, afterKey ?? null, limit),
-              ),
-            catch: storeFailure,
-          }),
-        delete: (key) =>
-          Effect.try({
-            try: () => {
-              database
-                .prepare("DELETE FROM local_birddog_outbox WHERE key = ?")
-                .run(key);
-            },
-            catch: storeFailure,
-          }),
-      },
+      outbox: localOutbox(database),
       post: (mail) =>
         Effect.tryPromise({
           try: async () => {

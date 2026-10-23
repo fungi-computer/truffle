@@ -41,6 +41,7 @@ it("advertises terminal login and lists project Sessions through Local discovery
   const agent = createPrivateLocalAcpAgent({
     invocationRoot: "/workspace",
     manager: {
+      reload: unused,
       status: unused,
       start: unused,
       createSession: unused,
@@ -49,10 +50,18 @@ it("advertises terminal login and lists project Sessions through Local discovery
       auth: unused,
       models: unused,
       stop: unused,
+      archive: unused,
       discover: (root) => {
         roots.push(root);
         return Promise.resolve({
-          agentCount: 1,
+          agents: [
+            {
+              agentId: "workspace",
+              databasePath: "/workspace/agent.sqlite",
+              sessionCount: 1,
+              updatedAt: 0,
+            },
+          ],
           problems: [],
           sessions: [
             {

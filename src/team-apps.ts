@@ -5,10 +5,11 @@ import {
   type ShiitakeSession,
 } from "@fungi.computer/shiitake/client";
 import type { FetchLike } from "@modelcontextprotocol/client";
+import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import {
   appDirectoryResponseSchema,
   type AppDirectory,
-} from "@fungi.computer/oyster/shell/app-directory";
+} from "@fungi.computer/nacre/app-directory";
 import {
   createGillClient,
   type GillRequest,
@@ -40,8 +41,13 @@ export type LocalTeamApps = Readonly<{
 
 /** Pin this view to the saved account and Team; a later switch retires it. */
 export async function openLocalTeamApps(
-  options: Readonly<{ credentialPath?: string; fetch?: FetchLike }> = {},
+  input: Readonly<{ credentialPath?: string; fetch?: FetchLike }> = {},
 ): Promise<LocalTeamApps> {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   const account = await readFungiAccountStatus(options);
   if (account?.team === undefined)
     throw new Error("Sign in to Fungi and choose a Team to view its Apps");

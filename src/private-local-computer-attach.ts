@@ -5,6 +5,7 @@ import { basename, resolve } from "node:path";
 import type { FetchLike } from "@modelcontextprotocol/client";
 import { defineIdFamily } from "@fungi.computer/cairn/id";
 import { z } from "zod";
+import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import {
   callFungiMcpTeamControl,
   fungiMcpTeamEndpoint,
@@ -135,8 +136,14 @@ export type PrivateLocalComputerAttachResult =
 export async function attachPrivateLocalComputer(
   rawEndpoint: string | URL,
   input: Readonly<{ computer: string; folderPath: string; hostLabel?: string }>,
-  options: ControlOptions = {},
+  controlOptions: ControlOptions = {},
 ): Promise<PrivateLocalComputerAttachResult> {
+  const options = {
+    ...controlOptions,
+    credentialPath:
+      controlOptions.credentialPath ??
+      capturePrivateLocalConfigRoot().credentialPath,
+  };
   const { endpoint, teamId } = fungiMcpTeamEndpoint(rawEndpoint);
   const rootPath = await realpath(resolve(input.folderPath));
   if (!(await stat(rootPath)).isDirectory())
@@ -228,8 +235,13 @@ export type PrivateLocalComputerDetachResult = Readonly<{
 export async function detachPrivateLocalComputer(
   rawEndpoint: string | URL,
   computer: string,
-  options: ControlOptions = {},
+  input: ControlOptions = {},
 ): Promise<PrivateLocalComputerDetachResult> {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   const { endpoint, teamId } = fungiMcpTeamEndpoint(rawEndpoint);
   const saved = await readFungiMcpLocalBackends(options);
   const record = saved.backends.find(
@@ -302,8 +314,13 @@ export type PrivateLocalComputerRunOptions = {
 export async function runPrivateLocalComputer(
   rawEndpoint: string | URL,
   computer: string,
-  options: PrivateLocalComputerRunOptions,
+  input: PrivateLocalComputerRunOptions,
 ): Promise<"stopped" | "detached"> {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
   const { endpoint, teamId } = fungiMcpTeamEndpoint(rawEndpoint);
   const saved = await readFungiMcpLocalBackends(options);
   const record = saved.backends.find(

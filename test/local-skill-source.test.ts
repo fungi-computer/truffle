@@ -1,6 +1,13 @@
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createLocalSkillSource } from "../src/local-skill-source.js";
 
@@ -47,6 +54,67 @@ afterEach(async () => {
 });
 
 describe("Local SkillSource", () => {
+  it("shows each location to the model relative to the invocation root, as ~/… under home, else absolute, and still loads it", async () => {
+    const { root, cwd, home, source } = await fixture();
+    await skill(
+      cwd,
+      ".agents/skills",
+      "in-project",
+      "Inside the invocation root",
+    );
+    await skill(home, ".agents/skills", "in-home", "Under home");
+    const elsewhere = join(root, "elsewhere");
+    const outside = await skill(elsewhere, "", "outside", "Neither root");
+    await mkdir(join(cwd, ".fungi"));
+    await writeFile(
+      join(cwd, ".fungi/settings.json"),
+      JSON.stringify({ skills: [elsewhere] }),
+    );
+    const catalog = await source.catalog(signal);
+    expect(
+      Object.fromEntries(
+        catalog.skills.map((s) => [s.name, s.displayLocation]),
+      ),
+    ).toEqual({
+      "in-project": join(".agents", "skills", "in-project", "SKILL.md"),
+      "in-home": join("~", ".agents", "skills", "in-home", "SKILL.md"),
+      outside: join(outside, "SKILL.md"),
+    });
+    expect((await source.read("in-project", undefined, signal)).content).toBe(
+      "Inside the invocation root body\n",
+    );
+    expect((await source.read("in-home", undefined, signal)).content).toBe(
+      "Under home body\n",
+    );
+    expect((await source.read("outside", undefined, signal)).content).toBe(
+      "Neither root body\n",
+    );
+  });
+
+  it("keeps the explicitly selected home for catalog and later reads after HOME changes", async () => {
+    const { root, home, source } = await fixture();
+    const previous = process.env.HOME;
+    const otherHome = join(root, "other-home");
+    await mkdir(otherHome);
+    await skill(home, ".agents/skills", "selected", "Selected home");
+    await skill(otherHome, ".agents/skills", "ambient", "Ambient home");
+    try {
+      process.env.HOME = otherHome;
+      expect(
+        (await source.catalog(signal)).skills.map((item) => item.name),
+      ).toContain("selected");
+      expect(
+        (await source.catalog(signal)).skills.map((item) => item.name),
+      ).not.toContain("ambient");
+      expect((await source.read("selected", undefined, signal)).content).toBe(
+        "Selected home body\n",
+      );
+    } finally {
+      if (previous === undefined) delete process.env.HOME;
+      else process.env.HOME = previous;
+    }
+  });
+
   it("discovers Claude's nested synced layout only through the local settings opt-in", async () => {
     const { home, source } = await fixture();
     const nested = await skill(
@@ -71,7 +139,10 @@ describe("Local SkillSource", () => {
       {
         name: "nested",
         description: "Synced skill",
+        origin: { kind: "personal" },
         location: join(nested, "SKILL.md"),
+        displayLocation:
+          "~/.claude/skills/synced/source-target/nested/SKILL.md",
       },
     ]);
     expect((await source.read("nested", undefined, signal)).content).toBe(
@@ -291,7 +362,32 @@ describe("Local SkillSource", () => {
     for (let n = 0; n < 65; n++)
       await skill(cwd, ".agents/skills", `skill-${String(n)}`, "Description");
     const catalog = await source.catalog(signal);
-    expect(catalog.skills).toHaveLength(64);
+    // Canonical locations count towards the byte bound. A longer TMPDIR can
+    // fill 16 KB before 64 entries; every omitted skill must hit a real bound.
+    expect(catalog.skills.length).toBeGreaterThan(0);
+    expect(catalog.skills.length).toBeLessThanOrEqual(64);
+    const bounded = catalog.diagnostics.filter((d) => d.reason === "bound");
+    expect(catalog.skills.length + bounded.length).toBe(65);
+    const sample = catalog.skills[0];
+    if (sample === undefined) throw new Error("Expected a discovered skill");
+    for (const omitted of bounded) {
+      const candidate = {
+        ...sample,
+        name: basename(dirname(omitted.path)),
+        location: omitted.path,
+        displayLocation: join(
+          ".agents",
+          "skills",
+          basename(dirname(omitted.path)),
+          "SKILL.md",
+        ),
+      };
+      expect(
+        catalog.skills.length === 64 ||
+          Buffer.byteLength(JSON.stringify([...catalog.skills, candidate])) >
+            16_000,
+      ).toBe(true);
+    }
     expect(catalog.diagnostics.map((d) => d.reason)).toEqual(
       expect.arrayContaining(["invalid", "bound"]),
     );
@@ -402,5 +498,62 @@ describe("Local SkillSource", () => {
           "Local settings must be valid JSON with a skills list of extra folders",
       }),
     );
+  });
+
+  it("Your own skill with the same name beats the extension's, and the collision names both origins", async () => {
+    const { root, cwd, home } = await fixture();
+    const extension = join(root, "ext-skills");
+    await skill(cwd, ".fungi/skills", "shared", "Project wins");
+    await skill(home, ".agents/skills", "mine", "Personal wins");
+    await skill(extension, ".", "shared", "Extension loses");
+    await skill(extension, ".", "mine", "Extension loses too");
+    await skill(extension, ".", "only-ext", "Only the extension has it");
+    const source = createLocalSkillSource({
+      cwd,
+      home,
+      extensions: [{ extensionId: "acme-tools", directory: extension }],
+    });
+    const catalog = await source.catalog(signal);
+    expect(
+      catalog.skills.map((s) => [s.name, s.description, s.origin]),
+    ).toEqual([
+      ["shared", "Project wins", { kind: "project" }],
+      ["mine", "Personal wins", { kind: "personal" }],
+      [
+        "only-ext",
+        "Only the extension has it",
+        { kind: "extension", extensionId: "acme-tools" },
+      ],
+    ]);
+    expect(
+      catalog.diagnostics
+        .filter((d) => d.reason === "collision")
+        .map((d) => d.message)
+        .sort(),
+    ).toEqual([
+      "personal skill mine wins over extension acme-tools",
+      "project skill shared wins over extension acme-tools",
+    ]);
+  });
+
+  it("offers no extension skills unless the owner passes the folder, and reads them in place", async () => {
+    const { root, cwd, home } = await fixture();
+    const extension = join(root, "ext-skills");
+    const directory = await skill(
+      extension,
+      ".",
+      "only-ext",
+      "From the extension",
+    );
+    const without = createLocalSkillSource({ cwd, home });
+    expect((await without.catalog(signal)).skills).toEqual([]);
+    const withFolder = createLocalSkillSource({
+      cwd,
+      home,
+      extensions: [{ extensionId: "acme-tools", directory: extension }],
+    });
+    expect(
+      (await withFolder.read("only-ext", undefined, signal)).baseDirectory,
+    ).toBe(await realpath(directory));
   });
 });

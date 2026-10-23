@@ -1,22 +1,33 @@
-import { z } from "zod";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { fungiMcpAccountAuth } from "./private-fungi-account.js";
 import type { PrivateFungiMcpConnectionOptions } from "./private-fungi-mcp-connection.js";
-import { parseFungiMcpEndpoint } from "./private-fungi-mcp-endpoint.js";
+import { oysterMcpKeyAuth } from "./private-oyster-mcp-auth.js";
+import {
+  fungiMcpSelectionSchema,
+  type PrivateFungiMcpSelection,
+} from "./private-fungi-mcp-selection-schema.js";
 
-/** A Team MCP address selects a target; OAuth identity stays with Local. */
-export const fungiMcpSelectionSchema = z.strictObject({
-  endpoint: z.url().pipe(
-    z.string().refine((value) => {
-      try {
-        parseFungiMcpEndpoint(value);
-        return true;
-      } catch {
-        return false;
-      }
-    }, "Fungi MCP requires HTTPS (or HTTP on an exact loopback host) without credentials, query or fragment"),
-  ),
-});
-export type PrivateFungiMcpSelection = z.infer<typeof fungiMcpSelectionSchema>;
+/** The service validates saved project selections with the RPC selection schema. */
+export async function readProjectFungiMcpSelection(root: string) {
+  const path = join(root, ".fungi", "team-mcp.json");
+  let text: string;
+  try {
+    text = await readFile(path, "utf8");
+  } catch (cause) {
+    if (cause instanceof Error && "code" in cause && cause.code === "ENOENT")
+      return undefined;
+    throw cause;
+  }
+  try {
+    return fungiMcpSelectionSchema.parse(JSON.parse(text));
+  } catch (cause) {
+    throw new Error(
+      `${path}: ${cause instanceof Error ? cause.message : String(cause)}`,
+      { cause },
+    );
+  }
+}
 
 export function readFungiMcpSelection(
   selection: PrivateFungiMcpSelection,
@@ -32,7 +43,11 @@ export function readFungiMcpSelection(
   const endpoint = new URL(parsed.data.endpoint);
   return {
     endpoint,
-    authProvider: fungiMcpAccountAuth(endpoint, options),
+    authentication: parsed.data.authentication,
+    authProvider:
+      parsed.data.authentication === "oyster-key"
+        ? oysterMcpKeyAuth(endpoint, options)
+        : fungiMcpAccountAuth(endpoint, options),
   };
 }
 
@@ -40,7 +55,10 @@ export function sameFungiMcpConnection(
   left: PrivateFungiMcpConnectionOptions | undefined,
   right: PrivateFungiMcpConnectionOptions,
 ): boolean {
-  return left?.endpoint.href === right.endpoint.href;
+  return (
+    left?.endpoint.href === right.endpoint.href &&
+    left.authentication === right.authentication
+  );
 }
 
 export class FungiMcpSelectionConflict extends Error {

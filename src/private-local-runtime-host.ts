@@ -1,9 +1,19 @@
+import type { OutstandingDelegation } from "@fungi.computer/shiitake/fleet";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
-import { isContextOverflow } from "@earendil-works/pi-ai/utils/overflow";
-import { isRetryableAssistantError } from "@earendil-works/pi-ai/utils/retry";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { observeProviderStatus } from "@fungi.computer/mule";
+import {
+  modelFailureMessage,
+  modelFailureRetryable,
+} from "./private-provider-rejection.js";
 import { logEvent } from "./log-event.js";
-import { localExtensions } from "./local-extensions.js";
+import { localArchiveHandoff } from "./local-archive-handoff.js";
+import { createMcpFormSession } from "./private-mcp-form-session.js";
+import type { LocalUiAttachment } from "./private-local-ui-attachment.js";
+import {
+  localExtensions,
+  type LocalAgentExtensions,
+} from "./local-extensions.js";
 import { lstat, mkdir, realpath, stat } from "node:fs/promises";
 import { lstatSync, mkdirSync, realpathSync } from "node:fs";
 import {
@@ -14,12 +24,10 @@ import {
   relative,
   resolve,
 } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
+import { z } from "zod";
 import {
   cleanupSessionResources,
-  clampThinkingLevel,
-  getSupportedThinkingLevels,
   type Models,
   type ThinkingLevel,
 } from "@earendil-works/pi-ai";
@@ -32,8 +40,6 @@ import type {
 } from "@fungi.computer/shiitake";
 import {
   parseModelPreference,
-  parseModelPreferenceJson,
-  resolveModelPreference,
   type ModelPreference,
 } from "@fungi.computer/shiitake/model-preference";
 import {
@@ -41,6 +47,7 @@ import {
   type AgentControlDirectory,
 } from "@fungi.computer/shiitake/agent-control";
 import { defineIdFamily } from "@fungi.computer/cairn";
+import { words } from "@fungi.computer/cairn/words";
 import { botanicalExtensionsWithSkills } from "@fungi.computer/shiitake-extensions/roster";
 import {
   homeExtension,
@@ -61,16 +68,33 @@ import {
 } from "@fungi.computer/shiitake";
 import { createPrivateModels } from "./local-models.js";
 import {
-  defaultLocalModel,
-  listOfferedLocalModels,
-} from "./private-local-default-model.js";
-import { createLocalModelSettings } from "./private-local-model-settings.js";
+  capturePrivateLocalConfigRoot,
+  type PrivateLocalConfigRoot,
+} from "./private-local-config-root.js";
+import { acquireSubscriptionTurn } from "./subscription-turn.js";
+import { listOfferedLocalModels } from "./private-local-default-model.js";
+import {
+  ensureAgentDefaultModelTable,
+  readAgentDefaultModel,
+  seedAgentDefaultModel,
+  writeAgentDefaultModel,
+} from "./private-local-agent-default-model.js";
+import {
+  defaultLocalReasoning,
+  resolveKnownLocalStartupChoice,
+  resolveLocalStartupChoice,
+  startupReasoning,
+  validateLocalReasoning,
+} from "./private-local-startup-model.js";
 import { assertFungiModelsEnabled } from "./private-fungi-model-api.js";
 import {
   privateLocalEffectiveModelSchema,
   type PrivateLocalEffectiveModel,
 } from "./private-local-effective-model.js";
-import { createPrivateInvocationComputer } from "./private-invocation-computer.js";
+import {
+  createPrivateInvocationComputer,
+  type LocalSandboxLaunch,
+} from "./private-invocation-computer.js";
 import {
   createPrivateLocalComputerProcesses,
   type PrivateLocalComputerProcesses,
@@ -81,25 +105,48 @@ import {
 } from "./private-local-exec-path.js";
 import { ensurePrivateLocalGitExclude } from "./private-local-git-exclude.js";
 import {
+  createLocalSandboxControls,
+  type LocalSandboxControls,
+  type LocalSandboxStatus,
+} from "./private-local-sandbox.js";
+import {
+  localAgentFolderSchema,
+  resolveAgentFolder,
+} from "./private-local-sandbox-policy.js";
+import { LocalStoreSchemaError } from "./private-local-session-discovery.js";
+import {
   acquireNodeStoreLease,
   nodeRuntimeHost,
   type NodeRuntimeHost,
   type NodeStoreLease,
 } from "@fungi.computer/shiitake/node";
-import { createPrivateInvocationFilesPort } from "./private-invocation-files.js";
+import {
+  createPrivateInvocationFilesPort,
+  type LocalSandboxWrites,
+} from "./private-invocation-files.js";
 import { createLocalSkillSource } from "./local-skill-source.js";
 import { createPrivateWorkerdSandbox } from "./private-workerd-sandbox.js";
 import {
   createPrivateFungiMcpConnection,
   type PrivateFungiMcpConnectionOptions,
 } from "./private-fungi-mcp-connection.js";
-import { createPrivateSqliteOwner } from "./private-sqlite-owner.js";
-import { createPrivateLocalMailRoom } from "./private-local-mail.js";
+import {
+  createPrivateSqliteOwner,
+  openPrivateWritableSqliteDatabase,
+  type PrivateSqliteDatabase,
+} from "./private-sqlite-owner.js";
+import {
+  createPrivateLocalMailRoom,
+  hasPrivateLocalPendingMail,
+} from "./private-local-mail.js";
 import {
   createPrivateLocalDelegation,
   type PrivateLocalMailRouting,
 } from "./private-local-delegation.js";
-import { createPrivateLocalSubagents } from "./private-local-subagents.js";
+import {
+  createPrivateLocalAgentControl,
+  type LocalAgentControlDirectory,
+} from "./private-local-agent-control.js";
 import {
   subagentsExtension,
   subagentsGrant,
@@ -109,9 +156,9 @@ import {
 const initialSessionId = "main";
 const maximumInstructionReadBytes = 128 * 1_024;
 const maximumInstructionSnapshotBytes = 32_000;
-const instructionRevisionVersion = "local-host-instructions-v2";
+const instructionRevisionVersion = "local-host-instructions-v3";
 const authoredInstructions =
-  "You are the local coding agent. Explain durable changes clearly. Discover available operations through forage.search and inspect their input with forage.describe; call only the exact paths they return. Extension prompt sections describe the Session's tools and controls. After a run fails, each new user message is a new instruction. Retry or continue the previous task only when the user explicitly asks; if the new message is ambiguous, ask what they want before acting.";
+  "You are the local coding agent. Explain durable changes clearly. After a run fails, each new user message is a new instruction: retry or continue the failed task only when the user explicitly asks, and ask what they want when the message is ambiguous.";
 const utf8 = new TextEncoder();
 
 const localHostIds = defineIdFamily({
@@ -133,13 +180,21 @@ type LocalDatabasePaths = Readonly<{
 export type LocalResources = Readonly<{
   agent?: Pick<ShiitakeAgent, "close"> | undefined;
   processes?: Pick<PrivateLocalComputerProcesses, "close"> | undefined;
+  sandbox?: Pick<LocalSandboxControls, "close"> | undefined;
   runtime: Omit<NodeRuntimeHost, "scheduleWake">;
-  database?: Pick<DatabaseSync, "close"> | undefined;
+  database?: Pick<PrivateSqliteDatabase, "close"> | undefined;
   lease?: NodeStoreLease | undefined;
   providerCacheKey?: string | undefined;
 }>;
 
 export type PrivateLocalTools = Readonly<{
+  bindSession: ReturnType<typeof createMcpFormSession>["bindSession"];
+  presentApproval: ReturnType<typeof createMcpFormSession>["presentApproval"];
+  configure: (
+    installed: LocalAgentExtensions,
+    fungiMcp: PrivateFungiMcpConnectionOptions | undefined,
+    clientPath?: string,
+  ) => Pick<ShiitakeOptions, "extensions" | "tools">;
   port: Awaited<ReturnType<typeof createPrivateInvocationFilesPort>>;
   tools: NonNullable<ShiitakeOptions["tools"]>;
   extensions: ExtensionRosterV0;
@@ -149,18 +204,29 @@ export type PrivateLocalTools = Readonly<{
 
 /** Inputs for the one private local Agent opener. */
 export type PrivateLocalRuntimeHostOptions = Readonly<{
+  /** Service-selected host configuration, independent of this Agent's Files root. */
+  configRoot?: PrivateLocalConfigRoot;
+  configuration?: (
+    storeDirectory: string,
+  ) => Promise<LocalRuntimeConfiguration>;
   /** Invocation root captured before selecting a fresh local database. */
   invocationRoot: string;
   /** Existing Agent database to reopen instead of creating a fresh local store. */
   databasePath?: string | undefined;
   /** Stable Local store identity for replaying one Agent create request. */
   createRequestId?: string | undefined;
-  /** Explicit Agent model; otherwise inherit manual choice and available login. */
+  /** Display name chosen when this Agent is created; the id names it otherwise. */
+  name?: string | undefined;
+  /** The Agent that created this one; recorded once with its identity. Absent when a human made it. */
+  createdBy?: string | undefined;
+  /** Immutable project-relative folder authority, inherited by child Agents. */
+  folder?: string | undefined;
+  /** Persist before constructing the Agent, which can recover durable work. */
+  requireSandbox?: boolean | undefined;
+  /** Explicit Agent model; otherwise the Agent's stored default, then the available login. */
   providerId?: string | undefined;
   modelId?: string | undefined;
   reasoning?: ThinkingLevel | undefined;
-  /** Local settings location; credentials remain in their separate owner. */
-  modelSettingsPath?: string | undefined;
   /**
    * Service-owned project mail routing. With `agentControl`, it gives this
    * Agent follow-up delegation with authenticated replies and settles its own
@@ -168,20 +234,37 @@ export type PrivateLocalRuntimeHostOptions = Readonly<{
    */
   mail?: PrivateLocalMailRouting | undefined;
   /** Service-owned directory scoped to the captured project. */
-  agentControl?: AgentControlDirectory | undefined;
+  agentControl?: LocalAgentControlDirectory | undefined;
+  /** Service-owned Team context for this store; never a caller-supplied alias. */
+  meshAdmission?: (
+    localAgentId: string,
+    recipientAgentId: string,
+  ) => Promise<readonly { agentId: string; name: string }[] | undefined>;
   /** Explicit hosted capability connection; local tools and the Agent store stay local. */
   fungiMcp?: PrivateFungiMcpConnectionOptions | undefined;
 }>;
 
 /** Typed Session and awaited resource owner supplied directly to the local TUI. */
 export type PrivateLocalRuntimeHost = Readonly<{
+  /** Native host-only form/record binding; never a Session or model command. */
+  presentApproval: PrivateLocalTools["presentApproval"];
+  prepareReload: (
+    configuration: LocalRuntimeConfiguration,
+  ) => ReturnType<
+    Awaited<ReturnType<typeof Shiitake.make>>["prepareConfiguration"]
+  >;
   /** Stable Local directory identity of this authorized Agent. */
   agentId: string;
+  /** The Agent's stored display name; its id for an Agent stored before names. */
+  name: string;
   /** Canonical file path to pass explicitly to a later --db launch. */
   databasePath: string;
   session: ShiitakeSession;
   /** Address a Session through this same Agent and resource owner. */
-  getSession: (sessionId: string) => ShiitakeSession;
+  getSession: (
+    sessionId: string,
+    attachment?: LocalUiAttachment,
+  ) => ShiitakeSession;
   /** A selected Session keeps one client's command PATH while this host is live. */
   bindSessionPath: (sessionId: string, path: string) => boolean;
   /** Resolve this Session's effective model and nonsecret credential source. */
@@ -189,7 +272,15 @@ export type PrivateLocalRuntimeHost = Readonly<{
     sessionId: string,
     signal: AbortSignal,
   ) => Promise<PrivateLocalEffectiveModel>;
-  /** Set the persistent Agent default without changing Session overrides. */
+  /**
+   * Hide this Agent from lists, pickers and delegation, or restore it. Only the
+   * flag changes; the store, its Sessions and files stay.
+   */
+  setArchived: (archived: boolean) => void;
+  /** Persist the requirement before another affected launch is admitted. */
+  setRequireSandbox: (required: boolean) => void;
+  sandboxStatus: () => LocalSandboxStatus;
+  /** Set the persistent Agent default, thinking level included, without changing Session overrides. */
   setModel: (model: ModelPreference, signal: AbortSignal) => Promise<void>;
   /** Refuse unrunnable creation or send before claiming acceptance. */
   assertModelReady: (sessionId: string, signal: AbortSignal) => Promise<void>;
@@ -204,12 +295,27 @@ export type PrivateLocalRuntimeHost = Readonly<{
    * refused.
    */
   acceptMail: (mail: BirdDogMail) => Promise<Accepted>;
+  /** Delegated work this Agent still waits on, as its target Session and command; undefined when none. */
+  pendingDelegation: () => Promise<OutstandingDelegation | undefined>;
   /** Exact settled command facts for a delegating sender. */
   readSettlement: (
     sessionId: string,
     commandId: string,
   ) => Promise<CommandSettlement | undefined>;
+  /**
+   * Whether this Agent holds nothing a later reopen could not resume: no
+   * running or waiting Session, Watchdog job, scheduled wake, reply still
+   * owed a delivery attempt or running background process. Work it delegated
+   * is owed by the child, whose reply mail reopens this Agent.
+   */
+  idle: () => Promise<boolean>;
   close: () => Promise<void>;
+}>;
+
+export type LocalRuntimeConfiguration = Readonly<{
+  installed: LocalAgentExtensions;
+  fungiMcp: PrivateFungiMcpConnectionOptions | undefined;
+  clientPath: string;
 }>;
 
 function isErrnoException(error: Error): error is NodeJS.ErrnoException {
@@ -221,20 +327,39 @@ function sidecarPathFor(databasePath: string) {
 }
 
 function ensureLocalAgentId(
-  database: DatabaseSync,
+  database: PrivateSqliteDatabase,
+  databasePath: string,
   pathAgentId: LocalStoreId | undefined,
+  name: string | undefined,
+  createdBy: string | undefined,
+  folder: string | undefined,
+  requireSandbox: boolean | undefined,
 ): LocalStoreId {
   database.exec("BEGIN IMMEDIATE");
   try {
     database.exec(`
       CREATE TABLE IF NOT EXISTS private_local_identity (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-        agent_id TEXT NOT NULL UNIQUE
+        agent_id TEXT NOT NULL UNIQUE,
+        name TEXT,
+        created_by TEXT,
+        archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1)),
+        folder TEXT NOT NULL DEFAULT '.',
+        require_sandbox INTEGER NOT NULL DEFAULT 0 CHECK (require_sandbox IN (0, 1))
       )
     `);
+    const columns = database
+      .prepare("PRAGMA table_info(private_local_identity)")
+      .all();
+    if (
+      !["name", "created_by", "archived", "folder", "require_sandbox"].every(
+        (required) => columns.some((column) => column.name === required),
+      )
+    )
+      throw new LocalStoreSchemaError(databasePath);
     const row = database
       .prepare(
-        "SELECT agent_id FROM private_local_identity WHERE singleton = 1",
+        "SELECT agent_id, created_by, folder FROM private_local_identity WHERE singleton = 1",
       )
       .get();
     if (row !== undefined) {
@@ -244,15 +369,38 @@ function ensureLocalAgentId(
         (pathAgentId !== undefined && parsed.data !== pathAgentId)
       )
         throw new Error("Local Agent identity does not match its store");
+      if (createdBy !== undefined && row.created_by !== createdBy)
+        throw new Error(
+          "Local Agent creation identity conflicts with its store",
+        );
+      const storedFolder = localAgentFolderSchema.parse(row.folder);
+      if (
+        folder !== undefined &&
+        localAgentFolderSchema.parse(folder) !== storedFolder
+      )
+        throw new Error("Local Agent folder conflicts with its store");
+      if (requireSandbox !== undefined)
+        database
+          .prepare(
+            "UPDATE private_local_identity SET require_sandbox = ? WHERE singleton = 1",
+          )
+          .run(requireSandbox ? 1 : 0);
       database.exec("COMMIT");
       return parsed.data;
     }
     const agentId = pathAgentId ?? localHostIds.store.generate();
     database
       .prepare(
-        "INSERT INTO private_local_identity (singleton, agent_id) VALUES (1, ?)",
+        "INSERT INTO private_local_identity (singleton, agent_id, name, created_by, folder, require_sandbox) VALUES (1, ?, ?, ?, ?, ?)",
       )
-      .run(agentId);
+      // An unnamed Agent gets a Cairn candidate word name so it never shows its id.
+      .run(
+        agentId,
+        name ?? words(),
+        createdBy ?? null,
+        localAgentFolderSchema.parse(folder ?? "."),
+        requireSandbox === true ? 1 : 0,
+      );
     database.exec("COMMIT");
     return agentId;
   } catch (cause) {
@@ -307,11 +455,17 @@ async function ensurePrivateLocalDirectory(path: string) {
     throw new Error("Local Agent create directory is not project owned");
 }
 
-async function assertPrivateLocalReceiptFile(path: string) {
+async function assertPrivateLocalReceiptFile(
+  path: string,
+  kind: "receipt" | "journal",
+) {
   // A concurrent create's commit deletes the rollback journal at any point
   // between these reads; a file that is gone has nothing left to check.
   try {
     const metadata = await lstat(path);
+    // SQLite can unlink the journal between the kernel's lookup and getattr.
+    // Its now-unlinked regular inode is gone, just as with ENOENT below.
+    if (kind === "journal" && metadata.isFile() && metadata.nlink === 0) return;
     if (
       !metadata.isFile() ||
       metadata.isSymbolicLink() ||
@@ -345,19 +499,21 @@ export async function resolvePrivateLocalCreateStore(
   await ensurePrivateLocalDirectory(fungiDirectory);
   await ensurePrivateLocalDirectory(agentsDirectory);
   const receiptPath = join(agentsDirectory, localCreateReceiptFile);
-  await assertPrivateLocalReceiptFile(receiptPath);
-  await assertPrivateLocalReceiptFile(`${receiptPath}-journal`);
+  await assertPrivateLocalReceiptFile(receiptPath, "receipt");
+  await assertPrivateLocalReceiptFile(`${receiptPath}-journal`, "journal");
 
-  const database = new DatabaseSync(receiptPath, {
-    timeout: receiptBusyTimeoutMs,
-  });
+  const database = openPrivateWritableSqliteDatabase(
+    receiptPath,
+    receiptBusyTimeoutMs,
+  );
   try {
     database.exec(`PRAGMA busy_timeout = ${String(receiptBusyTimeoutMs)}`);
     database.exec("BEGIN IMMEDIATE");
     database.exec(`
       CREATE TABLE IF NOT EXISTS ${localCreateReceiptTable} (
         request_id TEXT PRIMARY KEY NOT NULL,
-        agent_id TEXT NOT NULL UNIQUE
+        agent_id TEXT NOT NULL UNIQUE,
+        name TEXT
       ) WITHOUT ROWID
     `);
     const existing = database
@@ -591,6 +747,8 @@ export function createPrivateLocalInstructionSource(
             signal,
           },
         );
+        if ("image" in page)
+          throw new Error("Root AGENTS.md is an image, not instructions");
         if (page.truncated)
           throw new Error(
             "Root AGENTS.md exceeds the 128 KiB instruction bound",
@@ -622,36 +780,6 @@ export function createPrivateLocalInstructionSource(
   });
 }
 
-/** Validate the selected registered model before resolving credentials. */
-function validateLocalReasoning(
-  model: Parameters<typeof getSupportedThinkingLevels>[0],
-  requested: ThinkingLevel | undefined,
-): void {
-  if (requested === undefined) return;
-  const supported = getSupportedThinkingLevels(model).filter(
-    (level) => level !== "off",
-  );
-  if (!supported.includes(requested))
-    throw new Error(
-      "Reasoning level " +
-        requested +
-        " is not supported by " +
-        model.provider +
-        "/" +
-        model.id +
-        "; supported levels: " +
-        (supported.join(", ") || "none"),
-    );
-}
-
-/** Local's default is medium, clamped through Pi's model capabilities. */
-function defaultLocalReasoning(
-  model: Parameters<typeof getSupportedThinkingLevels>[0],
-): ThinkingLevel | undefined {
-  const level = clampThinkingLevel(model, "medium");
-  return level === "off" ? undefined : level;
-}
-
 export function createPrivateLocalModelSource(
   models: Models,
   providerId: string | undefined,
@@ -660,7 +788,6 @@ export function createPrivateLocalModelSource(
   selectedOwnerReasoning?: ThinkingLevel,
   defaults?: Readonly<{
     agent?: () => ModelPreference | null;
-    manual: () => Promise<ModelPreference | null>;
   }>,
 ): ModelSource &
   Readonly<{
@@ -689,35 +816,31 @@ export function createPrivateLocalModelSource(
   const ownerReasoning =
     selectedOwnerReasoning ??
     (model === undefined ? undefined : defaultLocalReasoning(model));
-  const select = async (
+  const agentPreference = () =>
+    defaults?.agent?.() ??
+    (providerId === undefined
+      ? null
+      : {
+          providerId,
+          modelId: modelId ?? "@fungi/luna",
+        });
+  const prepareSelection = async (
     preference: ModelPreference | null,
     signal: AbortSignal,
   ) => {
-    const agent =
-      defaults?.agent?.() ??
-      (providerId === undefined
-        ? null
-        : {
-            providerId,
-            modelId: modelId ?? "@fungi/luna",
-          });
-    const explicit = resolveModelPreference({
+    const startup = await resolveLocalStartupChoice({
+      models,
       session: preference,
-      agent,
-      manual:
-        preference === null && agent === null ? await defaults?.manual() : null,
+      agent: agentPreference(),
+      signal,
     });
-    const choice = resolveModelPreference({
-      session: explicit,
-      available:
-        explicit === null ? await defaultLocalModel(models, signal) : null,
-    });
-    if (choice === null)
+    if (startup === null)
       throw new ShiitakeError(
         "model",
         "rejected",
         "No signed-in model provider is available. Run /login, then choose a model with /model.",
       );
+    const choice = startup.preference;
     const selectedProvider = choice.providerId;
     if (selectedProvider === "fungi") {
       try {
@@ -757,12 +880,7 @@ export function createPrivateLocalModelSource(
         "rejected",
         `Local model is not registered: ${selectedProvider}/${selectedId}`,
       );
-    const reasoning =
-      choice.reasoning ??
-      (ownerReasoning !== undefined &&
-      getSupportedThinkingLevels(selected).includes(ownerReasoning)
-        ? ownerReasoning
-        : defaultLocalReasoning(selected));
+    const reasoning = startupReasoning(selected, choice, ownerReasoning);
     validateLocalReasoning(selected, reasoning);
     return { selected, reasoning };
   };
@@ -779,14 +897,14 @@ export function createPrivateLocalModelSource(
   };
   return Object.freeze({
     assertReady: async (preference, signal) => {
-      const { selected } = await select(preference, signal);
+      const { selected } = await prepareSelection(preference, signal);
       await assertAuthenticated(selected.provider, signal);
     },
     effective: async (preference, signal) => {
       signal.throwIfAborted();
-      let selection: Awaited<ReturnType<typeof select>>;
+      let selection: Awaited<ReturnType<typeof prepareSelection>>;
       try {
-        selection = await select(preference, signal);
+        selection = await prepareSelection(preference, signal);
       } catch (cause) {
         if (
           signal.aborted ||
@@ -829,46 +947,81 @@ export function createPrivateLocalModelSource(
         modelId: selected.id,
         modelName: selected.name,
         credential: { kind: auth?.type ?? "missing", source },
+        reasoning,
         label: `Shiitake · ${selected.name} (${reasoning ?? "no reasoning"}) · ${source}`,
       });
     },
-    // The window comes from the same registry entry a run would acquire.
-    describe: async ({ signal, preference }) => {
+    // Observe the same explicit layers against last-known registry facts.
+    // Catalog presence alone cannot identify the signed-in fallback: Pi's
+    // availability queries check auth. Leave that choice unknown here.
+    describe: ({ signal, preference }) => {
       signal.throwIfAborted();
-      const { selected } = await select(preference, signal);
-      return {
+      const choice = resolveKnownLocalStartupChoice({
+        session: preference,
+        agent: agentPreference(),
+      });
+      const selected =
+        choice === null
+          ? undefined
+          : models.getModel(
+              choice.preference.providerId,
+              choice.preference.modelId,
+            );
+      const contextWindow = selected?.contextWindow;
+      return Promise.resolve({
         contextWindow:
-          selected.contextWindow > 0 ? selected.contextWindow : null,
-      };
+          contextWindow !== undefined && contextWindow > 0
+            ? contextWindow
+            : null,
+      });
     },
     acquire: async ({ signal, preference }) => {
       signal.throwIfAborted();
-      const { selected, reasoning: selectedReasoning } = await select(
+      const { selected, reasoning: selectedReasoning } = await prepareSelection(
         preference,
         signal,
       );
       await assertAuthenticated(selected.provider, signal);
+      const turn = await acquireSubscriptionTurn(
+        models,
+        selected.provider,
+        signal,
+      );
+      // One acquired door owns at most its latest failure. Identity ties the
+      // description to the exact returned message, not to a provider name or
+      // prose that any SDK can supply.
+      let modelFailure:
+        | { message: AssistantMessage; reason: string; retryable: boolean }
+        | undefined;
       return Promise.resolve(
         Object.freeze({
           model: selected,
+          retryable: (message: AssistantMessage) =>
+            !signal.aborted &&
+            message.stopReason === "error" &&
+            modelFailure?.message === message &&
+            modelFailure.retryable,
+          failureReason: (message: AssistantMessage) =>
+            modelFailure?.message === message ? modelFailure.reason : undefined,
           stream: (selected, context, options) => {
+            modelFailure = undefined;
             const streamOptions = { ...options };
             const reasoning = options?.reasoning ?? selectedReasoning;
             if (reasoning !== undefined) streamOptions.reasoning = reasoning;
+            const provider = observeProviderStatus(streamOptions);
             const events = createAssistantMessageEventStream();
             const failure = (
               usage: AssistantMessage["usage"],
               aborted: boolean,
               upstream?: AssistantMessage,
             ): AssistantMessage => {
-              let message = `${selected.provider} rejected the model request. Check /login or choose another model with /model.`;
-              if (upstream !== undefined) {
-                if (isContextOverflow(upstream))
-                  message = `${selected.provider} request exceeds the context window. Compact the Session or choose another model.`;
-                else if (isRetryableAssistantError(upstream))
-                  message = `${selected.provider} service unavailable. Try again shortly.`;
-              }
-              return {
+              const evidence = {
+                refusal: turn.refusal(),
+                upstream,
+                rejection: provider.rejection(),
+              };
+              const message = modelFailureMessage(selected.provider, evidence);
+              const result: AssistantMessage = {
                 role: "assistant",
                 content: [],
                 api: selected.api,
@@ -879,11 +1032,20 @@ export function createPrivateLocalModelSource(
                 timestamp: Date.now(),
                 errorMessage: aborted ? "Run cancelled" : message,
               };
+              if (!aborted)
+                modelFailure = {
+                  message: result,
+                  reason: message,
+                  retryable: modelFailureRetryable(evidence),
+                };
+              return result;
             };
             void (async () => {
               try {
-                const upstream = models.streamSimple(selected, context, {
+                const upstream = turn.models.streamSimple(selected, context, {
                   ...streamOptions,
+                  fetch: provider.fetch,
+                  onProviderStreamEvent: provider.onProviderStreamEvent,
                   sessionId: providerCacheKey,
                   transport: options?.transport ?? "auto",
                 });
@@ -930,7 +1092,7 @@ export function createPrivateLocalModelSource(
             })();
             return events;
           },
-          release: () => Promise.resolve(),
+          release: turn.release,
         }),
       );
     },
@@ -943,6 +1105,8 @@ function createPrivateLocalComputerSource(
   port: PrivateLocalTools["port"],
   sessionPath: (sessionId: string) => string | undefined,
   processes: PrivateLocalComputerProcesses,
+  home: string,
+  sandbox?: LocalSandboxLaunch,
 ) {
   const id = "local-computer";
   return {
@@ -963,6 +1127,8 @@ function createPrivateLocalComputerSource(
         root,
         path,
         processes.scope(sessionId),
+        home,
+        sandbox,
       );
       return Knapsack.computer({
         id,
@@ -995,10 +1161,14 @@ export async function createPrivateLocalTools(
    * the view's facts. Present when it can direct other Agents.
    */
   subagents?: Readonly<{ control: CapabilitySource; source: SubagentSource }>,
+  configuration?: LocalRuntimeConfiguration,
+  configRoot: PrivateLocalConfigRoot = capturePrivateLocalConfigRoot(),
+  sandbox?: LocalSandboxWrites,
 ): Promise<PrivateLocalTools> {
+  const forms = createMcpFormSession();
   const root = await realpath(resolve(invocationRoot));
-  const port = await createPrivateInvocationFilesPort(root);
-  const processes = createPrivateLocalComputerProcesses(root);
+  const port = await createPrivateInvocationFilesPort(root, undefined, sandbox);
+  const processes = createPrivateLocalComputerProcesses(root, configRoot.home);
   const computerSources =
     sessionPath === undefined
       ? [
@@ -1014,63 +1184,151 @@ export async function createPrivateLocalTools(
               root,
               undefined,
               processes.scope("invocation"),
+              configRoot.home,
+              sandbox?.launch,
             ),
           }),
         ]
-      : [createPrivateLocalComputerSource(root, port, sessionPath, processes)];
-  const base = botanicalExtensionsWithSkills(
-    createLocalSkillSource({ cwd: root }),
-  );
+      : [
+          createPrivateLocalComputerSource(
+            root,
+            port,
+            sessionPath,
+            processes,
+            configRoot.home,
+            sandbox?.launch,
+          ),
+        ];
   const installed =
-    storeDirectory === undefined
-      ? { roster: [], grants: [], diagnostics: [] }
-      : await localExtensions().agent(storeDirectory, root);
-  for (const diagnostic of installed.diagnostics)
-    logEvent("local-extension-load", diagnostic.error);
-  const extensions: ExtensionRosterV0 = {
-    roster: [
-      ...base.roster,
-      homeExtension({
-        computers: {
-          read: () => [{ name: "local", attachmentId: "local-computer", port }],
-        },
+    configuration?.installed ??
+    (storeDirectory === undefined
+      ? { roster: [], grants: [], skills: [], diagnostics: [] }
+      : await localExtensions({ home: configRoot.home }).agent(
+          storeDirectory,
+          root,
+        ));
+  function configure(
+    installed: LocalAgentExtensions,
+    connection: PrivateFungiMcpConnectionOptions | undefined,
+    clientPath?: string,
+  ): Pick<ShiitakeOptions, "extensions" | "tools"> {
+    const base = botanicalExtensionsWithSkills(
+      createLocalSkillSource({
+        cwd: root,
+        home: configRoot.home,
+        extensions: installed.skills,
       }),
-      ...(subagents === undefined
-        ? []
-        : [subagentsExtension({ source: subagents.source })]),
-      ...installed.roster,
-    ],
-    grants: [
-      ...base.grants,
-      homeGrant,
-      ...(subagents === undefined ? [] : [subagentsGrant]),
-      ...installed.grants,
-    ],
-  };
-  return Object.freeze({
+    );
+    for (const diagnostic of installed.diagnostics)
+      logEvent("local-extension-load", diagnostic.error);
+    const archive =
+      storeDirectory === undefined
+        ? { roster: [], grants: [] }
+        : localArchiveHandoff(storeDirectory, installed.grants);
+    const extensions: ExtensionRosterV0 = {
+      roster: [
+        ...base.roster,
+        forms.extension,
+        homeExtension({
+          computers: {
+            read: () => [
+              { name: "local", attachmentId: "local-computer", port },
+            ],
+          },
+        }),
+        ...(subagents === undefined
+          ? []
+          : [subagentsExtension({ source: subagents.source })]),
+        ...archive.roster,
+        ...installed.roster,
+      ],
+      grants: [
+        ...base.grants,
+        {
+          id: forms.extension.manifest.id,
+          capabilities: forms.extension.manifest.requests,
+        },
+        homeGrant,
+        ...(subagents === undefined ? [] : [subagentsGrant]),
+        ...archive.grants,
+        ...installed.grants,
+      ],
+    };
+    return Object.freeze({
+      extensions,
+      tools: Object.freeze({
+        execution: Object.freeze({ timeoutMs: 900_000 }),
+        sources: Object.freeze([
+          ...(agentControl === undefined
+            ? []
+            : [subagents?.control ?? createAgentControlSource(agentControl)]),
+          ...(clientPath === undefined
+            ? computerSources
+            : [
+                createPrivateLocalComputerSource(
+                  root,
+                  port,
+                  () => clientPath,
+                  processes,
+                  configRoot.home,
+                  sandbox?.launch,
+                ),
+              ]),
+          ...(connection === undefined
+            ? []
+            : [createPrivateFungiMcpConnection(connection)]),
+        ]),
+        sandbox: createPrivateWorkerdSandbox(),
+      }),
+    });
+  }
+  const initial = configure(
+    installed,
+    configuration === undefined ? fungiMcp : configuration.fungiMcp,
+    configuration?.clientPath,
+  );
+  if (initial.tools === undefined)
+    throw new Error("Local tools are unavailable");
+  return {
+    ...initial,
+    tools: initial.tools,
     port,
-    extensions,
     processes,
-    tools: Object.freeze({
-      execution: Object.freeze({ timeoutMs: 900_000 }),
-      sources: Object.freeze([
-        ...(agentControl === undefined
-          ? []
-          : [subagents?.control ?? createAgentControlSource(agentControl)]),
-        ...computerSources,
-        ...(fungiMcp === undefined
-          ? []
-          : [createPrivateFungiMcpConnection(fungiMcp)]),
-      ]),
-      sandbox: createPrivateWorkerdSandbox(),
-    }),
-  });
+    configure,
+    bindSession: forms.bindSession,
+    presentApproval: forms.presentApproval,
+  };
 }
 
 /** Shiitake's public Node runtime host, reporting failed passes to local logs. */
-function localRuntimeOwner(): NodeRuntimeHost {
-  return nodeRuntimeHost((cause) => {
+type LocalRuntimeOwner = NodeRuntimeHost &
+  Readonly<{
+    /**
+     * Whether the bound Agent's own durable answer names no Watchdog job,
+     * unsettled cursor, due or scheduled extension timer; false until bound.
+     */
+    settled: () => Promise<boolean>;
+  }>;
+
+function localRuntimeOwner(): LocalRuntimeOwner {
+  const host = nodeRuntimeHost((cause) => {
     logEvent("shiitake_reconciliation_failed", cause);
+  });
+  let pendingWork:
+    Parameters<RuntimeHost["bind"]>[0]["pendingWork"] | undefined;
+  return Object.freeze({
+    ...host,
+    runtime: Object.freeze({
+      bind: (input: Parameters<RuntimeHost["bind"]>[0]) => {
+        pendingWork = input.pendingWork;
+        return host.runtime.bind(input);
+      },
+    }),
+    settled: async () => {
+      if (pendingWork === undefined) return false;
+      const work = await pendingWork();
+      return !work.pending && work.nextWakeAt === null;
+    },
   });
 }
 
@@ -1133,6 +1391,14 @@ export async function closePrivateLocalResources(
     if (failure !== undefined) failures.push(failure);
   }
 
+  if (resources.sandbox !== undefined) {
+    const failure = await captureCloseFailure(
+      () => Promise.resolve().then(() => resources.sandbox?.close()),
+      "Local sandbox close failed",
+    );
+    if (failure !== undefined) failures.push(failure);
+  }
+
   const runtimeFailure = await captureCloseFailure(
     resources.runtime.close,
     "Local runtime close failed",
@@ -1176,6 +1442,17 @@ export async function closePrivateLocalResources(
     throw aggregateLocalFailures(failures, "Local host close failed");
 }
 
+/** Adapt Core's store refusal without reclassifying other opening failures. */
+function localHostOpeningFailure(cause: unknown, databasePath: string): Error {
+  if (
+    cause instanceof ShiitakeError &&
+    cause.boundary === "store" &&
+    cause.cause === "incompatible"
+  )
+    return new LocalStoreSchemaError(databasePath, { cause });
+  return asLocalFailure(cause, "Local host opening failed");
+}
+
 /**
  * Open one private file-backed local Shiitake host and its fixed Session.
  *
@@ -1184,8 +1461,11 @@ export async function closePrivateLocalResources(
  */
 export async function openPrivateLocalRuntimeHost(
   input: PrivateLocalRuntimeHostOptions,
-  models: Models = createPrivateModels(),
+  suppliedModels?: Models,
 ): Promise<PrivateLocalRuntimeHost> {
+  const configRoot = input.configRoot ?? capturePrivateLocalConfigRoot();
+  const models =
+    suppliedModels ?? createPrivateModels(configRoot.credentialPath);
   const root = await realpath(resolve(input.invocationRoot));
   await ensurePrivateLocalGitExclude(root);
   const selectedProviderId = input.providerId;
@@ -1211,10 +1491,12 @@ export async function openPrivateLocalRuntimeHost(
   const runtime = localRuntimeOwner();
   let lease: NodeStoreLease | undefined;
   let providerCacheKey: string | undefined;
-  let database: DatabaseSync | undefined;
-  let agent: ShiitakeAgent | undefined;
+  let database: PrivateSqliteDatabase | undefined;
+  let agent: Awaited<ReturnType<typeof Shiitake.make>> | undefined;
   let processes: PrivateLocalComputerProcesses | undefined;
+  let sandbox: LocalSandboxControls | undefined;
   const sessionPaths = new Map<string, string>();
+  let usesServiceConfiguration = input.configuration !== undefined;
 
   try {
     lease = acquireNodeStoreLease(paths.sidecarPath);
@@ -1224,13 +1506,59 @@ export async function openPrivateLocalRuntimeHost(
         JSON.stringify(["fungi-local", paths.databasePath, initialSessionId]),
       )
       .digest("hex");
-    database = new DatabaseSync(paths.databasePath, { timeout: 0 });
+    database = openPrivateWritableSqliteDatabase(paths.databasePath, 0);
     database.exec("PRAGMA foreign_keys = ON");
-    const agentId = ensureLocalAgentId(database, paths.agentId);
-    const modelDatabase = database;
-    modelDatabase.exec(
-      "CREATE TABLE IF NOT EXISTS private_local_model_settings (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), model TEXT NOT NULL) STRICT",
+    const agentId = ensureLocalAgentId(
+      database,
+      paths.databasePath,
+      paths.agentId,
+      input.name,
+      input.createdBy,
+      input.folder,
+      input.requireSandbox,
     );
+    const sandboxDatabase = database;
+    const readSandboxRequirement = () =>
+      z
+        .union([z.literal(0), z.literal(1)])
+        .parse(
+          sandboxDatabase
+            .prepare(
+              "SELECT require_sandbox FROM private_local_identity WHERE singleton = 1",
+            )
+            .get()?.require_sandbox,
+        ) === 1;
+    const selectedFolder = resolveAgentFolder(
+      root,
+      localAgentFolderSchema.parse(
+        database
+          .prepare(
+            "SELECT folder FROM private_local_identity WHERE singleton = 1",
+          )
+          .get()?.folder,
+      ),
+    );
+    const sandboxOwner = createLocalSandboxControls({
+      project: root,
+      folder: selectedFolder.folder,
+      required: readSandboxRequirement,
+    });
+    sandbox = sandboxOwner;
+    // Both constructors below can resume stored commands before returning.
+    // Admission must precede tools, configuration hooks and Agent construction.
+    const name =
+      z
+        .string()
+        .nullable()
+        .parse(
+          database
+            .prepare(
+              "SELECT name FROM private_local_identity WHERE singleton = 1",
+            )
+            .get()?.name,
+        ) ?? agentId;
+    const modelDatabase = database;
+    ensureAgentDefaultModelTable(modelDatabase);
     let initialModel =
       selectedProviderId === undefined || selectedModelId === undefined
         ? null
@@ -1243,20 +1571,8 @@ export async function openPrivateLocalRuntimeHost(
         ...initialModel,
         reasoning: input.reasoning,
       });
-    modelDatabase
-      .prepare(
-        "INSERT OR IGNORE INTO private_local_model_settings VALUES (1, ?)",
-      )
-      .run(JSON.stringify(initialModel));
-    const readAgentModel = () => {
-      const row = modelDatabase
-        .prepare(
-          "SELECT model FROM private_local_model_settings WHERE singleton = 1",
-        )
-        .get();
-      return parseModelPreferenceJson(row?.model);
-    };
-    const modelSettings = createLocalModelSettings(input.modelSettingsPath);
+    seedAgentDefaultModel(modelDatabase, initialModel);
+    const readAgentModel = () => readAgentDefaultModel(modelDatabase);
 
     const store = createPrivateSqliteOwner(database);
     let acceptMail:
@@ -1282,6 +1598,11 @@ export async function openPrivateLocalRuntimeHost(
             storage: store,
             directory: input.agentControl,
             routing: input.mail,
+            meshAdmission:
+              input.meshAdmission === undefined
+                ? undefined
+                : async (recipientAgentId) =>
+                    input.meshAdmission?.(agentId, recipientAgentId),
             accept: (mail, meta, reply) => {
               if (acceptMail === undefined)
                 return Promise.reject(
@@ -1290,26 +1611,37 @@ export async function openPrivateLocalRuntimeHost(
               return acceptMail(mail, meta, reply);
             },
           });
-    let agentControl: AgentControlDirectory | undefined;
+    let projectDirectory: LocalAgentControlDirectory | undefined;
     if (input.agentControl !== undefined) {
-      agentControl = {
+      projectDirectory = {
         ...input.agentControl,
         models: (signal) => listOfferedLocalModels(models, signal),
       };
       if (delegation !== undefined)
-        agentControl = { ...agentControl, send: delegation.send };
+        projectDirectory = {
+          ...projectDirectory,
+          send: delegation.send,
+          recall: delegation.recall,
+        };
     }
     const subagents =
-      agentControl === undefined
+      projectDirectory === undefined
         ? undefined
-        : createPrivateLocalSubagents({ database, directory: agentControl });
+        : createPrivateLocalAgentControl({
+            agentId,
+            directory: projectDirectory,
+            storage: store,
+          });
     const localTools = await createPrivateLocalTools(
-      root,
+      selectedFolder.absolute,
       input.fungiMcp,
-      agentControl,
+      subagents?.directory,
       (sessionId) => sessionPaths.get(sessionId),
       dirname(paths.databasePath),
       subagents,
+      await input.configuration?.(dirname(paths.databasePath)),
+      configRoot,
+      sandboxOwner,
     );
     processes = localTools.processes;
     const sessionProcesses = processes;
@@ -1319,7 +1651,7 @@ export async function openPrivateLocalRuntimeHost(
       selectedModelId,
       providerCacheKey,
       input.reasoning,
-      { agent: readAgentModel, manual: modelSettings.read },
+      { agent: readAgentModel },
     );
     const hostOptions = {
       store,
@@ -1343,20 +1675,42 @@ export async function openPrivateLocalRuntimeHost(
     }
 
     const sessionOwner = agent;
-    const getSession = (sessionId: string): ShiitakeSession => {
-      const session = sessionOwner.session(sessionId);
+    const setAgentModel = async (
+      input: ModelPreference,
+      signal: AbortSignal,
+    ) => {
+      const preference = parseModelPreference(input);
+      if (preference === null)
+        throw new ShiitakeError(
+          "model",
+          "invalid",
+          "An Agent model is required",
+        );
+      await modelSource.assertReady(preference, signal);
+      signal.throwIfAborted();
+      writeAgentDefaultModel(modelDatabase, preference);
+    };
+    // /model in a chat sets this Agent's default and its thinking level; a
+    // Session override is cleared so the running Session follows the default.
+    const getSession = (
+      sessionId: string,
+      attachment?: LocalUiAttachment,
+    ): ShiitakeSession => {
+      const session = localTools.bindSession(
+        sessionId,
+        sessionOwner.session(sessionId),
+        attachment,
+      );
       return {
         ...session,
         modelPreference: {
-          read: session.modelPreference.read,
+          read: async () =>
+            (await session.modelPreference.read()) ?? readAgentModel(),
           set: async (input) => {
             const preference = parseModelPreference(input);
             if (preference !== null)
-              await modelSource.assertReady(
-                preference,
-                new AbortController().signal,
-              );
-            await session.modelPreference.set(preference);
+              await setAgentModel(preference, new AbortController().signal);
+            await session.modelPreference.set(null);
           },
         },
       };
@@ -1365,24 +1719,27 @@ export async function openPrivateLocalRuntimeHost(
     let closing: Promise<void> | undefined;
     return Object.freeze({
       agentId,
+      name,
       databasePath: paths.databasePath,
       session,
       getSession,
-      setModel: async (input, signal) => {
-        const preference = parseModelPreference(input);
-        if (preference === null)
-          throw new ShiitakeError(
-            "model",
-            "invalid",
-            "An Agent model is required",
-          );
-        await modelSource.assertReady(preference, signal);
-        signal.throwIfAborted();
+      presentApproval: localTools.presentApproval,
+      setModel: setAgentModel,
+      setRequireSandbox: (required) => {
+        sandboxDatabase
+          .prepare(
+            "UPDATE private_local_identity SET require_sandbox = ? WHERE singleton = 1",
+          )
+          .run(required ? 1 : 0);
+        sandboxOwner.assertReady();
+      },
+      sandboxStatus: sandboxOwner.status,
+      setArchived: (archived) => {
         modelDatabase
           .prepare(
-            "UPDATE private_local_model_settings SET model = ? WHERE singleton = 1",
+            "UPDATE private_local_identity SET archived = ? WHERE singleton = 1",
           )
-          .run(JSON.stringify(preference));
+          .run(archived ? 1 : 0);
       },
       assertModelReady: async (sessionId, signal) => {
         const preference = await sessionOwner
@@ -1392,6 +1749,7 @@ export async function openPrivateLocalRuntimeHost(
       },
       bindSessionPath: (sessionId, path) => {
         const selected = parsePrivateLocalExecPath(path);
+        if (usesServiceConfiguration) return true;
         const previous = sessionPaths.get(sessionId);
         if (previous !== undefined && previous !== selected) return false;
         sessionPaths.set(sessionId, selected);
@@ -1413,18 +1771,62 @@ export async function openPrivateLocalRuntimeHost(
         return deleted;
       },
       extensions: sessionOwner.extensions,
+      prepareReload: async (configuration) => {
+        const prepared = await sessionOwner.prepareConfiguration(
+          localTools.configure(
+            configuration.installed,
+            configuration.fungiMcp,
+            configuration.clientPath,
+          ),
+        );
+        return {
+          discard: prepared.discard,
+          commit: () => {
+            prepared.commit();
+            usesServiceConfiguration = true;
+          },
+        };
+      },
       acceptMail: (mail) =>
         delegation === undefined
           ? Promise.reject(new Error("Local mail ingress is unavailable"))
           : delegation.receive(mail),
+      pendingDelegation: () =>
+        delegation === undefined
+          ? Promise.resolve(undefined)
+          : delegation.outstanding(),
       readSettlement: (sessionId, commandId) =>
         readSettlement === undefined
           ? Promise.reject(new Error("Local settlement reads are unavailable"))
           : readSettlement(sessionId, commandId),
+      idle: async () => {
+        if (sessionProcesses.running()) return false;
+        if (!(await runtime.settled())) return false;
+        // Delegated work still owed to this Agent is not read here: that read
+        // reopens each child, and the child's reply mail reopens this Agent.
+        let after: string | undefined;
+        do {
+          const page = await sessionOwner.listSessions(after);
+          for (const row of page.sessions)
+            if (row.state === "running" || row.state === "needs_you")
+              return false;
+          after = page.next;
+        } while (after !== undefined);
+        // Reconciliation enqueues replies before advancing its settled cursor.
+        // Observe mail last: an earlier empty outbox can become retryable mail
+        // while we await settlement or Session reads, especially during stop
+        // when delivery cannot reopen a parent. The owner rechecks admissions
+        // and uses after this observation before forgetting the Agent.
+        return (
+          input.mail === undefined ||
+          !(await hasPrivateLocalPendingMail(modelDatabase))
+        );
+      },
       close: () => {
         closing ??= closePrivateLocalResources({
           agent,
           processes,
+          sandbox,
           runtime,
           database,
           lease,
@@ -1434,9 +1836,9 @@ export async function openPrivateLocalRuntimeHost(
       },
     });
   } catch (cause) {
-    const openingFailure = asLocalFailure(cause, "Local host opening failed");
+    const openingFailure = localHostOpeningFailure(cause, paths.databasePath);
     await closePrivateLocalResources(
-      { agent, processes, runtime, database, lease, providerCacheKey },
+      { agent, processes, sandbox, runtime, database, lease, providerCacheKey },
       openingFailure,
     );
     throw openingFailure;

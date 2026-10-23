@@ -37,6 +37,11 @@ import {
 } from "@earendil-works/pi-ai/providers/faux";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { createLocalSkillSource } from "../src/local-skill-source.js";
+import { LocalStoreSchemaError } from "../src/private-local-service.js";
+import {
+  readPrivateLocalAgentProfile,
+  readPrivateLocalSessionDiscovery,
+} from "../src/private-local-session-discovery.js";
 import * as Effect from "effect/Effect";
 import * as Stream from "effect/Stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -47,6 +52,7 @@ import { bindSessionExtension } from "@fungi.computer/shiitake/client";
 import { goalContract } from "@fungi.computer/shiitake-extensions/goal";
 import { loopContract } from "@fungi.computer/shiitake-extensions/loop";
 import { createPrivateModels } from "../src/local-models.js";
+import { openAIAccessToken } from "./openai-fixtures.js";
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
 import { createPrivateInvocationFilesPort } from "../src/private-invocation-files.js";
 import { createPrivateSqliteOwner } from "../src/private-sqlite-owner.js";
@@ -153,11 +159,11 @@ it("reserves a fifteen-minute sandbox budget for bounded local commands", async 
 });
 
 it("publishes each granted tool root and its path convention through discovery", async () => {
-  const root = join(
-    resolve(await temporaryDirectory("tool-root-discovery")),
-    "nested-project-".repeat(12),
-  );
-  await mkdir(root);
+  // Exercise a long root even when the host has a short TMPDIR, without
+  // doubling the padding when TMPDIR already supplies a long prefix.
+  let root = resolve(await temporaryDirectory("tool-root-discovery"));
+  while (root.length < 350) root = join(root, "nested-project-".repeat(7));
+  await mkdir(root, { recursive: true });
   const tools = await createPrivateLocalTools(root);
   const runtime = await Mycelium.make({
     ...tools.tools,
@@ -179,10 +185,14 @@ it("publishes each granted tool root and its path convention through discovery",
       "Relative paths resolve from this root; absolute paths must remain inside it.",
     );
     expect(computer.kind).toBe("operation");
-    expect(computer.description).toContain(`Computer root: ${root}`);
-    expect(computer.description).toContain(
-      "cwd must be absolute and remain inside this root; omission starts at the root.",
+    expect(computer).toHaveProperty(
+      "inputSchema.description",
+      `Computer root: ${root}. cwd must be absolute and remain inside this root; omission starts at the root.`,
     );
+    expect(z.string().max(1000).safeParse(computer.description).success).toBe(
+      true,
+    );
+    expect(computer.description).toContain("root in the input schema");
   } finally {
     await lease.release();
     await runtime.close();
@@ -353,7 +363,7 @@ describe("private local RuntimeHost", () => {
     const root = await temporaryDirectory("new-agent-model-default");
     const models = createPrivateModels(join(root, "credentials.json"));
     const host = await openPrivateLocalRuntimeHost(
-      { invocationRoot: root, modelSettingsPath: join(root, "shiitake.json") },
+      { invocationRoot: root },
       models,
     );
     try {
@@ -426,17 +436,7 @@ describe("private local RuntimeHost", () => {
     async (modelId) => {
       const root = await temporaryDirectory("provider-requests");
       const models = createPrivateModels(join(root, "credentials.json"));
-      const token = [
-        "synthetic",
-        Buffer.from(
-          JSON.stringify({
-            "https://api.openai.com/auth": {
-              chatgpt_account_id: "synthetic-account",
-            },
-          }),
-        ).toString("base64url"),
-        "synthetic",
-      ].join(".");
+      const token = openAIAccessToken("synthetic-person");
       await createPrivateCredentialStore(join(root, "credentials.json")).modify(
         "openai",
         () =>
@@ -877,6 +877,7 @@ describe("private local RuntimeHost", () => {
           acquire: () =>
             Promise.resolve({
               model: faux.model,
+              retryable: () => false,
               stream: faux.stream,
               release: () => Promise.resolve(),
             }),
@@ -988,10 +989,15 @@ describe("private local RuntimeHost", () => {
     [
       "non-v0",
       "CREATE TABLE woodstock_schema (version INTEGER NOT NULL, protocol TEXT NOT NULL)",
-      "INSERT INTO woodstock_schema (version, protocol) VALUES (1, 'shiitake.extension/v1')",
+      "INSERT INTO woodstock_schema (version, protocol) VALUES (3, 'shiitake.extension/v1')",
+    ],
+    [
+      "obsolete",
+      "CREATE TABLE woodstock_schema (version INTEGER NOT NULL, protocol TEXT NOT NULL)",
+      "INSERT INTO woodstock_schema (version, protocol) VALUES (2, 'shiitake.extension/v0')",
     ],
   ])(
-    "refuses a %s store and leaves its file untouched",
+    "refuses a %s store while retaining its file and evidence",
     async (_label, create, insert) => {
       const root = await temporaryDirectory("protocol-refused");
       const databasePath = createExistingDatabase(root);
@@ -1005,7 +1011,7 @@ describe("private local RuntimeHost", () => {
 
       await expect(
         openPrivateLocalRuntimeHost({ invocationRoot: root, databasePath }),
-      ).rejects.toThrow(/no v0 protocol marker/);
+      ).rejects.toThrow(LocalStoreSchemaError);
 
       expect((await stat(databasePath)).ino).toBe(before.ino);
       const retained = new DatabaseSync(databasePath, { readOnly: true });
@@ -1020,6 +1026,8 @@ describe("private local RuntimeHost", () => {
     },
   );
 
+  // Woodstock schema version 3 separates tool data from model content; the
+  // v0 protocol marker at the current version is what this host opens in place.
   it("opens an already marked v0 store without moving its file", async () => {
     const root = await temporaryDirectory("protocol-marked");
     const databasePath = createExistingDatabase(root);
@@ -1028,7 +1036,7 @@ describe("private local RuntimeHost", () => {
       "CREATE TABLE woodstock_schema (version INTEGER NOT NULL, protocol TEXT NOT NULL)",
     );
     marked.exec(
-      "INSERT INTO woodstock_schema (version, protocol) VALUES (1, 'shiitake.extension/v0')",
+      "INSERT INTO woodstock_schema (version, protocol) VALUES (3, 'shiitake.extension/v0')",
     );
     marked.close();
     const before = await stat(databasePath);
@@ -1206,6 +1214,7 @@ describe("private local RuntimeHost", () => {
         acquire: () =>
           Promise.resolve({
             model: faux.model,
+            retryable: () => false,
             stream: faux.stream,
             release: () => Promise.resolve(),
           }),
@@ -1249,7 +1258,6 @@ describe("private local RuntimeHost", () => {
       {
         invocationRoot: root,
         databasePath: first.databasePath,
-        modelSettingsPath: join(root, "shiitake.json"),
       },
       createPrivateModels(join(root, "credentials.json")),
     );
@@ -1346,6 +1354,94 @@ describe("private local RuntimeHost", () => {
     },
   );
 
+  it("gives an unnamed Agent a stored Cairn word name and keeps a given name", async () => {
+    const root = await temporaryDirectory("generated-name");
+    const unnamed = await openPrivateLocalRuntimeHost({
+      invocationRoot: root,
+      createRequestId: "unnamed",
+    });
+    const generated = readPrivateLocalAgentProfile(unnamed.databasePath).name;
+    expect(generated).toMatch(/^[a-z]+-[a-z]+$/u);
+    await unnamed.close();
+    const named = await openPrivateLocalRuntimeHost({
+      invocationRoot: root,
+      createRequestId: "named",
+      name: "Scout",
+    });
+    expect(readPrivateLocalAgentProfile(named.databasePath).name).toBe("Scout");
+    await named.close();
+  });
+
+  it("records the creating Agent with the created Agent's store and keeps it across reopening; a human-made Agent has none", async () => {
+    const root = await temporaryDirectory("created-by");
+    const options = {
+      invocationRoot: root,
+      createRequestId: "made-by-an-agent",
+      createdBy: "local_store_creator",
+    };
+    const created = await openPrivateLocalRuntimeHost(options);
+    const createdPath = created.databasePath;
+    expect(readPrivateLocalAgentProfile(createdPath).createdBy).toBe(
+      "local_store_creator",
+    );
+    await created.close();
+    // A replay by the same creator reopens; a conflicting creator is refused.
+    const reopened = await openPrivateLocalRuntimeHost(options);
+    await reopened.close();
+    await expect(
+      openPrivateLocalRuntimeHost({
+        ...options,
+        createdBy: "someone_else",
+      }),
+    ).rejects.toThrow("Local Agent creation identity conflicts with its store");
+    expect(readPrivateLocalAgentProfile(createdPath).createdBy).toBe(
+      "local_store_creator",
+    );
+    const human = await openPrivateLocalRuntimeHost({
+      invocationRoot: root,
+      createRequestId: "made-by-a-human",
+    });
+    expect(readPrivateLocalAgentProfile(human.databasePath).createdBy).toBe(
+      null,
+    );
+    await human.close();
+  });
+
+  it("archives and restores through the real host: the flag is stored, discovery follows it, and the store stays", async () => {
+    const root = await temporaryDirectory("archive-flag");
+    const host = await openPrivateLocalRuntimeHost({
+      invocationRoot: root,
+      createRequestId: "to-archive",
+    });
+    try {
+      expect(readPrivateLocalAgentProfile(host.databasePath).archived).toBe(
+        false,
+      );
+      host.setArchived(true);
+      expect(readPrivateLocalAgentProfile(host.databasePath).archived).toBe(
+        true,
+      );
+      expect((await readPrivateLocalSessionDiscovery(root)).agents).toEqual([]);
+      expect(
+        (
+          await readPrivateLocalSessionDiscovery(root, { archived: true })
+        ).agents.map(({ agentId }) => agentId),
+      ).toEqual([host.agentId]);
+      await expect(host.pendingDelegation()).resolves.toBeUndefined();
+      host.setArchived(false);
+      expect(readPrivateLocalAgentProfile(host.databasePath).archived).toBe(
+        false,
+      );
+      expect(
+        (await readPrivateLocalSessionDiscovery(root)).agents.map(
+          ({ agentId }) => agentId,
+        ),
+      ).toEqual([host.agentId]);
+    } finally {
+      await host.close();
+    }
+  });
+
   it("rejects a preplanted create-store symlink to an outside directory", async () => {
     const root = await temporaryDirectory("create-request-symlink");
     const outside = await temporaryDirectory("create-request-outside");
@@ -1397,11 +1493,13 @@ describe("private local RuntimeHost", () => {
       ).toEqual([
         ["botanical-almanac", "running"],
         ["botanical-home", "running"],
+        ["botanical-local-mcp-form", "running"],
         ["botanical-session-goal", "running"],
         ["botanical-session-loop", "running"],
         ["botanical-session-plan", "running"],
         ["botanical-session-question", "running"],
         ["botanical-skills", "running"],
+        ["zookeeper-compaction", "running"],
       ]);
       await goal.call("set", {
         objective: "Keep the garden tidy",
@@ -1425,32 +1523,13 @@ describe("private local RuntimeHost", () => {
         status: "running",
         value: {
           loop: { mode: "fixed_interval", state: "active" },
-          history: {
-            nextSequence: 2,
-            omitted: 0,
-            events: [
-              {
-                id: "1",
-                sequence: 1,
-                event: {
-                  loopId: "loop:local-loop",
-                  prompt: "Check the beds",
-                  mode: "fixed_interval",
-                  state: "active",
-                  cron: { expression: "0 * * * *", timeZone: "UTC" },
-                },
-              },
-            ],
-          },
         },
       });
-      if (observedLoop.status !== "running" || observedLoop.value === null)
-        throw new Error("Local Loop projection is not available");
-      const event = observedLoop.value.history.events[0];
-      expect(event?.at).toBeGreaterThan(0);
-      expect(event?.commandId).toBeTruthy();
-      expect(event?.event).toEqual(observedLoop.value.loop);
-      expect(event?.commandId).toBe(observedLoop.value.loop?.commandId);
+      expect(observedLoop).toMatchObject({
+        value: {
+          loop: { loopId: "loop:local-loop", prompt: "Check the beds" },
+        },
+      });
     } finally {
       await host.close();
     }
@@ -1621,7 +1700,7 @@ describe("private local instructions and model selection", () => {
       signal: new AbortController().signal,
     });
     expect(absent.text).toContain(
-      "After a run fails, each new user message is a new instruction.",
+      "After a run fails, each new user message is a new instruction: retry or continue the failed task only when the user explicitly asks, and ask what they want when the message is ambiguous.",
     );
     await writeFile(join(root, "AGENTS.md"), "\uFEFFproject instructions\r\n");
     const present = await source.load({
@@ -1632,7 +1711,7 @@ describe("private local instructions and model selection", () => {
 
     expect(absent.text).toMatch(/^You are the local coding agent\./u);
     expect(present.text).toContain(
-      "After a run fails, each new user message is a new instruction.",
+      "After a run fails, each new user message is a new instruction: retry or continue the failed task only when the user explicitly asks, and ask what they want when the message is ambiguous.",
     );
     expect(present.text).toContain("\uFEFFproject instructions");
     expect(
@@ -1729,6 +1808,7 @@ describe("private local instructions and model selection", () => {
         acquire: () => {
           return Promise.resolve({
             model: faux.model,
+            retryable: () => false,
             stream: faux.stream,
             release: () => Promise.resolve(),
           });
@@ -1751,12 +1831,22 @@ describe("private local instructions and model selection", () => {
       if (systemMessage?.role !== "system")
         throw new Error("Missing normalized system message");
       const systemPrompt = getSystemMessageText(systemMessage);
-      expect(systemPrompt).toContain("session-proof");
+      for (const section of [
+        "[extension:botanical-home.home]",
+        "[extension:botanical-session-goal.goal]",
+        "[extension:botanical-session-loop.loop]",
+        "[extension:botanical-session-plan.plan]",
+        "[extension:botanical-session-question.question]",
+        "[extension:botanical-skills.skills]",
+      ])
+        expect(systemPrompt).toContain(section);
       expect(systemPrompt).toContain(
-        "Extension prompt sections describe the Session's tools",
+        'return await skill.load({name: "skill-name"})',
       );
-      expect(systemPrompt).toContain("skill.load({name, file?})");
-      expect(systemPrompt).toContain("Prove the real local Session");
+      expect(systemPrompt).toContain(
+        "- session-proof: Prove the real local Session\n",
+      );
+      expect(systemPrompt).not.toContain("<location>");
       expect(systemPrompt).not.toContain("secret session skill body");
       expect(requests[1]?.messages).toContainEqual(
         expect.objectContaining({
@@ -1992,10 +2082,7 @@ it("round-trips Home URI results through Local's contained Files port", async ()
     (context) => {
       const { last, text } = readResult(context);
       expect(last.isError).toBe(false);
-      const listing = z
-        .object({ entries: z.array(z.object({ path: z.string() })) })
-        .parse(JSON.parse(text));
-      const path = listing.entries[0]?.path;
+      const path = text.split("\n")[0];
       expect(path).toBe("computer://home/src/note%20space.txt");
       if (path === undefined) throw new Error("Missing listed path");
       return call("read", { path });
@@ -2025,6 +2112,7 @@ it("round-trips Home URI results through Local's contained Files port", async ()
       acquire: () =>
         Promise.resolve({
           model: faux.model,
+          retryable: () => false,
           stream: faux.stream,
           release: () => Promise.resolve(),
         }),

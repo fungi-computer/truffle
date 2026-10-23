@@ -7,12 +7,14 @@ import { parseArgs } from "node:util";
 import type {
   AuthInteraction,
   AuthType,
+  LoginOptions,
   Models,
   Provider,
 } from "@earendil-works/pi-ai";
 import { localLoginProviders } from "./local-login.js";
 import { createPrivateModels } from "./local-models.js";
 import { createPrivateCredentialStore } from "./private-file-credential-store.js";
+import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 export { maximumCredentialStringLength as localAuthInputLimit } from "./private-file-credential-store.js";
 
 export type LocalAuthModels = Pick<
@@ -39,12 +41,26 @@ export type LocalAuthResult =
       kind: "status";
       providers: readonly LocalAuthStatus[];
     }>;
+/**
+ * A blank API key was entered. Its message is fixed by the type, never
+ * provider output or credential material, so it is safe to show verbatim
+ * wherever the login surfaces (including across the Local service).
+ */
+export class LocalAuthRefusal extends Error {
+  constructor() {
+    super("No key entered");
+    this.name = "LocalAuthRefusal";
+  }
+}
+
 export type SignalProcess = {
   once(signal: NodeJS.Signals, listener: () => void): void;
   removeListener(signal: NodeJS.Signals, listener: () => void): void;
 };
 
 export type LocalAuthCliOptions = {
+  /** Credential/device custody selected by the host before presenting auth. */
+  credentialPath?: string;
   models?: LocalAuthModels;
   input?: NodeJS.ReadableStream;
   output?: NodeJS.WritableStream;
@@ -60,6 +76,10 @@ type Command =
   | { type: "status"; provider?: string }
   | { type: "logout"; provider?: string };
 type AuthMethodOption = { id: AuthType; label: string };
+/** What a login needs from its host: the stable device ID. */
+type LoginHost = Readonly<{
+  getDeviceId: () => Promise<string>;
+}>;
 
 function usage(): string {
   return "Usage: fungi-local-auth <login|status|logout> [--provider <id>] [--auth-type oauth|api_key] [--method <id>]";
@@ -159,10 +179,17 @@ function interactionFor(
         prompt.signal === undefined
           ? signal
           : AbortSignal.any([signal, prompt.signal]);
-      return (supplied ?? terminalInteraction(input, output)).prompt({
+      const answer = await (
+        supplied ?? terminalInteraction(input, output)
+      ).prompt({
         ...prompt,
         signal: promptSignal,
       });
+      // A blank key would be stored as a credential and report success while
+      // every model call then fails; refuse it where the key is read.
+      if (prompt.type === "secret" && answer.trim() === "")
+        throw new LocalAuthRefusal();
+      return answer;
     },
     notify: (event) => {
       const augmented =
@@ -247,7 +274,7 @@ async function login(
   signal: AbortSignal,
   input: NodeJS.ReadableStream,
   output: NodeJS.WritableStream,
-  getDeviceId: () => Promise<string>,
+  host: LoginHost,
   supplied?: AuthInteraction,
 ): Promise<void> {
   const provider = await chooseProvider(
@@ -286,17 +313,20 @@ async function login(
     signInLabel,
   );
   // Sign in with ChatGPT needs a stable installation UUID in its authorize
-  // URL (`ext_agent_host_id`); pass it at this one call site, the way Pi's
-  // own coding-agent does, instead of patching Pi's `models.login`. Pi's
-  // option is synchronous, so resolve our (async, disk-backed) device ID
-  // first and hand it a closure over the resolved value.
+  // URL (`ext_agent_host_id`) and shows `agentName` on OpenAI's consent page
+  // (Levi, 2026-10-16: Shiitake, Fungi's agent). Pass both at this one call
+  // site, the way Pi's own coding-agent does. Pi's device-ID option is
+  // synchronous, so resolve our (async, disk-backed) ID first and hand it a
+  // closure over the resolved value.
   if (provider.id === "openai" && authType === "oauth") {
     signal.throwIfAborted();
-    const deviceId = await getDeviceId();
+    const deviceId = await host.getDeviceId();
     signal.throwIfAborted();
-    await models.login(provider.id, authType, interaction, {
+    const loginOptions: LoginOptions = {
+      agentName: "Shiitake",
       getDeviceId: () => deviceId,
-    });
+    };
+    await models.login(provider.id, authType, interaction, loginOptions);
   } else {
     await models.login(provider.id, authType, interaction);
   }
@@ -402,21 +432,13 @@ async function runCommand(
   signal: AbortSignal,
   input: NodeJS.ReadableStream,
   output: NodeJS.WritableStream,
-  getDeviceId: () => Promise<string>,
+  host: LoginHost,
   interaction?: AuthInteraction,
 ): Promise<LocalAuthResult> {
   if (command.type === "status")
     return status(models, command.provider, signal, output, interaction);
   if (command.type === "login") {
-    await login(
-      models,
-      command,
-      signal,
-      input,
-      output,
-      getDeviceId,
-      interaction,
-    );
+    await login(models, command, signal, input, output, host, interaction);
     return { kind: "completed" };
   }
   const providers = models.getProviders();
@@ -499,6 +521,8 @@ export async function runLocalAuthCli(
     output.write(`${usage()}\n`);
     return { kind: "completed" };
   }
+  const credentialPath =
+    options.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath;
   const controller = new AbortController();
   const signals = options.signals ?? process;
   const abort = () => {
@@ -507,17 +531,18 @@ export async function runLocalAuthCli(
   signals.once("SIGINT", abort);
   signals.once("SIGTERM", abort);
   const getDeviceId =
-    options.getDeviceId ?? (() => createPrivateCredentialStore().getDeviceId());
+    options.getDeviceId ??
+    (() => createPrivateCredentialStore(credentialPath).getDeviceId());
   try {
     return await runCommand(
       command,
-      options.models ?? createPrivateModels(),
+      options.models ?? createPrivateModels(credentialPath),
       options.interaction?.signal === undefined
         ? controller.signal
         : AbortSignal.any([controller.signal, options.interaction.signal]),
       options.input ?? process.stdin,
       output,
-      getDeviceId,
+      { getDeviceId },
       options.interaction,
     );
   } finally {

@@ -87,6 +87,16 @@ type RunningStoreProcess = {
 
 const liveProcesses = new Set<RunningStoreProcess>();
 
+describe("resolveDefaultCredentialPath", () => {
+  it("selects credentials beneath the explicitly supplied disposable home", async () => {
+    const path = await credentialPath();
+    const home = path.slice(0, -"/credentials.json".length);
+    expect(resolveDefaultCredentialPath(home)).toBe(
+      join(home, ".config", "fungi", "credentials.json"),
+    );
+  });
+});
+
 function runBuiltStoreProcess(
   path: string,
   events: string,

@@ -6,10 +6,20 @@ import type {
 import { RpcTarget, type RpcStub } from "@fungi.computer/capnweb";
 import { z } from "zod";
 import {
+  fungiAccountLogoutRequestSchema,
+  fungiAccountLogoutResultSchema,
+  type FungiAccountLogoutRequest,
+  type FungiAccountLogoutResult,
+} from "./private-fungi-service-logout.js";
+import {
+  LocalAuthRefusal,
   localAuthInputLimit,
   runLocalAuthCli,
   type LocalAuthResult,
 } from "./auth-cli.js";
+import { openAIIdentityDetailSchema } from "./private-openai-claims.js";
+import { CredentialActivationError } from "./subscription-activation.js";
+import { OpenAIIdentityUnavailable } from "./subscription-identity.js";
 
 const requestSchema = z.object({
   command: z.enum(["login", "logout", "status"]),
@@ -92,6 +102,116 @@ const eventSchema = z.discriminatedUnion("type", [
   }),
 ]);
 const answerSchema = z.string().max(localAuthInputLimit);
+
+/**
+ * The closed set of failures that cross the service. Provider errors can
+ * contain credential material, so no free text, cause or provider message
+ * crosses: only a fixed category, HTTP status, or missing-person claim NAMES.
+ */
+const localAuthFailureSchema = z.discriminatedUnion("category", [
+  z.strictObject({
+    category: z.literal("identity-unavailable"),
+    detail: openAIIdentityDetailSchema.optional(),
+  }),
+  z.strictObject({ category: z.literal("callback-port-in-use") }),
+  z.strictObject({ category: z.literal("oauth-state-mismatch") }),
+  z.strictObject({
+    category: z.literal("token-exchange-rejected"),
+    status: z.number().int().min(100).max(599),
+  }),
+  z.strictObject({ category: z.literal("cancelled") }),
+  z.strictObject({ category: z.literal("no-key-entered") }),
+  z.strictObject({ category: z.literal("unknown") }),
+]);
+type LocalAuthFailureCategory = z.output<typeof localAuthFailureSchema>;
+/** What one auth RPC operation returns: a result or a typed failure. */
+export type LocalAuthWireResult = z.output<typeof wireResultSchema>;
+const wireResultSchema = z.union([
+  authResultSchema,
+  z.strictObject({
+    kind: z.literal("failed"),
+    failure: localAuthFailureSchema,
+  }),
+]);
+
+/** Pi 1.3.0's fixed error prefixes; never retain a provider body suffix. */
+const callbackPortInUse = /^Port \d+ is in use\b/u;
+const oauthStateMismatch = "OAuth state mismatch";
+const openAITokenRequestFailed =
+  /^OpenAI OAuth token request failed \(([1-5]\d{2})\)/u;
+
+function classifyFailure(
+  cause: unknown,
+  aborted: boolean,
+): LocalAuthFailureCategory {
+  if (aborted) return { category: "cancelled" };
+  if (cause instanceof LocalAuthRefusal) return { category: "no-key-entered" };
+  if (cause instanceof OpenAIIdentityUnavailable)
+    return { category: "identity-unavailable", detail: cause.detail };
+  if (
+    cause instanceof CredentialActivationError &&
+    cause.category === "identity-unavailable"
+  )
+    return { category: "identity-unavailable" };
+  if (cause instanceof Error) {
+    const tokenRequest = openAITokenRequestFailed.exec(cause.message);
+    if (tokenRequest !== null)
+      return {
+        category: "token-exchange-rejected",
+        status: Number(tokenRequest[1]),
+      };
+  }
+  if (cause instanceof Error && callbackPortInUse.test(cause.message))
+    return { category: "callback-port-in-use" };
+  if (cause instanceof Error && cause.message === oauthStateMismatch)
+    return { category: "oauth-state-mismatch" };
+  return { category: "unknown" };
+}
+
+/** Fixed wording per category; the dialog shows exactly this. */
+function failureText(failure: LocalAuthFailureCategory): string {
+  switch (failure.category) {
+    case "identity-unavailable": {
+      const detail = failure.detail;
+      if (detail === undefined)
+        return "Sign-in could not establish the account identity (identity-unavailable). Nothing was saved.";
+      const auth =
+        detail.authClaimNames === undefined
+          ? ""
+          : "; auth claims: " + (detail.authClaimNames.join(", ") || "none");
+      return (
+        "OpenAI sign-in did not identify the person (identity-unavailable: " +
+        detail.claim +
+        " " +
+        detail.problem +
+        "; claims: " +
+        (detail.claimNames.join(", ") || "none") +
+        auth +
+        "). Nothing was saved."
+      );
+    }
+    case "callback-port-in-use":
+      return "The sign-in callback port is in use, probably by another sign-in or the Codex CLI. Close it and try again.";
+    case "oauth-state-mismatch":
+      return "The sign-in redirect did not belong to this attempt. Start the sign-in again.";
+    case "token-exchange-rejected":
+      return `OpenAI refused the sign-in token exchange (HTTP ${String(failure.status)}).`;
+    case "cancelled":
+      return "Authentication cancelled";
+    case "no-key-entered":
+      return new LocalAuthRefusal().message;
+    case "unknown":
+      return "Local authentication failed";
+  }
+}
+
+/** The client-side error for one typed failure; its message is fixed text. */
+class LocalAuthFailure extends Error {
+  constructor(readonly failure: LocalAuthFailureCategory) {
+    super(failureText(failure));
+    this.name = "LocalAuthFailure";
+  }
+}
 
 class AuthPromptTarget extends RpcTarget {
   #controller = new AbortController();
@@ -200,12 +320,15 @@ class AuthPresenterTarget extends RpcTarget {
 /** The auth-only RPC door shared by its producer and remote client. */
 export type PrivateLocalAuthEndpoint = RpcTarget & {
   cancel(): void;
+  signOutFungi(
+    input: FungiAccountLogoutRequest,
+  ): Promise<FungiAccountLogoutResult>;
   run(
     input: PrivateLocalAuthRequest,
     presenter: RpcStub<AuthPresenterTarget>,
-  ): Promise<LocalAuthResult>;
+  ): Promise<LocalAuthWireResult>;
 };
-/** One transient connection runs one operation through the existing Pi owner. */
+/** One transient connection runs one provider or Fungi-account operation. */
 export class PrivateLocalAuthTarget
   extends RpcTarget
   implements PrivateLocalAuthEndpoint
@@ -213,9 +336,27 @@ export class PrivateLocalAuthTarget
   #controller = new AbortController();
   #used = false;
   #run: typeof runLocalAuthCli;
-  constructor(run: typeof runLocalAuthCli = runLocalAuthCli) {
+  #signOutAccount: (
+    input: FungiAccountLogoutRequest,
+  ) => Promise<FungiAccountLogoutResult>;
+  constructor(
+    run: typeof runLocalAuthCli,
+    signOutAccount: (
+      input: FungiAccountLogoutRequest,
+    ) => Promise<FungiAccountLogoutResult>,
+  ) {
     super();
     this.#run = run;
+    this.#signOutAccount = signOutAccount;
+  }
+  async signOutFungi(
+    input: FungiAccountLogoutRequest,
+  ): Promise<FungiAccountLogoutResult> {
+    if (this.#used) throw new Error("Authentication connection already used");
+    this.#used = true;
+    return fungiAccountLogoutResultSchema.parse(
+      await this.#signOutAccount(fungiAccountLogoutRequestSchema.parse(input)),
+    );
   }
   cancel(): void {
     this.#controller.abort();
@@ -226,7 +367,7 @@ export class PrivateLocalAuthTarget
   async run(
     input: PrivateLocalAuthRequest,
     presenter: RpcStub<AuthPresenterTarget>,
-  ): Promise<LocalAuthResult> {
+  ): Promise<LocalAuthWireResult> {
     if (this.#used) throw new Error("Authentication connection already used");
     this.#used = true;
     presenter.onRpcBroken(() => {
@@ -281,24 +422,28 @@ export class PrivateLocalAuthTarget
         },
       });
       return authResultSchema.parse(result);
-    } catch {
-      // Provider errors can contain credential material; do not serialize them.
-      throw new Error(
-        signal.aborted
-          ? "Authentication cancelled"
-          : "Local authentication failed",
-      );
+    } catch (cause) {
+      return {
+        kind: "failed",
+        failure: classifyFailure(cause, signal.aborted),
+      };
     } finally {
       this.cancel();
     }
   }
 }
 
-/** Takes ownership of a dedicated auth RPC connection, never the Session client. */
+/**
+ * Takes ownership of a dedicated auth RPC connection, never the Session client.
+ * A cancel the caller asked for is awaited before the connection is released,
+ * so an ordinary cancel is never cut off by its own teardown; a cancel that
+ * genuinely fails is handed to `reportCleanupFailure` with its cause.
+ */
 export async function runPrivateLocalAuthRemote(
   remote: RpcStub<PrivateLocalAuthEndpoint>,
   request: PrivateLocalAuthRequest,
   interaction: AuthInteraction,
+  reportCleanupFailure: (cause: unknown) => void,
 ): Promise<LocalAuthResult> {
   const controller = new AbortController();
   const signal =
@@ -306,24 +451,28 @@ export async function runPrivateLocalAuthRemote(
       ? controller.signal
       : AbortSignal.any([controller.signal, interaction.signal]);
   const presenter = new AuthPresenterTarget({ ...interaction, signal });
+  let cancellation: Promise<void> | undefined;
   const cancel = () => {
-    void remote.cancel().catch((cause: unknown) => {
-      console.warn(
-        "Local authentication cancellation failed",
-        cause instanceof Error ? cause.name : "NonError",
-      );
-      remote[Symbol.dispose]();
-    });
+    cancellation = (async () => {
+      await remote.cancel();
+    })();
   };
   signal.addEventListener("abort", cancel, { once: true });
   try {
     signal.throwIfAborted();
-    const result = await remote.run(request, presenter);
-    return authResultSchema.parse(result);
+    const result = wireResultSchema.parse(await remote.run(request, presenter));
+    if (result.kind === "failed") throw new LocalAuthFailure(result.failure);
+    return result;
   } finally {
     signal.removeEventListener("abort", cancel);
     controller.abort();
-    remote[Symbol.dispose]();
+    try {
+      const [cancelled] = await Promise.allSettled([cancellation]);
+      if (cancelled.status === "rejected")
+        reportCleanupFailure(cancelled.reason);
+    } finally {
+      remote[Symbol.dispose]();
+    }
   }
 }
 

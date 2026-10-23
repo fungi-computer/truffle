@@ -5,7 +5,6 @@ import lockfile from "proper-lockfile";
 import writeFileAtomic from "write-file-atomic";
 import { z } from "zod";
 import { logEvent } from "./log-event.js";
-import { resolveDefaultCredentialPath } from "./private-file-credential-store.js";
 
 const identitySchema = z.strictObject({
   issuer: z.url().max(2048),
@@ -54,9 +53,7 @@ function matches(left: LoginIdentity, right: LoginIdentity): boolean {
 }
 
 /** Durable logout intent, separate from the credential that logout destroys. */
-export function pendingLogouts(
-  credentialPath = resolveDefaultCredentialPath(),
-) {
+export function pendingLogouts(credentialPath: string) {
   const path = `${credentialPath}.pending-logouts.json`;
   async function update<T>(
     change: (records: PendingLogout[]) => {

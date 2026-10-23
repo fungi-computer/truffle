@@ -1,4 +1,3 @@
-import { isRetryableAssistantError } from "@earendil-works/pi-ai/utils/retry";
 import { isContextOverflow } from "@earendil-works/pi-ai/utils/overflow";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { fauxModel } from "@fungi.computer/mule/testing";
@@ -10,43 +9,44 @@ import {
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
-import { expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   createPrivateLocalModelSource,
   openPrivateLocalRuntimeHost,
 } from "../src/private-local-runtime-host.js";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { createLocalModelSettings } from "../src/private-local-model-settings.js";
+import { DatabaseSync } from "node:sqlite";
+import { LocalStoreSchemaError } from "../src/private-local-session-discovery.js";
+import { resolveAgentStartupModel } from "../src/private-local-startup-model.js";
 import { createLocalServiceOwners } from "../src/private-local-service-owner.js";
-import type { AgentControlDirectory } from "@fungi.computer/shiitake/agent-control";
+import type { LocalAgentControlDirectory } from "../src/private-local-agent-control.js";
 
 it("Agent creation refuses a missing login and setModel uses only project-authorized offered models", async () => {
   const root = await mkdtemp(join(tmpdir(), "local-create-model-"));
   const models = createModels();
   models.setProvider(openaiProvider());
   const auth = vi.spyOn(models, "checkAuth").mockResolvedValue(undefined);
-  let directory: AgentControlDirectory | undefined;
+  let directory: LocalAgentControlDirectory | undefined;
   const owners = createLocalServiceOwners((options) => {
     directory ??= options.agentControl;
-    return openPrivateLocalRuntimeHost(
-      { ...options, modelSettingsPath: join(root, "shiitake.json") },
-      models,
-    );
+    return openPrivateLocalRuntimeHost(options, models);
   });
   const signal = new AbortController().signal;
   try {
-    await owners.select({ invocationRoot: root });
+    const { agentId: creator } = await owners.select({
+      invocationRoot: root,
+    });
     if (directory?.create === undefined)
       throw new Error("Missing Agent creation");
     await expect(
-      directory.create({ requestId: "no-login" }, signal),
+      directory.create({ requestId: "no-login", createdBy: creator }, signal),
     ).rejects.toThrow(/\/login/u);
     auth.mockResolvedValue({ type: "oauth", source: "OpenAI login" });
     const astra = { providerId: "openai", modelId: "gpt-6-astra" };
     const created = await directory.create(
-      { requestId: "explicit", model: astra },
+      { requestId: "explicit", model: astra, createdBy: creator },
       signal,
     );
     if (directory.setModel === undefined) throw new Error("Missing setModel");
@@ -75,65 +75,41 @@ it("Agent creation refuses a missing login and setModel uses only project-author
   }
 });
 
-it("reads a remembered model and applies it below an explicit Agent choice", async () => {
-  const root = await mkdtemp(join(tmpdir(), "local-model-choice-"));
-  try {
-    const path = join(root, "shiitake.json");
-    expect(await createLocalModelSettings(path).read()).toBeNull();
-    const manual = { providerId: "openai", modelId: "gpt-6-astra" };
-    await writeFile(path, JSON.stringify({ lastManualModel: manual }));
-    const reopened = createLocalModelSettings(path);
-    expect(await reopened.read()).toEqual(manual);
-    const models = createModels();
-    models.setProvider(openaiProvider());
-    vi.spyOn(models, "checkAuth").mockResolvedValue({
-      type: "oauth",
-      source: "OpenAI login",
-    });
-    const source = createPrivateLocalModelSource(
-      models,
-      undefined,
-      undefined,
-      "manual-model",
-      undefined,
-      { manual: reopened.read },
-    );
-    expect(
-      (await source.effective(null, new AbortController().signal)).modelId,
-    ).toBe("gpt-6-astra");
-    const explicit = createPrivateLocalModelSource(
-      models,
-      "openai",
-      "gpt-6-sol",
-      "explicit-model",
-      undefined,
-      { manual: reopened.read },
-    );
-    expect(
-      (await explicit.effective(null, new AbortController().signal)).modelId,
-    ).toBe("gpt-6-sol");
-    expect(
-      (
-        await explicit.effective(
-          { providerId: "openai", modelId: "gpt-6-luna" },
-          new AbortController().signal,
-        )
-      ).modelId,
-    ).toBe("gpt-6-luna");
-    // The footer's window is the registry entry a run would acquire.
-    const luna = { providerId: "openai", modelId: "gpt-6-luna" };
-    await expect(
-      explicit.describe?.({
-        sessionId: "footer",
-        preference: luna,
-        signal: new AbortController().signal,
-      }),
-    ).resolves.toEqual({
-      contextWindow: models.getModel("openai", "gpt-6-luna")?.contextWindow,
-    });
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
+it("an Agent's stored model beats availability, and a Session override beats it", async () => {
+  const models = createModels();
+  models.setProvider(openaiProvider());
+  vi.spyOn(models, "checkAuth").mockResolvedValue({
+    type: "oauth",
+    source: "OpenAI login",
+  });
+  const signal = new AbortController().signal;
+  const astra = { providerId: "openai", modelId: "gpt-6-astra" };
+  const agentDefault = createPrivateLocalModelSource(
+    models,
+    undefined,
+    undefined,
+    "agent-model",
+    undefined,
+    { agent: () => astra },
+  );
+  expect((await agentDefault.effective(null, signal)).modelId).toBe(
+    "gpt-6-astra",
+  );
+  expect(
+    (
+      await agentDefault.effective(
+        { providerId: "openai", modelId: "gpt-6-luna" },
+        signal,
+      )
+    ).modelId,
+  ).toBe("gpt-6-luna");
+  // The footer's window is the registry entry a run would acquire.
+  const luna = { providerId: "openai", modelId: "gpt-6-luna" };
+  await expect(
+    agentDefault.describe?.({ sessionId: "footer", preference: luna, signal }),
+  ).resolves.toEqual({
+    contextWindow: models.getModel("openai", "gpt-6-luna")?.contextWindow,
+  });
 });
 
 it("defaults to an offered model from a logged-in provider instead of signed-out Fungi", async () => {
@@ -154,53 +130,27 @@ it("defaults to an offered model from a logged-in provider instead of signed-out
   expect(models.getModel("openai", effective.modelId)).toBeDefined();
 });
 
-it("an explicit model remains usable when lower-priority personal settings cannot be read", async () => {
+it("preserves reasoning from the Agent's stored model", async () => {
   const models = createModels();
   models.setProvider(openaiProvider());
   vi.spyOn(models, "checkAuth").mockResolvedValue({ type: "oauth" });
-  const source = createPrivateLocalModelSource(
-    models,
-    "openai",
-    "gpt-6-astra",
-    "explicit-precedence",
-    undefined,
-    { manual: () => Promise.reject(new Error("Settings unavailable")) },
-  );
-  await expect(
-    source.effective(null, new AbortController().signal),
-  ).resolves.toMatchObject({
+  const model = {
     providerId: "openai",
     modelId: "gpt-6-astra",
-  });
+    reasoning: "high" as const,
+  };
+  const source = createPrivateLocalModelSource(
+    models,
+    undefined,
+    undefined,
+    "reasoning-layer",
+    undefined,
+    { agent: () => model },
+  );
+  expect(
+    (await source.effective(null, new AbortController().signal)).label,
+  ).toContain("(high)");
 });
-
-it.each(["agent", "manual"] as const)(
-  "preserves reasoning from the selected %s model layer",
-  async (layer) => {
-    const models = createModels();
-    models.setProvider(openaiProvider());
-    vi.spyOn(models, "checkAuth").mockResolvedValue({ type: "oauth" });
-    const model = {
-      providerId: "openai",
-      modelId: "gpt-6-astra",
-      reasoning: "high" as const,
-    };
-    const source = createPrivateLocalModelSource(
-      models,
-      undefined,
-      undefined,
-      "reasoning-layer",
-      undefined,
-      {
-        agent: () => (layer === "agent" ? model : null),
-        manual: () => Promise.resolve(model),
-      },
-    );
-    expect(
-      (await source.effective(null, new AbortController().signal)).label,
-    ).toContain("(high)");
-  },
-);
 
 it("refuses an explicit signed-out provider with an actionable error before acquiring a run", async () => {
   const models = createModels();
@@ -277,76 +227,173 @@ it("uses another logged-in provider when an earlier login check fails, without e
   }
 });
 
-it("a Session /model stays that Session's override; Agent defaults and new Agents keep their own", async () => {
-  const root = await mkdtemp(join(tmpdir(), "local-agent-default-"));
-  const models = createModels();
-  models.setProvider(openaiProvider());
-  vi.spyOn(models, "checkAuth").mockResolvedValue({
-    type: "oauth",
-    source: "OpenAI login",
-  });
-  const modelSettingsPath = join(root, "shiitake.json");
+describe("/model sets the Agent's default", () => {
+  const astraHigh = {
+    providerId: "openai",
+    modelId: "gpt-6-astra",
+    reasoning: "high",
+  } as const;
   const signal = new AbortController().signal;
-  const astra = { providerId: "openai", modelId: "gpt-6-astra" };
-  const sol = { providerId: "openai", modelId: "gpt-6-sol" };
-  const open = (input: { createRequestId?: string; databasePath?: string }) =>
-    openPrivateLocalRuntimeHost(
-      { invocationRoot: root, modelSettingsPath, ...input },
-      models,
-    );
-  try {
-    const agentB = await open({ createRequestId: "agent-b" });
-    const agentBPath = agentB.databasePath;
-    let defaultModel: string;
-    try {
-      defaultModel = (await agentB.effectiveModel("main", signal)).modelId;
-      expect(defaultModel).not.toBe("gpt-6-astra");
-    } finally {
-      await agentB.close();
-    }
-    const agentA = await open({ createRequestId: "agent-a" });
-    try {
-      await agentA.session.modelPreference.set(astra);
-      expect((await agentA.effectiveModel("main", signal)).modelId).toBe(
-        "gpt-6-astra",
-      );
-      expect(
-        (await agentA.effectiveModel("another-session", signal)).modelId,
-      ).toBe(defaultModel);
-    } finally {
-      await agentA.close();
-    }
-    await expect(readFile(modelSettingsPath, "utf8")).rejects.toMatchObject({
-      code: "ENOENT",
+
+  async function withAgents(
+    body: (
+      open: (input: {
+        createRequestId?: string;
+        databasePath?: string;
+      }) => ReturnType<typeof openPrivateLocalRuntimeHost>,
+      models: ReturnType<typeof createModels>,
+    ) => Promise<void>,
+  ) {
+    const root = await mkdtemp(join(tmpdir(), "local-agent-default-"));
+    vi.stubEnv("HOME", root);
+    const models = createModels();
+    models.setProvider(openaiProvider());
+    vi.spyOn(models, "checkAuth").mockResolvedValue({
+      type: "oauth",
+      source: "OpenAI login",
     });
-    const reopenedB = await open({ databasePath: agentBPath });
     try {
-      expect(
-        (await reopenedB.effectiveModel("new-session", signal)).modelId,
-      ).toBe(defaultModel);
-      await reopenedB.setModel(sol, signal);
-    } finally {
-      await reopenedB.close();
-    }
-    const agentC = await open({ createRequestId: "agent-c" });
-    try {
-      expect((await agentC.effectiveModel("main", signal)).modelId).toBe(
-        defaultModel,
+      await body(
+        (input) =>
+          openPrivateLocalRuntimeHost(
+            { invocationRoot: root, ...input },
+            models,
+          ),
+        models,
       );
+      // No path reads or writes the retired per-person model file.
+      await expect(
+        access(join(root, ".config", "fungi", "shiitake.json")),
+      ).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
-      await agentC.close();
+      vi.unstubAllEnvs();
+      await rm(root, { recursive: true, force: true });
     }
-    const finalB = await open({ databasePath: agentBPath });
-    try {
-      expect((await finalB.effectiveModel("main", signal)).modelId).toBe(
-        "gpt-6-sol",
-      );
-    } finally {
-      await finalB.close();
-    }
-  } finally {
-    await rm(root, { recursive: true, force: true });
   }
+
+  it("for the agent: a new chat with Agent A runs the model and level /model chose", async () => {
+    await withAgents(async (open) => {
+      const first = await open({ createRequestId: "agent-a" });
+      const databasePath = first.databasePath;
+      let defaultModel: string;
+      try {
+        defaultModel = (await first.effectiveModel("main", signal)).modelId;
+        expect(defaultModel).not.toBe("gpt-6-astra");
+        await first.session.modelPreference.set(astraHigh);
+        // The running chat switches at once.
+        const running = await first.effectiveModel("main", signal);
+        expect(running.modelId).toBe("gpt-6-astra");
+        expect(running.label).toContain("(high)");
+        expect(await first.session.modelPreference.read()).toEqual(astraHigh);
+      } finally {
+        await first.close();
+      }
+      const reopened = await open({ databasePath });
+      try {
+        const fresh = await reopened.effectiveModel("a-new-chat", signal);
+        expect(fresh.modelId).toBe("gpt-6-astra");
+        expect(fresh.label).toContain("(high)");
+      } finally {
+        await reopened.close();
+      }
+    });
+  });
+
+  it("not globally: a chat with Agent B is unaffected by /model in Agent A", async () => {
+    await withAgents(async (open) => {
+      const agentB = await open({ createRequestId: "agent-b" });
+      const agentBPath = agentB.databasePath;
+      let defaultModel: string;
+      try {
+        defaultModel = (await agentB.effectiveModel("main", signal)).modelId;
+      } finally {
+        await agentB.close();
+      }
+      const agentA = await open({ createRequestId: "agent-a" });
+      try {
+        await agentA.session.modelPreference.set(astraHigh);
+      } finally {
+        await agentA.close();
+      }
+      const agentC = await open({ createRequestId: "agent-c" });
+      try {
+        expect((await agentC.effectiveModel("main", signal)).modelId).toBe(
+          defaultModel,
+        );
+      } finally {
+        await agentC.close();
+      }
+      const reopenedB = await open({ databasePath: agentBPath });
+      try {
+        expect(
+          (await reopenedB.effectiveModel("new-chat", signal)).modelId,
+        ).toBe(defaultModel);
+      } finally {
+        await reopenedB.close();
+      }
+    });
+  });
+
+  it("a store that predates the schema fails loudly instead of resolving to the available login", async () => {
+    await withAgents(async (_open, models) => {
+      const root = await realpath(await mkdtemp(join(tmpdir(), "old-store-")));
+      const path = join(root, "agent.sqlite");
+      await mkdir(root, { recursive: true });
+      const database = new DatabaseSync(path);
+      database.exec(
+        "CREATE TABLE private_local_identity (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), agent_id TEXT NOT NULL UNIQUE)",
+      );
+      database.close();
+      try {
+        await expect(
+          resolveAgentStartupModel({ models, databasePath: path, signal }),
+        ).rejects.toThrow(LocalStoreSchemaError);
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it("the landing shows the same model a fresh chat resolves, with an Agent default and without one", async () => {
+    await withAgents(async (open, models) => {
+      const withDefault = await open({ createRequestId: "agent-a" });
+      const withoutDefault = await open({ createRequestId: "agent-b" });
+      try {
+        const available = await resolveAgentStartupModel({
+          models,
+          databasePath: withoutDefault.databasePath,
+          signal,
+        });
+        const fresh = await withoutDefault.effectiveModel("fresh", signal);
+        expect(available).toMatchObject({
+          providerId: fresh.providerId,
+          modelId: fresh.modelId,
+          source: "available",
+        });
+        expect(fresh.label).toContain(
+          `(${available?.reasoning ?? "no reasoning"})`,
+        );
+        // A new Agent has no store yet and starts from the same fallback.
+        await expect(
+          resolveAgentStartupModel({ models, databasePath: undefined, signal }),
+        ).resolves.toEqual(available);
+
+        await withDefault.session.modelPreference.set(astraHigh);
+        const landing = await resolveAgentStartupModel({
+          models,
+          databasePath: withDefault.databasePath,
+          signal,
+        });
+        const freshChat = await withDefault.effectiveModel("fresh", signal);
+        expect(landing).toEqual({ ...astraHigh, source: "agent" });
+        expect(freshChat.modelId).toBe(landing?.modelId);
+        expect(freshChat.label).toContain("(high)");
+      } finally {
+        await withDefault.close();
+        await withoutDefault.close();
+      }
+    });
+  });
 });
 
 it.each([
@@ -453,8 +500,9 @@ it.each([
   },
   {
     raw: "429 rate limit synthetic-private-provider-detail",
-    message: "openai service unavailable. Try again shortly.",
-    retry: true,
+    message:
+      "openai rejected the model request. Check /login or choose another model with /model.",
+    retry: false,
     overflow: false,
   },
   {
@@ -465,7 +513,7 @@ it.each([
     overflow: true,
   },
 ])(
-  "replaces a provider rejection with safe copy while preserving retry=$retry overflow=$overflow",
+  "replaces prose-only provider failures with safe terminal copy (overflow=$overflow)",
   async ({ raw, message, retry, overflow }) => {
     const models = createModels();
     models.setProvider(openaiProvider());
@@ -502,10 +550,59 @@ it.each([
     );
     const result = await stream.result();
     expect(result.errorMessage).toBe(message);
-    expect(isRetryableAssistantError(result)).toBe(retry);
+    expect(acquired.retryable(result)).toBe(retry);
     expect(isContextOverflow(result)).toBe(overflow);
     expect(JSON.stringify(result)).not.toContain(
       "synthetic-private-provider-detail",
     );
   },
 );
+
+it("Agent creation stores its name and reports the requested model, thinking level and working directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "local-create-profile-"));
+  const models = createModels();
+  models.setProvider(openaiProvider());
+  vi.spyOn(models, "checkAuth").mockResolvedValue({
+    type: "oauth",
+    source: "OpenAI login",
+  });
+  let directory: LocalAgentControlDirectory | undefined;
+  const owners = createLocalServiceOwners((options) => {
+    directory ??= options.agentControl;
+    return openPrivateLocalRuntimeHost(options, models);
+  });
+  const signal = new AbortController().signal;
+  try {
+    const { agentId: creator } = await owners.select({
+      invocationRoot: root,
+    });
+    if (directory?.create === undefined)
+      throw new Error("Missing Agent creation");
+    const astra = {
+      providerId: "openai",
+      modelId: "gpt-6-astra",
+      reasoning: "high" as const,
+    };
+    const created = await directory.create(
+      { requestId: "named", name: "scout", model: astra, createdBy: creator },
+      signal,
+    );
+    const working = await realpath(root);
+    expect(created).toMatchObject({
+      name: "scout",
+      model: astra,
+      workingDirectory: working,
+    });
+    const listed = (await directory.list(signal)).find(
+      (agent) => agent.agentId === created.agentId,
+    );
+    expect(listed).toMatchObject({
+      name: "scout",
+      model: astra,
+      workingDirectory: working,
+    });
+  } finally {
+    await owners.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

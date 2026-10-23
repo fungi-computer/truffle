@@ -9,14 +9,41 @@ import {
   sep,
 } from "node:path";
 import { FilesEditError, type FilesPort } from "@fungi.computer/knapsack";
+import { SearchVisibility } from "@fungi.computer/knapsack/files-search";
+import {
+  imageReadResult,
+  imageSniffBytes,
+  imageTooLargeMessage,
+  sniffImageMimeType,
+} from "@fungi.computer/knapsack/files-read";
 import type { InvocationContext } from "@fungi.computer/mycelium";
 import { RE2JS } from "re2js";
 import { createPrivateFilesPatch } from "./private-files-patch.js";
+import {
+  fitLocalImage,
+  maximumLocalImageInputBytes,
+} from "./local-image-fit.js";
 import writeFileAtomic from "write-file-atomic";
+import type { LocalSandboxLaunch } from "./private-invocation-computer.js";
+
+/** Same live authority as exec; the policy module owns protected-path checks. */
+export type LocalSandboxWrites = Readonly<{
+  assertWrite(path: string): void;
+  launch: LocalSandboxLaunch;
+}>;
 
 const maximumFileBytes = 128 * 1_024;
-const maximumScanBytes = maximumFileBytes;
-const maximumScanCandidates = 256;
+
+/**
+ * Hidden scan work for one glob or grep: directory entries admitted to the
+ * walk (gitignored and `.git` entries are never admitted) and file bytes read.
+ * The result limit counts returned results; these bound the work behind them.
+ */
+export type ScanBounds = Readonly<{ candidates: number; bytes: number }>;
+const defaultScanBounds: ScanBounds = {
+  candidates: 50_000,
+  bytes: 64 * 1_024 * 1_024,
+};
 const utf8 = new TextEncoder();
 
 type RootedPath = Readonly<{
@@ -33,9 +60,15 @@ type WalkEntry = Readonly<{
 }>;
 
 type LineMatcher = (line: string) => boolean;
-type GrepMatch = Readonly<{ path: string; line: number; text: string }>;
+type ListInput = Parameters<FilesPort["list"]>[0];
+type GlobInput = Parameters<FilesPort["glob"]>[0];
 type GrepInput = Parameters<FilesPort["grep"]>[0];
-type GrepOutput = Awaited<ReturnType<FilesPort["grep"]>>;
+type SearchOutput = Awaited<ReturnType<FilesPort["list"]>>;
+type Found = SearchOutput["results"][number];
+type TreeSearch =
+  | Readonly<{ kind: "glob"; input: GlobInput }>
+  | Readonly<{ kind: "grep"; input: GrepInput }>;
+type Search = TreeSearch | Readonly<{ kind: "list"; input: ListInput }>;
 type OpenFile = Readonly<{
   handle: Awaited<ReturnType<typeof open>>;
   size: number;
@@ -77,14 +110,16 @@ async function existingRealpath(
   }
 }
 
-/** One maximum result page and one maximum read page bound hidden scan work. */
+/** One explicit bound on walked entries and one on bytes read. */
 class ScanBudget {
   private bytes = 0;
   private candidates = 0;
   exhausted = false;
 
+  constructor(private readonly bounds: ScanBounds) {}
+
   admitCandidate(): boolean {
-    if (this.candidates === maximumScanCandidates) {
+    if (this.candidates === this.bounds.candidates) {
       this.exhausted = true;
       return false;
     }
@@ -93,7 +128,7 @@ class ScanBudget {
   }
 
   admitBytes(bytes: number): boolean {
-    if (bytes > maximumScanBytes - this.bytes) {
+    if (bytes > this.bounds.bytes - this.bytes) {
       this.exhausted = true;
       return false;
     }
@@ -165,7 +200,7 @@ function lineMatcher(
 }
 
 function appendMatchingLines(
-  matches: GrepMatch[],
+  matches: Found[],
   path: string,
   content: string,
   matchesLine: LineMatcher,
@@ -260,6 +295,30 @@ class InvocationRoot {
   }
 }
 
+async function readBytesAt(
+  file: OpenFile,
+  path: RootedPath,
+  position: number,
+  length: number,
+  context: InvocationContext,
+): Promise<Buffer> {
+  const buffer = Buffer.alloc(Math.min(length, file.size - position));
+  let bytesRead = 0;
+  while (bytesRead < buffer.byteLength) {
+    checkCancellation(context);
+    const next = await file.handle.read(
+      buffer,
+      bytesRead,
+      buffer.byteLength - bytesRead,
+      position + bytesRead,
+    );
+    if (next.bytesRead === 0)
+      throw new Error(`Files path changed during read: ${path.requested}`);
+    bytesRead += next.bytesRead;
+  }
+  return buffer;
+}
+
 async function readPage(
   path: RootedPath,
   offset: number,
@@ -279,21 +338,39 @@ async function readPage(
         truncated: false,
       };
     }
-    const requestedBytes = Math.min(limit, file.size - offset);
-    const buffer = Buffer.alloc(requestedBytes);
-    let bytesRead = 0;
-    while (bytesRead < requestedBytes) {
-      checkCancellation(context);
-      const next = await file.handle.read(
-        buffer,
-        bytesRead,
-        requestedBytes - bytesRead,
-        offset + bytesRead,
-      );
-      if (next.bytesRead === 0)
-        throw new Error(`Files path changed during read: ${path.requested}`);
-      bytesRead += next.bytesRead;
+    if (offset === 0) {
+      const head = await readBytesAt(file, path, 0, imageSniffBytes, context);
+      const mimeType = sniffImageMimeType(head);
+      if (mimeType !== undefined) {
+        if (file.size > maximumLocalImageInputBytes)
+          throw new Error(
+            imageTooLargeMessage(
+              path.requested,
+              file.size,
+              maximumLocalImageInputBytes,
+            ),
+          );
+        // Every image is shrunk here, before it becomes an image part.
+        return imageReadResult(
+          path.requested,
+          "image/jpeg",
+          await fitLocalImage(
+            path.requested,
+            await readBytesAt(file, path, 0, file.size, context),
+            context.signal,
+          ),
+        );
+      }
     }
+    const requestedBytes = Math.min(limit, file.size - offset);
+    const buffer = await readBytesAt(
+      file,
+      path,
+      offset,
+      requestedBytes,
+      context,
+    );
+    const bytesRead = buffer.byteLength;
     const page = decodeUtf8(
       buffer,
       path.requested,
@@ -361,10 +438,49 @@ async function readGrepCandidate(
   }
 }
 
+function slashed(path: string): string {
+  return path.split(sep).join("/");
+}
+
+async function readGitignore(
+  root: InvocationRoot,
+  directory: string,
+  context: InvocationContext,
+): Promise<string | undefined> {
+  const candidate = join(directory, ".gitignore");
+  try {
+    await lstat(candidate);
+  } catch (cause) {
+    if (missingPath(cause)) return undefined;
+    throw cause;
+  }
+  let resolved: string;
+  try {
+    resolved = await root.walked(candidate, candidate, context);
+  } catch (cause) {
+    if (cause instanceof FilesPathError) return undefined;
+    throw cause;
+  }
+  return await readGrepCandidate({ requested: candidate, resolved }, context);
+}
+
+function visiblePath(
+  root: InvocationRoot,
+  visibility: SearchVisibility,
+  path: string,
+  isDirectory: boolean,
+): Promise<boolean> {
+  return visibility.visible(
+    slashed(relative(root.canonicalPath, path)),
+    isDirectory,
+  );
+}
+
 async function* walkFiles(
   root: InvocationRoot,
   base: RootedPath,
   budget: ScanBudget,
+  visibility: SearchVisibility,
   context: InvocationContext,
 ): AsyncGenerator<WalkEntry> {
   async function* visit(
@@ -378,10 +494,14 @@ async function* walkFiles(
     const handle = await opendir(directory);
     for await (const entry of handle) {
       checkCancellation(context);
+      const candidate = join(directory, entry.name);
+      if (
+        !(await visiblePath(root, visibility, candidate, entry.isDirectory()))
+      )
+        continue;
       if (!budget.admitCandidate()) return;
       const relativePath =
         relativeParent === "" ? entry.name : join(relativeParent, entry.name);
-      const candidate = join(directory, entry.name);
       const resolvedPath = await root.walked(
         candidate,
         outputPath(base.requested, relativePath),
@@ -410,89 +530,176 @@ async function* walkFiles(
 async function grepFile(
   target: RootedPath,
   input: GrepInput,
-  matchesLine: LineMatcher,
   context: InvocationContext,
-): Promise<GrepOutput> {
-  const matches: GrepMatch[] = [];
+): Promise<SearchOutput> {
+  const matches: Found[] = [];
   const content = await readBoundedText(target, context);
+  const limited = appendMatchingLines(
+    matches,
+    input.path,
+    content,
+    lineMatcher(input.pattern, input.regex, input.ignoreCase),
+    input.limit,
+    context,
+  );
   return {
     path: input.path,
-    matches,
-    truncated: appendMatchingLines(
-      matches,
-      input.path,
-      content,
-      matchesLine,
-      input.limit,
-      context,
-    ),
+    results: matches,
+    truncated: limited ? "limit" : null,
   };
 }
 
-async function grepDirectory(
+/** One directory level; the entries past the limit are only witnessed, not returned. */
+async function listLevel(
   root: InvocationRoot,
-  target: RootedPath,
-  input: GrepInput,
-  matchesLine: LineMatcher,
+  directory: RootedPath,
+  input: ListInput,
+  visibility: SearchVisibility,
   context: InvocationContext,
-): Promise<GrepOutput> {
-  const matches: GrepMatch[] = [];
-  const budget = new ScanBudget();
-  let incomplete = false;
-  for await (const entry of walkFiles(root, target, budget, context)) {
-    if (entry.isDirectory) continue;
-    if (!entry.isFile) {
-      incomplete = true;
+): Promise<SearchOutput> {
+  const handle = await opendir(directory.resolved);
+  const results: Found[] = [];
+  for await (const entry of handle) {
+    checkCancellation(context);
+    if (
+      !(await visiblePath(
+        root,
+        visibility,
+        join(directory.resolved, entry.name),
+        entry.isDirectory(),
+      ))
+    )
+      continue;
+    if (results.length === input.limit) {
+      return { path: input.path, results, truncated: "limit" };
+    }
+    const metadata = await lstat(join(directory.resolved, entry.name));
+    const path = outputPath(input.path, entry.name);
+    results.push({ path, type: entryType(metadata, path) });
+  }
+  return { path: input.path, results, truncated: null };
+}
+
+/** One bounded walk for a glob or content search with an optional include glob. */
+async function searchTree(
+  root: InvocationRoot,
+  directory: RootedPath,
+  search: TreeSearch,
+  bounds: ScanBounds,
+  visibility: SearchVisibility,
+  context: InvocationContext,
+): Promise<SearchOutput> {
+  const { input } = search;
+  const pathPattern =
+    search.kind === "glob" ? search.input.pattern : search.input.include;
+  const matchesLine =
+    search.kind === "grep"
+      ? lineMatcher(
+          search.input.pattern,
+          search.input.regex,
+          search.input.ignoreCase,
+        )
+      : undefined;
+  const results: Found[] = [];
+  const budget = new ScanBudget(bounds);
+  for await (const entry of walkFiles(
+    root,
+    directory,
+    budget,
+    visibility,
+    context,
+  )) {
+    checkCancellation(context);
+    if (
+      pathPattern !== undefined &&
+      !matchesGlob(entry.relativePath, pathPattern)
+    )
+      continue;
+    const path = outputPath(input.path, entry.relativePath);
+    if (matchesLine === undefined) {
+      if (results.length === input.limit) {
+        return { path: input.path, results, truncated: "limit" };
+      }
+      results.push({
+        path,
+        type: entry.isDirectory ? "directory" : "file",
+      });
       continue;
     }
-    const logicalPath = outputPath(input.path, entry.relativePath);
-    if (entry.size > maximumFileBytes) {
-      incomplete = true;
-      continue;
-    }
+    // Directories, special files, oversized files and non-text files hold no
+    // searchable lines; skipping them is not a cut of the scan.
+    if (!entry.isFile || entry.size > maximumFileBytes) continue;
     if (!budget.admitBytes(entry.size)) break;
     const content = await readGrepCandidate(
-      { requested: logicalPath, resolved: entry.resolvedPath },
+      { requested: path, resolved: entry.resolvedPath },
       context,
     );
-    if (content === undefined) {
-      incomplete = true;
-      continue;
-    }
+    if (content === undefined) continue;
     if (
       appendMatchingLines(
-        matches,
-        logicalPath,
+        results,
+        path,
         content,
         matchesLine,
         input.limit,
         context,
       )
     ) {
-      return { path: input.path, matches, truncated: true };
+      return { path: input.path, results, truncated: "limit" };
     }
   }
   return {
     path: input.path,
-    matches,
-    truncated: incomplete || budget.exhausted,
+    results,
+    truncated: budget.exhausted ? "scan" : null,
   };
 }
 
-async function grepPath(
+async function searchPath(
   root: InvocationRoot,
-  input: GrepInput,
+  search: Search,
+  bounds: ScanBounds,
   context: InvocationContext,
-): Promise<GrepOutput> {
+): Promise<SearchOutput> {
+  const { input } = search;
   const target = await root.existing(input.path, context);
   checkCancellation(context);
-  const targetMetadata = await stat(target.resolved);
-  const matchesLine = lineMatcher(input.pattern, input.regex, input.ignoreCase);
-  if (targetMetadata.isFile())
-    return await grepFile(target, input, matchesLine, context);
-  if (targetMetadata.isDirectory())
-    return await grepDirectory(root, target, input, matchesLine, context);
-  throw new Error(`Files path is not a file or directory: ${input.path}`);
+  const metadata = await stat(target.resolved);
+  const visibility = new SearchVisibility((directory) =>
+    readGitignore(root, join(root.canonicalPath, directory), context),
+  );
+  if (
+    !(await visiblePath(
+      root,
+      visibility,
+      target.resolved,
+      metadata.isDirectory(),
+    ))
+  )
+    return { path: input.path, results: [], truncated: null };
+  if (metadata.isFile()) {
+    if (search.kind === "glob")
+      throw new Error(
+        `Files glob needs a directory path, not a file: ${input.path}`,
+      );
+    if (search.kind === "grep") {
+      if (search.input.include !== undefined)
+        throw new Error(
+          `Files grep include needs a directory path, not a file: ${input.path}`,
+        );
+      return await grepFile(target, search.input, context);
+    }
+    return {
+      path: input.path,
+      results: [{ path: input.path, type: "file" }],
+      truncated: null,
+    };
+  }
+  if (!metadata.isDirectory())
+    throw new Error(`Files path is not a file or directory: ${input.path}`);
+  if (search.kind === "list")
+    return await listLevel(root, target, input, visibility, context);
+  return await searchTree(root, target, search, bounds, visibility, context);
 }
 
 function createWriteQueue() {
@@ -519,6 +726,8 @@ function createWriteQueue() {
  */
 export async function createPrivateInvocationFilesPort(
   path: string,
+  scanBounds: ScanBounds = defaultScanBounds,
+  sandbox?: LocalSandboxWrites,
 ): Promise<FilesPort> {
   const root = await InvocationRoot.capture(path);
   const write = createWriteQueue();
@@ -533,45 +742,28 @@ export async function createPrivateInvocationFilesPort(
     },
 
     async list(input, context) {
-      const directory = await root.existing(input.path, context);
-      checkCancellation(context);
-      const handle = await opendir(directory.resolved);
-      const entries = [];
-      for await (const entry of handle) {
-        checkCancellation(context);
-        if (entries.length === input.limit) {
-          return { path: input.path, entries, truncated: true };
-        }
-        const metadata = await lstat(join(directory.resolved, entry.name));
-        const path = outputPath(input.path, entry.name);
-        entries.push({
-          path,
-          name: entry.name,
-          type: entryType(metadata, path),
-          size: metadata.size,
-          modifiedAt: metadata.mtimeMs,
-        });
-      }
-      return { path: input.path, entries, truncated: false };
+      return await searchPath(
+        root,
+        { kind: "list", input },
+        scanBounds,
+        context,
+      );
     },
-
     async glob(input, context) {
-      const directory = await root.existing(input.path, context);
-      const matches = [];
-      const budget = new ScanBudget();
-      for await (const entry of walkFiles(root, directory, budget, context)) {
-        checkCancellation(context);
-        if (!matchesGlob(entry.relativePath, input.pattern)) continue;
-        if (matches.length === input.limit) {
-          return { path: input.path, matches, truncated: true };
-        }
-        matches.push(outputPath(input.path, entry.relativePath));
-      }
-      return { path: input.path, matches, truncated: budget.exhausted };
+      return await searchPath(
+        root,
+        { kind: "glob", input },
+        scanBounds,
+        context,
+      );
     },
-
     async grep(input, context) {
-      return await grepPath(root, input, context);
+      return await searchPath(
+        root,
+        { kind: "grep", input },
+        scanBounds,
+        context,
+      );
     },
 
     async replace(input, context) {
@@ -594,6 +786,7 @@ export async function createPrivateInvocationFilesPort(
           );
         }
         checkCancellation(context);
+        sandbox?.assertWrite(path.resolved);
         await writeFileAtomic(path.resolved, input.content, {
           encoding: "utf8",
         });
@@ -601,7 +794,13 @@ export async function createPrivateInvocationFilesPort(
       });
     },
   };
-  const patch = await createPrivateFilesPatch(root.canonicalPath, port.read);
+  // The native parser/patch engine still owns patch grammar. Its adapter must
+  // accept the launch callback too; never parse patch headers here.
+  const patch = await createPrivateFilesPatch(
+    root.canonicalPath,
+    port.read,
+    sandbox?.launch,
+  );
   if (patch === undefined) return Object.freeze(port);
   return Object.freeze({
     ...port,
