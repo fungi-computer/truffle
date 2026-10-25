@@ -1,6 +1,5 @@
 import { isContextOverflow } from "@earendil-works/pi-ai/utils/overflow";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
-import { fauxModel } from "@fungi.computer/mule/testing";
 import {
   createModels,
   normalizeContext,
@@ -8,7 +7,10 @@ import {
 } from "@earendil-works/pi-ai";
 import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
+import {
+  fauxAssistantMessage,
+  fauxProvider,
+} from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it, vi } from "vitest";
 import {
   createPrivateLocalModelSource,
@@ -440,13 +442,17 @@ it.each([
       .getModels("anthropic")
       .find((model) => model.reasoning);
     if (claude === undefined) throw new Error("Missing Claude fixture");
-    const faux = fauxModel([]);
+    const faux = fauxProvider();
     faux.setResponses([fauxAssistantMessage("offline")]);
     const observed: (ThinkingLevel | undefined)[] = [];
     vi.spyOn(models, "streamSimple").mockImplementation(
       (_model, context, options) => {
         observed.push(options?.reasoning);
-        return faux.stream(faux.model, normalizeContext(context), options);
+        return faux.provider.streamSimple(
+          faux.getModel(),
+          normalizeContext(context),
+          options,
+        );
       },
     );
     vi.spyOn(models, "checkAuth").mockResolvedValue({

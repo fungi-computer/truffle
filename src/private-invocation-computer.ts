@@ -38,11 +38,21 @@ import { privateLocalExecEnvironment } from "./private-local-exec-environment.js
 import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import type { SandboxCommand } from "./private-local-containment.js";
 
-/** The host admits each launch; undefined is its explicit unavailable fallback. */
-export type LocalSandboxLaunch = (
-  cwd: string,
-  argv: readonly [string, ...string[]],
-) => SandboxCommand | undefined;
+/** A bare fallback for the native Files engine still names only staged bytes. */
+export type BareNativeCommand = SandboxCommand & Readonly<{ bareNative: true }>;
+
+/** Only Files supplies a helper; generic exec can still fall back to its argv. */
+export type LocalSandboxLaunch = {
+  (
+    cwd: string,
+    argv: readonly [string, ...string[]],
+  ): SandboxCommand | undefined;
+  (
+    cwd: string,
+    argv: readonly [string, ...string[]],
+    readOnlyHelperFile: string,
+  ): SandboxCommand | BareNativeCommand;
+};
 
 const maximumStreamBytes = 64 * 1_024;
 /** Room inside the stream cap for the visible truncation marker. */

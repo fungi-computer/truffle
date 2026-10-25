@@ -1,11 +1,11 @@
+import type {
+  SimpleStreamOptions,
+  ProviderData,
+} from "@fungi.computer/mule/effect";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  normalizeContext,
-  type AssistantMessage,
-  type SimpleStreamOptions,
-} from "@earendil-works/pi-ai";
+import { normalizeContext, type AssistantMessage } from "@earendil-works/pi-ai";
 import {
   fauxAssistantMessage,
   fauxProvider,
@@ -64,7 +64,7 @@ it.each([
       };
       faux.setResponses([reply, reply, reply, reply]);
       let requests = 0;
-      const parsedEvents: unknown[] = [];
+      const parsedEvents: ProviderData[] = [];
       const options: SimpleStreamOptions = {
         fetch: Object.assign(() => {
           requests += 1;

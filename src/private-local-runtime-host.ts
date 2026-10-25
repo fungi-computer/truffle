@@ -1,7 +1,13 @@
 import type { OutstandingDelegation } from "@fungi.computer/shiitake/fleet";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { observeProviderStatus } from "@fungi.computer/mule";
+import {
+  observeProviderStatus,
+  normalizeModel,
+  decodeProviderData,
+} from "@fungi.computer/mule";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
+import type { SimpleStreamOptions as PiOptions } from "@earendil-works/pi-ai";
 import {
   modelFailureMessage,
   modelFailureRetryable,
@@ -995,7 +1001,7 @@ export function createPrivateLocalModelSource(
         | undefined;
       return Promise.resolve(
         Object.freeze({
-          model: selected,
+          model: normalizeModel(selected),
           retryable: (message: AssistantMessage) =>
             !signal.aborted &&
             message.stopReason === "error" &&
@@ -1042,13 +1048,29 @@ export function createPrivateLocalModelSource(
             };
             void (async () => {
               try {
-                const upstream = turn.models.streamSimple(selected, context, {
-                  ...streamOptions,
+                const { onPayload, onResponse, ...rest } = streamOptions;
+                const requestOptions: PiOptions = {
+                  ...rest,
                   fetch: provider.fetch,
-                  onProviderStreamEvent: provider.onProviderStreamEvent,
+                  onProviderStreamEvent: (data, model) =>
+                    provider.onProviderStreamEvent(
+                      decodeProviderData(data),
+                      normalizeModel(model),
+                    ),
                   sessionId: providerCacheKey,
                   transport: options?.transport ?? "auto",
-                });
+                };
+                if (onPayload !== undefined)
+                  requestOptions.onPayload = (data, model) =>
+                    onPayload(decodeProviderData(data), normalizeModel(model));
+                if (onResponse !== undefined)
+                  requestOptions.onResponse = (response, model) =>
+                    onResponse(response, normalizeModel(model));
+                const upstream = turn.models.streamSimple(
+                  selected,
+                  normalizeContext(context),
+                  requestOptions,
+                );
                 for await (const event of upstream) {
                   if (event.type === "error") {
                     const error = failure(

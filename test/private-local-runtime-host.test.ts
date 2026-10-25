@@ -1,3 +1,4 @@
+import type { SimpleStreamOptions } from "@fungi.computer/mule/effect";
 import { fauxModel } from "@fungi.computer/mule/testing";
 import {
   access,
@@ -28,7 +29,7 @@ import {
   normalizeContext,
   registerSessionResourceCleanup,
   type Context,
-  type SimpleStreamOptions,
+  type SimpleStreamOptions as PiOptions,
 } from "@earendil-works/pi-ai";
 import {
   fauxAssistantMessage,
@@ -448,7 +449,7 @@ describe("private local RuntimeHost", () => {
             accountId: "synthetic-account",
           }),
       );
-      const observed: SimpleStreamOptions[] = [];
+      const observed: PiOptions[] = [];
       const acquireSignals: AbortSignal[] = [];
       const streamSignal = new AbortController().signal;
       vi.stubGlobal("fetch", () =>

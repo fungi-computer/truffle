@@ -46,11 +46,14 @@ it.runIf(process.platform === "linux").each([false, true])(
     );
     await mkdir(scratch, { recursive: true });
     const root = await realpath(await mkdtemp(join(scratch, "project-")));
-    roots.push(root);
+    const hostInstall = await realpath(
+      await mkdtemp(join(scratch, "host-install-")),
+    );
+    roots.push(root, hostInstall);
     const folder = join(root, "agent");
     const home = join(root, "home");
     const bin = join(
-      root,
+      hostInstall,
       "node_modules",
       "@fungi.computer",
       `spore-native-${process.platform}-${process.arch}`,
@@ -63,9 +66,7 @@ it.runIf(process.platform === "linux").each([false, true])(
     );
     for (const name of [
       "fungi-bwrap",
-      "fungi-bwrap.sha256",
       "fungi-seccomp.bpf",
-      "fungi-seccomp.bpf.sha256",
       "fungi-apply-patch",
     ])
       await copyFile(
@@ -74,7 +75,7 @@ it.runIf(process.platform === "linux").each([false, true])(
       );
     await chmod(join(bin, "fungi-bwrap"), 0o700);
     await chmod(join(bin, "fungi-apply-patch"), 0o700);
-    vi.stubEnv("FUNGI_BUNDLED_CLI", join(root, "fungi.cjs"));
+    vi.stubEnv("FUNGI_BUNDLED_CLI", join(hostInstall, "fungi.cjs"));
     const configRoot = capturePrivateLocalConfigRoot(home);
     const models = createModels();
     const faux = fauxProvider({
@@ -204,7 +205,7 @@ it.runIf(process.platform === "linux").each([false, true])(
       if (required) {
         await expect(reopening).rejects.toBeInstanceOf(LocalSandboxUnavailable);
         await expect(reopening).rejects.toMatchObject({
-          reason: { kind: "missing" },
+          reason: { kind: "missing-artifact" },
         });
       } else {
         const reopened = await reopening;
@@ -212,7 +213,7 @@ it.runIf(process.platform === "linux").each([false, true])(
           expect(reopened.sandboxStatus()).toMatchObject({
             state: "unavailable",
             requireSandbox: false,
-            reason: { kind: "missing" },
+            reason: { kind: "missing-artifact" },
           });
         } finally {
           await reopened.close();

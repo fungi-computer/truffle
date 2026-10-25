@@ -367,16 +367,25 @@ export function createPrivateLocalServiceManager(
       await assertNoUntrackedServiceOwner(directory);
       if (await serviceOwnerIsLive(directory)) return "busy";
       const bundledCli = process.env.FUNGI_BUNDLED_CLI;
+      // A detached Bun service also starts in the invoking project's cwd.
+      // Keep the host process from importing Agent-authored bunfig or .env.
+      const bunFlags =
+        options.executable === undefined && "bun" in process.versions
+          ? ["--config=/dev/null", "--no-env-file"]
+          : [];
+      const serviceEntry =
+        bundledCli ??
+        fileURLToPath(
+          new URL("./private-local-service-process.js", import.meta.url),
+        );
       const child = spawn(
         options.executable ?? process.execPath,
-        bundledCli === undefined
-          ? [
-              fileURLToPath(
-                new URL("./private-local-service-process.js", import.meta.url),
-              ),
-              directory,
-            ]
-          : [bundledCli, "--internal-service", directory],
+        [
+          ...bunFlags,
+          serviceEntry,
+          ...(bundledCli === undefined ? [] : ["--internal-service"]),
+          directory,
+        ],
         {
           detached: true,
           stdio: "ignore",

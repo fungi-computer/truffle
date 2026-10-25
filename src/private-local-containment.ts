@@ -5,17 +5,21 @@ import {
   openSync,
   realpathSync,
   rmSync,
-  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { LocalBwrapUnavailable } from "./private-local-bwrap.js";
 import {
-  LocalBwrapUnavailable,
-  localLinuxSandboxPayload,
-} from "./private-local-bwrap.js";
+  createNativePayloadStaging,
+  type NativePayloadStaging,
+} from "./private-local-native-staging.js";
 import { linuxSandboxCommand } from "./private-local-linux-sandbox.js";
 import { seatbeltCommand } from "./private-local-seatbelt.js";
-import { sandboxPolicy } from "./private-local-sandbox-policy.js";
+import {
+  sandboxPolicy,
+  UnsafeHostCode,
+  UnsafeNativePayload,
+} from "./private-local-sandbox-policy.js";
 import { z } from "zod";
 
 export const sandboxUnavailableReasonSchema = z.strictObject({
@@ -23,9 +27,15 @@ export const sandboxUnavailableReasonSchema = z.strictObject({
     "unsupported-platform",
     "invalid-folder",
     "missing",
+    "missing-artifact",
     "invalid-digest",
     "digest-mismatch",
+    "unreadable",
     "not-executable",
+    "staging-failed",
+    "unsafe-native-payload",
+    "unsafe-host-code",
+    "startup-refused",
     "backend-refused",
   ]),
   message: z.string(),
@@ -52,7 +62,11 @@ export type SandboxCommand = Readonly<{
 
 /** Existing foreground/background owners retain process and cancellation lifetime. */
 export type LocalSandbox = Readonly<{
-  command(cwd: string, argv: readonly [string, ...string[]]): SandboxCommand;
+  command(
+    cwd: string,
+    argv: readonly [string, ...string[]],
+    readOnlyHelperFile?: string,
+  ): SandboxCommand;
   close(): void;
 }>;
 
@@ -60,7 +74,13 @@ export type SandboxAdmission =
   | Readonly<{ state: "ready"; sandbox: LocalSandbox }>
   | Readonly<{ state: "unavailable"; reason: SandboxUnavailableReason }>;
 
-function unavailable(cause: unknown): SandboxUnavailableReason {
+export function sandboxUnavailableReason(
+  cause: unknown,
+): SandboxUnavailableReason {
+  if (cause instanceof UnsafeHostCode)
+    return { kind: "unsafe-host-code", message: cause.message };
+  if (cause instanceof UnsafeNativePayload)
+    return { kind: "unsafe-native-payload", message: cause.message };
   if (cause instanceof LocalBwrapUnavailable)
     return { kind: cause.reason, message: cause.message };
   return {
@@ -82,6 +102,7 @@ export function establishLocalSandbox(
     folder: string;
     platform?: string;
   }>,
+  staging?: NativePayloadStaging,
 ): SandboxAdmission {
   try {
     sandboxPolicy(input.project, input.folder);
@@ -105,16 +126,19 @@ export function establishLocalSandbox(
       },
     };
 
-  let temporaryDirectory: string | undefined;
+  const native = staging ?? createNativePayloadStaging(input.project);
+  let agentTemporaryDirectory: string | undefined;
   try {
-    // A sandbox owns only its own temporary directory, never the host's HOME.
-    temporaryDirectory = realpathSync(
-      mkdtempSync(join(tmpdir(), "fungi-sandbox-")),
-    );
-    const temporary = temporaryDirectory;
+    // Native staging is never granted as an Agent-writable temporary root.
+    if (platform === "darwin")
+      agentTemporaryDirectory = realpathSync(
+        mkdtempSync(join(tmpdir(), "fungi-sandbox-")),
+      );
+    const agentTemporary = agentTemporaryDirectory;
+    const environmentTmp = agentTemporary ?? "/tmp";
     let closed = false;
     const sandbox: LocalSandbox = {
-      command: (cwd, argv) => {
+      command: (cwd, argv, readOnlyHelperFile) => {
         if (closed)
           throw new LocalSandboxUnavailable({
             kind: "backend-refused",
@@ -124,30 +148,57 @@ export function establishLocalSandbox(
         // it must not turn into an authorized unsandboxed retry.
         const policy = sandboxPolicy(input.project, input.folder);
         try {
+          const linuxPayload =
+            platform === "linux" ? native.linux(policy) : undefined;
+          const stagedHelper =
+            readOnlyHelperFile === undefined
+              ? undefined
+              : native.patch(readOnlyHelperFile);
+          const stagedArgv: readonly [string, ...string[]] =
+            stagedHelper === undefined
+              ? argv
+              : [
+                  argv[0] === readOnlyHelperFile ? stagedHelper : argv[0],
+                  ...argv
+                    .slice(1)
+                    .map((argument) =>
+                      argument === readOnlyHelperFile ? stagedHelper : argument,
+                    ),
+                ];
           const launch =
-            platform === "linux"
+            linuxPayload !== undefined
               ? linuxSandboxCommand(
                   policy,
-                  localLinuxSandboxPayload(),
+                  linuxPayload,
                   cwd,
-                  argv,
+                  stagedArgv,
+                  undefined,
+                  stagedHelper,
                 )
               : seatbeltCommand(
-                  { ...policy, temporaryDirectory: temporary },
-                  argv,
+                  {
+                    ...policy,
+                    temporaryDirectory: environmentTmp,
+                  },
+                  stagedArgv,
                 );
           return {
             ...launch,
-            environment: { TMPDIR: platform === "linux" ? "/tmp" : temporary },
+            environment: { TMPDIR: environmentTmp },
           };
         } catch (cause) {
-          throw new LocalSandboxUnavailable(unavailable(cause));
+          throw new LocalSandboxUnavailable(sandboxUnavailableReason(cause));
         }
       },
       close: () => {
         if (closed) return;
         closed = true;
-        rmSync(temporary, { recursive: true });
+        try {
+          if (staging === undefined) native.close();
+        } finally {
+          if (agentTemporary !== undefined)
+            rmSync(agentTemporary, { recursive: true });
+        }
       },
     };
     const command = sandbox.command(realpathSync(input.folder), [
@@ -156,8 +207,7 @@ export function establishLocalSandbox(
     let filterDescriptor: number | undefined;
     const probe = () => {
       if (command.seccompFilter !== undefined) {
-        const path = join(temporary, "seccomp.bpf");
-        writeFileSync(path, command.seccompFilter, { mode: 0o600 });
+        const path = native.probeFilter(command.seccompFilter);
         filterDescriptor = openSync(path, "r");
       }
       return spawnSync(command.executable, [...command.args], {
@@ -184,11 +234,11 @@ export function establishLocalSandbox(
     })();
     if (result.status !== 0) {
       sandbox.close();
-      const stderr = result.stderr.trim();
+      const stderr = result.error === undefined ? result.stderr.trim() : "";
       return {
         state: "unavailable",
         reason: {
-          kind: "backend-refused",
+          kind: "startup-refused",
           message:
             result.error?.message ??
             (stderr.length > 0
@@ -199,14 +249,18 @@ export function establishLocalSandbox(
     }
     return { state: "ready", sandbox };
   } catch (cause) {
-    if (temporaryDirectory !== undefined)
-      rmSync(temporaryDirectory, { recursive: true });
+    try {
+      if (staging === undefined) native.close();
+    } finally {
+      if (agentTemporaryDirectory !== undefined)
+        rmSync(agentTemporaryDirectory, { recursive: true });
+    }
     return {
       state: "unavailable",
       reason:
         cause instanceof LocalSandboxUnavailable
           ? cause.reason
-          : unavailable(cause),
+          : sandboxUnavailableReason(cause),
     };
   }
 }

@@ -15,19 +15,28 @@ import type { LinuxSandboxPayload } from "./private-local-bwrap.js";
 /** Ordinary upstream bwrap argv. There is no approval or bare-command path. */
 export function linuxSandboxCommand(
   policy: LocalSandboxPolicy,
-  payload: LinuxSandboxPayload,
+  payload: Omit<LinuxSandboxPayload, "executableBytes"> & {
+    executable: string;
+  },
   cwd: string,
   argv: readonly [string, ...string[]],
   host: NodeJS.ProcessEnv = process.env,
+  readOnlyHelperFile?: string,
 ) {
   const root = policy.writableRoot;
   // Bind sources must exist. Only the trusted host prepares the reserved paths.
   mkdirSync(join(root, ".fungi"), { recursive: true });
+  const reserved = new Set(policy.readOnly);
   for (const git of policy.immovable) {
-    mkdirSync(join(git, "hooks"), { recursive: true });
+    if (reserved.has(join(git, "hooks")))
+      mkdirSync(join(git, "hooks"), { recursive: true });
     for (const config of ["config", "config.worktree"])
-      if (!existsSync(join(git, config)))
+      if (reserved.has(join(git, config)) && !existsSync(join(git, config)))
         writeFileSync(join(git, config), "", { flag: "wx" });
+    // Git reads a present commondir and rejects an empty one; "." names the
+    // Git directory itself, which is what an absent commondir means.
+    if (!existsSync(join(git, "commondir")))
+      writeFileSync(join(git, "commondir"), ".", { flag: "wx" });
   }
   const args = [
     "--unshare-all",
@@ -80,6 +89,13 @@ export function linuxSandboxCommand(
     statSync(agentSocket).isSocket()
   )
     args.push("--ro-bind", "/dev/null", realpathSync(agentSocket));
+  // Native Files passes its resolved helper, never an untrusted exec argv[0].
+  // Re-expose only that file after private mounts; its siblings stay hidden.
+  if (readOnlyHelperFile !== undefined) {
+    if (!statSync(readOnlyHelperFile).isFile())
+      throw new Error("Local native helper must be a regular file");
+    args.push("--ro-bind", readOnlyHelperFile, readOnlyHelperFile);
+  }
   args.push("--chdir", cwd, "--", ...argv);
   return { ...payload, args };
 }

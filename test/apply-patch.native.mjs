@@ -7,15 +7,23 @@ import assert from "node:assert/strict";
 import {
   mkdtemp,
   readFile,
+  stat,
   writeFile,
   symlink,
   link,
   rm,
   access,
+  copyFile,
+  mkdir,
 } from "node:fs/promises";
+import { closeSync, openSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import console from "node:console";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import process from "node:process";
 import { test } from "node:test";
+import { URL } from "node:url";
 import { zstdDecompressSync } from "node:zlib";
 import { DatabaseSync } from "node:sqlite";
 import * as Effect from "effect/Effect";
@@ -34,6 +42,10 @@ import {
   createPrivateLocalRuntimeHost,
 } from "../dist/private-local-runtime-host.js";
 import { createPrivateSqliteOwner } from "../dist/private-sqlite-owner.js";
+import { createLocalSandboxControls } from "../dist/private-local-sandbox.js";
+import { verifyLocalLinuxSandboxPayload } from "../dist/private-local-bwrap.js";
+import { nativeDigests } from "../dist/private-local-native-digests.js";
+import { sandboxPolicy } from "../dist/private-local-sandbox-policy.js";
 
 const context = () => ({
   executionId: "patch-proof",
@@ -42,6 +54,117 @@ const context = () => ({
 });
 const patch = (...lines) =>
   ["*** Begin Patch", ...lines, "*** End Patch", ""].join("\n");
+
+test(
+  "packaged native launcher and patch helper in Agent authority are refused before execution",
+  { skip: process.platform !== "linux" },
+  async (t) => {
+    const project = await mkdtemp(join(tmpdir(), "fungi-native-authority-"));
+    t.after(() => rm(project, { recursive: true, force: true }));
+    const folder = join(project, "agent");
+    const bin = join(
+      folder,
+      "node_modules",
+      "@fungi.computer",
+      `spore-native-${process.platform}-${process.arch}`,
+      "bin",
+    );
+    await mkdir(bin, { recursive: true });
+    for (const name of [
+      "fungi-bwrap",
+      "fungi-seccomp.bpf",
+      "fungi-apply-patch",
+    ])
+      await copyFile(
+        new URL(`../native/bin/${name}`, import.meta.url),
+        join(bin, name),
+      );
+    // Only inspect the matching payload here: no Agent-controlled process starts.
+    assert.throws(
+      () =>
+        verifyLocalLinuxSandboxPayload(
+          join(bin, "fungi-bwrap"),
+          sandboxPolicy(project, folder),
+          nativeDigests[`${process.platform}-${process.arch}`],
+        ),
+      /Agent project/,
+    );
+
+    const previous = process.env.FUNGI_BUNDLED_CLI;
+    try {
+      process.env.FUNGI_BUNDLED_CLI = join(folder, "fungi.cjs");
+      assert.throws(
+        () =>
+          createLocalSandboxControls({
+            project,
+            folder: "agent",
+            required: () => true,
+          }),
+        /Agent project/,
+      );
+      const optional = createLocalSandboxControls({
+        project,
+        folder: "agent",
+        required: () => false,
+      });
+      try {
+        assert.throws(
+          () => optional.launch(folder, ["/usr/bin/true"]),
+          /Agent project/,
+        );
+      } finally {
+        optional.close();
+      }
+    } finally {
+      if (previous === undefined) delete process.env.FUNGI_BUNDLED_CLI;
+      else process.env.FUNGI_BUNDLED_CLI = previous;
+    }
+    const controls = createLocalSandboxControls({
+      project,
+      folder: "agent",
+      required: () => true,
+    });
+    t.after(() => controls.close());
+    const linkedHelper = join(project, "linked-patch");
+    await symlink(join(bin, "fungi-apply-patch"), linkedHelper);
+    assert.throws(
+      () => controls.launch(folder, [linkedHelper], linkedHelper),
+      /Agent project/,
+    );
+    const siblingAgent = join(project, "sibling-agent");
+    await mkdir(siblingAgent);
+    const siblingHelper = join(siblingAgent, "fungi-apply-patch");
+    await link(join(bin, "fungi-apply-patch"), siblingHelper);
+    assert.throws(
+      () => controls.launch(folder, [siblingHelper], siblingHelper),
+      /Agent project/,
+    );
+    try {
+      process.env.FUNGI_BUNDLED_CLI = join(folder, "fungi.cjs");
+      const port = await createPrivateInvocationFilesPort(
+        folder,
+        undefined,
+        controls,
+      );
+      assert.ok(port.patch);
+      await assert.rejects(
+        () =>
+          port.patch(
+            { patch: patch("*** Add File: should-not-exist", "+unsafe") },
+            context(),
+          ),
+        /Agent project/,
+      );
+      await assert.rejects(access(join(folder, "should-not-exist")));
+    } finally {
+      if (previous === undefined) delete process.env.FUNGI_BUNDLED_CLI;
+      else process.env.FUNGI_BUNDLED_CLI = previous;
+    }
+    console.log(
+      "WRITABLE_NATIVE_PAYLOAD_REFUSED: launcher and Files helper never executed",
+    );
+  },
+);
 
 async function fixture(t) {
   const root = await mkdtemp(join(tmpdir(), "fungi-patch-"));
@@ -71,6 +194,170 @@ async function direct(tool, text, id = "call_patch") {
   assert.equal(parts.length, 1);
   return parts[0].result;
 }
+
+test(
+  "packaged helper outside the project stays file-scoped and read-only",
+  { skip: process.platform !== "linux" },
+  async () => {
+    const project = await mkdtemp(join(tmpdir(), "fungi-patch-project-"));
+    // This regression must exercise Linux's private /tmp even when the caller
+    // chooses an unmasked TMPDIR for its other test scratch.
+    const prefix = await mkdtemp(join("/tmp", "fungi-patch-prefix-"));
+    const folder = join(project, "agent");
+    const bin = join(
+      prefix,
+      "node_modules",
+      "@fungi.computer",
+      `spore-native-${process.platform}-${process.arch}`,
+      "bin",
+    );
+    const executable = join(bin, "fungi-apply-patch");
+    const sibling = join(bin, "private-sibling");
+    const previous = process.env.FUNGI_BUNDLED_CLI;
+    const previousRuntime = process.env.XDG_RUNTIME_DIR;
+    const runtime = join(prefix, "runtime");
+    let controls;
+    try {
+      await mkdir(folder);
+      await mkdir(bin, { recursive: true });
+      await mkdir(runtime, { mode: 0o700 });
+      process.env.XDG_RUNTIME_DIR = runtime;
+      // Install the real built payload at a separate npm-shaped prefix. Both
+      // prefix and project are in /tmp, but only the selected folder is writable.
+      for (const name of [
+        "fungi-apply-patch",
+        "fungi-bwrap",
+        "fungi-seccomp.bpf",
+      ]) {
+        await copyFile(
+          new URL(`../native/bin/${name}`, import.meta.url),
+          join(bin, name),
+        );
+      }
+      await writeFile(sibling, "private sibling\n");
+      assert.equal(await readFile(sibling, "utf8"), "private sibling\n");
+      const before = await readFile(executable);
+      process.env.FUNGI_BUNDLED_CLI = join(prefix, "fungi.cjs");
+      controls = createLocalSandboxControls({
+        project,
+        folder: "agent",
+        required: () => true,
+      });
+      const port = await createPrivateInvocationFilesPort(
+        folder,
+        undefined,
+        controls,
+      );
+      assert.ok(port.patch, "The installed native engine must be offered");
+      const result = await direct(
+        Knapsack.files({ port }).tools[0],
+        patch(
+          "*** Add File: sandboxed-patch.txt",
+          "+native patch inside bwrap",
+        ),
+      );
+      assert.equal(result.isError, false, JSON.stringify(result));
+      assert.equal(
+        await readFile(join(folder, "sandboxed-patch.txt"), "utf8"),
+        "native patch inside bwrap\n",
+      );
+      assert.throws(
+        () => controls.launch(folder, ["/usr/bin/true"], bin),
+        /Packaged fungi-apply-patch is not a regular file/,
+      );
+
+      // Exercise the same file allowance with an OS read/write probe, not the
+      // patch engine's own path checks. A directory bind would fail this test.
+      const command = controls.launch(
+        folder,
+        [
+          "/usr/bin/python3",
+          "-c",
+          [
+            "import errno, os, pathlib, sys",
+            "helper, sibling = map(pathlib.Path, sys.argv[1:])",
+            "assert helper.read_bytes()[:4] == b'\\x7fELF'",
+            "assert os.listdir(helper.parent) == [helper.name]",
+            "assert not list(helper.parents[2].glob('payload-*/fungi-bwrap'))",
+            "try: sibling.read_bytes()",
+            "except FileNotFoundError: pass",
+            "else: raise AssertionError('helper sibling became readable')",
+            "try: helper.write_bytes(b'overwritten')",
+            "except OSError as error: assert error.errno in (errno.EROFS, errno.EACCES, errno.EPERM), error",
+            "else: raise AssertionError('helper became writable')",
+          ].join("\n"),
+          executable,
+          sibling,
+        ],
+        executable,
+      );
+      assert.ok(
+        command?.seccompFilter,
+        "No bare fallback may qualify this proof",
+      );
+      assert.ok(
+        command.executable.startsWith(join(runtime, "fungi", "native")),
+      );
+      assert.notEqual(command.executable, join(bin, "fungi-bwrap"));
+      const stagedLauncher = await stat(command.executable);
+      assert.equal(stagedLauncher.nlink, 1);
+      assert.equal(stagedLauncher.mode & 0o777, 0o500);
+      assert.equal(
+        (await stat(dirname(command.executable))).mode & 0o777,
+        0o700,
+      );
+      // After admission a hardlink can still rewrite the installed inode.
+      // Only the independently staged, checked bytes may be executed.
+      const originalLauncher = await readFile(join(bin, "fungi-bwrap"));
+      const rewriteAlias = join(folder, "launcher-hardlink");
+      await link(join(bin, "fungi-bwrap"), rewriteAlias);
+      await writeFile(rewriteAlias, "BENIGN_CHANGED_AFTER_ADMISSION");
+      const filter = join(project, "filter.bpf");
+      await writeFile(filter, command.seccompFilter);
+      const fd = openSync(filter, "r");
+      try {
+        const probe = spawnSync(command.executable, [...command.args], {
+          cwd: folder,
+          env: command.environment,
+          encoding: "utf8",
+          timeout: 5_000,
+          stdio: ["ignore", "pipe", "pipe", fd],
+        });
+        assert.equal(probe.error, undefined);
+        assert.equal(probe.status, 0, probe.stderr);
+      } finally {
+        closeSync(fd);
+      }
+      assert.throws(
+        () => controls.launch(folder, ["/usr/bin/true"]),
+        (cause) =>
+          cause?.name === "LocalSandboxUnavailable" &&
+          cause.reason?.kind === "digest-mismatch",
+      );
+      await writeFile(rewriteAlias, originalLauncher);
+      assert.deepEqual(await readFile(executable), before);
+      assert.equal(await readFile(sibling, "utf8"), "private sibling\n");
+      await rm(executable);
+      assert.throws(
+        () => controls.launch(folder, [executable], executable),
+        (cause) =>
+          cause?.name === "LocalSandboxUnavailable" &&
+          cause.reason?.kind === "missing-artifact",
+      );
+      console.log(
+        "PACKAGED_HELPER_SANDBOX_OK: native patch; sibling hidden; helper read-only",
+      );
+    } finally {
+      controls?.close();
+      if (previous === undefined) delete process.env.FUNGI_BUNDLED_CLI;
+      else process.env.FUNGI_BUNDLED_CLI = previous;
+      if (previousRuntime === undefined) delete process.env.XDG_RUNTIME_DIR;
+      else process.env.XDG_RUNTIME_DIR = previousRuntime;
+      await rm(prefix, { recursive: true });
+      await rm(project, { recursive: true });
+    }
+  },
+);
 
 test("direct and execute Files share native add/update/move/delete and preserve text", async (t) => {
   const { root, surface } = await fixture(t);

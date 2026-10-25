@@ -21,6 +21,7 @@ function fixture() {
   mkdirSync(writableRoot);
   mkdirSync(temporaryDirectory);
   return {
+    projectRoot: root,
     writableRoot,
     temporaryDirectory,
     readOnly: [
@@ -33,6 +34,26 @@ function fixture() {
 }
 
 describe("Seatbelt command policy", () => {
+  it("keeps verified host-native staging outside the Agent's writable TMPDIR grant", () => {
+    const policy = fixture();
+    const host = realpathSync(
+      mkdtempSync(join(tmpdir(), "fungi-seatbelt-host-")),
+    );
+    directories.push(host);
+    const staged = join(host, "native");
+    mkdirSync(staged, { mode: 0o700 });
+    const command = seatbeltCommand(policy, [
+      join(staged, "fungi-apply-patch"),
+    ]);
+    expect(command.args).toContain(
+      `WRITABLE_ROOT_1=${policy.temporaryDirectory}`,
+    );
+    expect(
+      command.args.filter((argument) => argument.startsWith("WRITABLE_ROOT_")),
+    ).not.toContain(`WRITABLE_ROOT_1=${staged}`);
+    expect(staged).not.toBe(policy.temporaryDirectory);
+    expect(command.temporaryDirectory).toBe(policy.temporaryDirectory);
+  });
   it("keeps paths in parameters, excludes exact names and descendants, and never grants network", () => {
     const policy = fixture();
     const command = seatbeltCommand(policy, ["/bin/sh", "-c", "echo safe"]);

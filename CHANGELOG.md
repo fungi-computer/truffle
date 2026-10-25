@@ -1,5 +1,39 @@
 # @fungi.computer/truffle
 
+## 0.2.2
+
+### Patch Changes
+
+- Changes since 0.2.1:
+
+  - fix(local): refuse discovery when a Git-reported path is access-denied
+  - fix(local): handle sandbox Git discovery failures explicitly
+  - fix(local): make commondir read-only and parse Git output as raw bytes
+  - fix(local): ask Git for sandbox Git admin instead of walking payload
+  - fix(spore): stop Bun loading Agent project config into host
+  - fix(truffle): refuse agent-writable host JavaScript at sandbox admission
+  - fix(local): throw typed command preparation refusals directly
+  - fix(local): refuse bare sandbox fallback after readiness
+  - fix(spore): refuse native permission tampering without bare fallback
+  - fix(spore): refuse bare fallback after native digest mismatch
+  - fix(spore): keep stale native sweep outside sandbox admission
+  - fix(spore): share verified native staging across fallback and Files
+  - fix(spore): order native digests and bound sandbox staging
+  - fix(spore): anchor native payloads to built JS and stage verified bytes
+  - fix(local): refuse Agent-owned native sandbox payloads
+  - fix(spore): scope packaged patch helper bind to its file
+  - fix(mule): own provider data types at the Pi boundary
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/knapsack@0.2.1
+  - @fungi.computer/shiitake-extensions@0.1.1
+  - @fungi.computer/shiitake@0.3.1
+  - @fungi.computer/graft@0.1.1
+  - @fungi.computer/mycelium@0.2.1
+  - @fungi.computer/zookeeper@0.0.2
+
 ## 0.2.1
 
 ### Patch Changes

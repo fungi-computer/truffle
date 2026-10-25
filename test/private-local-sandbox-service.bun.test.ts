@@ -1,12 +1,5 @@
 import assert from "node:assert/strict";
-import {
-  access,
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -125,7 +118,10 @@ it.skipIf(process.platform !== "linux")(
       const responseBody: unknown = await response.json();
       expect({ status: response.status, body: responseBody }).toMatchObject({
         status: 409,
-        body: { code: "sandbox_unavailable", reason: { kind: "missing" } },
+        body: {
+          code: "sandbox_unavailable",
+          reason: { kind: "unsafe-native-payload" },
+        },
       });
       const body = z
         .strictObject({
@@ -133,7 +129,7 @@ it.skipIf(process.platform !== "linux")(
           reason: sandboxUnavailableReasonSchema,
         })
         .parse(responseBody);
-      expect(body.reason.kind).toBe("missing");
+      expect(body.reason.kind).toBe("unsafe-native-payload");
       const manager = createPrivateLocalServiceManager({ directory, home });
       const refused = manager.connect({
         invocationRoot: project,
@@ -145,8 +141,8 @@ it.skipIf(process.platform !== "linux")(
       expect(modelCalls).toBe(0);
       await assert.rejects(access(sentinel), { code: "ENOENT" });
 
-      // A real positive control: the same service and SDK permit default-off
-      // fallback, complete a turn and execute the Computer subprocess.
+      // Optional mode can connect, but may not run an in-project native
+      // package bare when the Agent triggers a Computer command.
       const permitted = await manager.connect({
         invocationRoot: project,
         requireSandbox: false,
@@ -170,8 +166,7 @@ it.skipIf(process.platform !== "linux")(
           new AbortController().signal,
         );
         expect(terminal).toMatchObject({ outcome: "completed" });
-        expect(await readFile(sentinel, "utf8")).toBe("executed");
-        expect(modelCalls).toBe(2);
+        await assert.rejects(access(sentinel), { code: "ENOENT" });
         expect(requirements).toEqual([true, true, false]);
       } finally {
         await permitted.close();

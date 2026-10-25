@@ -11,6 +11,7 @@ import {
   runPrivateInvocationProcess,
   type LocalSandboxLaunch,
 } from "./private-invocation-computer.js";
+import { createNativePayloadStaging } from "./private-local-native-staging.js";
 
 function patchExecutable(): string {
   if (process.env.FUNGI_BUNDLED_CLI) {
@@ -80,7 +81,9 @@ export async function createPrivateFilesPatch(
 ): Promise<FilesPatch | undefined> {
   const executable = patchExecutable();
   try {
-    await access(executable, constants.X_OK);
+    // Advertise the installed helper if present; only the verified private
+    // copy is executed, so its source does not need an execute bit.
+    await access(executable, constants.F_OK);
   } catch (cause) {
     if (cause instanceof Error && "code" in cause && cause.code === "ENOENT")
       return undefined;
@@ -91,16 +94,22 @@ export async function createPrivateFilesPatch(
     const bytes = new TextEncoder().encode(patch);
     if (bytes.byteLength > maximumPatchBytes)
       throw new Error("Patch exceeds the 128 KiB input bound");
-    const launch = sandbox?.(root, [executable]);
-    const env: NodeJS.ProcessEnv = { ...process.env, ...launch?.environment };
-    if (launch !== undefined) {
-      delete env.XDG_RUNTIME_DIR;
-      delete env.DBUS_SESSION_BUS_ADDRESS;
-    }
-    const command = ChildProcess.make(
-      launch?.executable ?? executable,
-      launch?.args ?? [],
-      {
+    let result: Awaited<ReturnType<typeof runPrivateInvocationProcess>>;
+    let standalone: ReturnType<typeof createNativePayloadStaging> | undefined;
+    try {
+      const launch = sandbox?.(root, [executable], executable);
+      // Without controls, this one Files invocation owns and closes its copy.
+      if (launch === undefined) standalone = createNativePayloadStaging(root);
+      const privateExecutable = standalone?.patch(executable);
+      const executableToRun = launch?.executable ?? privateExecutable;
+      if (executableToRun === undefined)
+        throw new Error("Native Files helper was not staged");
+      const env: NodeJS.ProcessEnv = { ...process.env, ...launch?.environment };
+      if (launch !== undefined && !("bareNative" in launch)) {
+        delete env.XDG_RUNTIME_DIR;
+        delete env.DBUS_SESSION_BUS_ADDRESS;
+      }
+      const command = ChildProcess.make(executableToRun, launch?.args ?? [], {
         cwd: root,
         env,
         extendEnv: false,
@@ -114,13 +123,15 @@ export async function createPrivateFilesPatch(
                   stream: Stream.make(launch.seccompFilter),
                 },
               },
-      },
-    );
-    const result = await runPrivateInvocationProcess(
-      command,
-      context.signal,
-      30_000,
-    );
+      });
+      result = await runPrivateInvocationProcess(
+        command,
+        context.signal,
+        30_000,
+      );
+    } finally {
+      standalone?.close();
+    }
     if (result.status === "deadline_exceeded")
       return {
         status: "failed",

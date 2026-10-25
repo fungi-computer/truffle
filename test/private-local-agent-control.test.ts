@@ -79,15 +79,16 @@ async function temporaryDirectory() {
 }
 
 /**
- * Own the optional-package tree: missing backend by default, or the maintained
- * locally built native payload for real available-backend proofs.
+ * Own the optional-package tree: a partial install by default, or the
+ * maintained locally built native payload for available-backend proofs.
  */
 async function sandboxProductionFixture(available = false) {
   const directory = await temporaryDirectory();
   const root = join(directory, "project");
   const home = join(directory, "home");
   const bin = join(
-    root,
+    directory,
+    "native",
     "node_modules",
     "@fungi.computer",
     `spore-native-${process.platform}-${process.arch}`,
@@ -104,9 +105,7 @@ async function sandboxProductionFixture(available = false) {
   if (available) {
     for (const name of [
       "fungi-bwrap",
-      "fungi-bwrap.sha256",
       "fungi-seccomp.bpf",
-      "fungi-seccomp.bpf.sha256",
       "fungi-apply-patch",
     ])
       await copyFile(
@@ -116,7 +115,7 @@ async function sandboxProductionFixture(available = false) {
     await chmod(join(bin, "fungi-bwrap"), 0o700);
     await chmod(join(bin, "fungi-apply-patch"), 0o700);
   }
-  vi.stubEnv("FUNGI_BUNDLED_CLI", join(root, "fungi.cjs"));
+  vi.stubEnv("FUNGI_BUNDLED_CLI", join(directory, "native", "fungi.cjs"));
   const faux = fauxProvider({
     provider: "sandbox-proof",
     models: [{ id: "sandbox-model" }],
@@ -436,17 +435,16 @@ it.runIf(process.platform === "linux")(
     const host = await openProductionHost(fixture.options, fixture.models);
     try {
       expect(host.sandboxStatus()).toMatchObject({ state: "available" });
-      // The first launch, not a setter or reopen, must detect the missing
-      // artifact BEFORE spawn and authorize the default-off fallback.
+      // An installed artifact that disappears after readiness is not a
+      // missing optional package; the next launch must never run bare.
       await rm(join(fixture.bin, "fungi-bwrap"));
       for (const required of [undefined, true, false]) {
-        if (required === true)
+        if (required !== undefined)
           expect(() => {
-            host.setRequireSandbox(true);
+            host.setRequireSandbox(required);
           }).toThrow(
             expect.objectContaining({ name: "LocalSandboxUnavailable" }),
           );
-        else if (required === false) host.setRequireSandbox(false);
         fixture.faux.setResponses([
           fauxAssistantMessage(
             fauxToolCall("execute", {
@@ -473,16 +471,11 @@ it.runIf(process.platform === "linux")(
         expect(host.sandboxStatus()).toMatchObject({
           state: "unavailable",
           requireSandbox: required === true,
-          reason: { kind: "missing" },
+          reason: { kind: "missing-artifact" },
         });
-        if (required === true)
-          await expect(access(fixture.sentinel)).rejects.toMatchObject({
-            code: "ENOENT",
-          });
-        else {
-          expect(await readFile(fixture.sentinel, "utf8")).toBe("executed");
-          await rm(fixture.sentinel);
-        }
+        await expect(access(fixture.sentinel)).rejects.toMatchObject({
+          code: "ENOENT",
+        });
       }
     } finally {
       await host.close();
@@ -491,7 +484,7 @@ it.runIf(process.platform === "linux")(
 );
 
 it.runIf(process.platform === "linux")(
-  "enforces requireSandbox before real Local execution with a missing backend",
+  "enforces requireSandbox before real Local execution with a partial native package",
   async () => {
     const fixture = await sandboxProductionFixture();
     const run = async () => {
@@ -518,7 +511,7 @@ it.runIf(process.platform === "linux")(
     };
     await expect(run()).rejects.toMatchObject({
       name: "LocalSandboxUnavailable",
-      reason: { kind: "missing" },
+      reason: { kind: "missing-artifact" },
     });
     expect(fixture.modelCalls()).toBe(0);
     await expect(access(fixture.sentinel)).rejects.toMatchObject({
@@ -528,7 +521,7 @@ it.runIf(process.platform === "linux")(
 );
 
 it.runIf(process.platform === "linux")(
-  "allows real Local execution without requireSandbox when the backend is missing",
+  "refuses bare Local execution with a partial native package even when optional",
   async () => {
     const fixture = await sandboxProductionFixture();
     const host = await openProductionHost(fixture.options, fixture.models);
@@ -547,8 +540,13 @@ it.runIf(process.platform === "linux")(
           new AbortController().signal,
         ),
       ).resolves.toMatchObject({ outcome: "completed" });
-      expect(await readFile(fixture.sentinel, "utf8")).toBe("executed");
-      expect(fixture.modelCalls()).toBe(2);
+      expect(host.sandboxStatus()).toMatchObject({
+        state: "unavailable",
+        reason: { kind: "missing-artifact" },
+      });
+      await expect(access(fixture.sentinel)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
     } finally {
       await host.close();
     }
@@ -556,7 +554,7 @@ it.runIf(process.platform === "linux")(
 );
 
 it.runIf(process.platform === "linux")(
-  "enforces persisted requireSandbox before real Local recovery, then recovers when explicitly disabled",
+  "enforces persisted requireSandbox, then recovers after explicit disable and native repair",
   async () => {
     const fixture = await sandboxProductionFixture();
     const initial = await openProductionHost(fixture.options, fixture.models);
@@ -627,7 +625,7 @@ it.runIf(process.platform === "linux")(
       openProductionHost({ ...options, requireSandbox: true }, fixture.models),
     ).rejects.toMatchObject({
       name: "LocalSandboxUnavailable",
-      reason: { kind: "missing" },
+      reason: { kind: "missing-artifact" },
     });
     // No flag is passed on this second open: the persisted requirement must
     // still win over the default OFF before any recovered model/tool work.
@@ -635,15 +633,28 @@ it.runIf(process.platform === "linux")(
       openProductionHost(options, fixture.models),
     ).rejects.toMatchObject({
       name: "LocalSandboxUnavailable",
-      reason: { kind: "missing" },
+      reason: { kind: "missing-artifact" },
     });
     expect(fixture.modelCalls()).toBe(0);
     await expect(access(fixture.sentinel)).rejects.toMatchObject({
       code: "ENOENT",
     });
 
-    // Positive recovery control: no new prompt is sent. The SAME durable
-    // command must recover and perform a real foreground Computer spawn.
+    // Repair the partial package before the positive recovery control. Turning
+    // the requirement off alone must not authorize a bare command.
+    for (const name of [
+      "fungi-bwrap",
+      "fungi-seccomp.bpf",
+      "fungi-apply-patch",
+    ])
+      await copyFile(
+        fileURLToPath(new URL(`../native/bin/${name}`, import.meta.url)),
+        join(fixture.bin, name),
+      );
+    await chmod(join(fixture.bin, "fungi-bwrap"), 0o700);
+    await chmod(join(fixture.bin, "fungi-apply-patch"), 0o700);
+    // No new prompt is sent. The SAME durable command must recover and run
+    // within a valid sandbox.
     const recovered = await openProductionHost(
       { ...options, requireSandbox: false },
       fixture.models,
