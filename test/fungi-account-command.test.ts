@@ -356,3 +356,40 @@ for (const action of ["status", "teams", "balance"] satisfies readonly (
     expect(replies()).toEqual([{ schemaVersion: 1, signedIn: false }]);
   });
 }
+
+for (const providerId of ["openai", "anthropic"] as const) {
+  it(
+    "account status stays about Fungi when " +
+      providerId +
+      " credentials are saved",
+    async () => {
+      await createPrivateCredentialStore(credentialPath).modify(
+        providerId,
+        () =>
+          Promise.resolve({
+            type: "oauth",
+            access: "synthetic-" + providerId + "-access",
+            refresh: "synthetic-" + providerId + "-refresh",
+            expires: Date.now() + 3_600_000,
+            clientId: "synthetic-provider-client",
+            scopes: [],
+          }),
+      );
+
+      await runFungiAccountCommand(
+        { action: "status" },
+        {
+          json: false,
+          stdout,
+          credentialPath,
+          fetch: () => Promise.reject(new Error("must not reach the Hub")),
+        },
+      );
+
+      expect(output.join("")).toBe(
+        "Not signed in to Fungi. Run fungi login --provider fungi.\n",
+      );
+      expect(await readFungiAccountStatus({ credentialPath })).toBeUndefined();
+    },
+  );
+}

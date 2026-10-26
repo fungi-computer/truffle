@@ -1,5 +1,16 @@
 # @fungi.computer/truffle
 
+## 0.3.1
+
+### Patch Changes
+
+- Changes since 0.3.0:
+
+  - fix(truffle): reuse safe git commit grants
+  - fix(cli): clarify provider-specific sign-in guidance
+  - fix(cli): prioritize BYOK in missing-model guidance
+  - fix(tui): approve MCP escapes once by default
+
 ## 0.3.0
 
 ### Minor Changes

@@ -147,6 +147,14 @@ export type ServiceLogEvent =
       executable: string;
       ruleId: string;
     }>
+  | Readonly<{
+      event: "exec-approval-decision";
+      agentId: string;
+      recordId: string;
+      decision: "approve" | "deny";
+      scope?: "once" | "always";
+      ruleId?: string;
+    }>
   | Readonly<{ event: "memory"; rss: number; heap: HeapStatistics }>
   | Readonly<{ event: "memory-unavailable"; failure: FailureMetadata }>
   | Readonly<{
@@ -184,6 +192,12 @@ export type ServiceLogLifecycle = Readonly<{
   ruleMatch: (
     match: Omit<
       Extract<ServiceLogEvent, { event: "exec-rule-match" }>,
+      "event"
+    >,
+  ) => void;
+  approvalDecision: (
+    decision: Omit<
+      Extract<ServiceLogEvent, { event: "exec-approval-decision" }>,
       "event"
     >,
   ) => void;
@@ -393,6 +407,9 @@ export function createServiceLogLifecycle(
     },
     ruleMatch(match) {
       emit({ event: "exec-rule-match", ...match });
+    },
+    approvalDecision(decision) {
+      emit({ event: "exec-approval-decision", ...decision });
     },
     recoveryDisabled(code) {
       if (closed || recovery !== undefined) return;

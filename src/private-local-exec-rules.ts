@@ -76,7 +76,7 @@ const gitOptions = {
       "-s",
       "--signoff",
     ],
-    values: ["-m", "--message"],
+    values: ["-m", "--message", "-am"],
   },
   diff: {
     flags: [
@@ -275,8 +275,11 @@ function validPrefix(prefix: readonly string[]) {
   );
 }
 
-/** Offer only direct, narrow grants; extension installs require a fresh card. */
-export function rulePrefix(argv: readonly string[]): string[] | undefined {
+/** Offer only direct commands that this same matcher can authorize. */
+export function rulePrefix(
+  argv: readonly string[],
+  configuredRemotes?: ReadonlySet<string>,
+): string[] | undefined {
   if (
     argv.length === 0 ||
     argv[0]?.startsWith(".") ||
@@ -287,7 +290,9 @@ export function rulePrefix(argv: readonly string[]): string[] | undefined {
     return undefined;
   if (basename(argv[0] ?? "") === "git") {
     const prefix = argv.slice(0, 2);
-    return validPrefix(prefix) ? prefix : undefined;
+    return validPrefix(prefix) && safeGitCommand(argv, configuredRemotes)
+      ? prefix
+      : undefined;
   }
   if (
     basename(argv[0] ?? "") === "fungi" &&
@@ -297,6 +302,22 @@ export function rulePrefix(argv: readonly string[]): string[] | undefined {
     return undefined;
   const parsed = prefixSchema.safeParse(argv.slice(0, 2));
   return parsed.success && validPrefix(parsed.data) ? parsed.data : undefined;
+}
+
+/** Text for the same Git option profile that gates matching, not a second list. */
+export function gitRuleCoverage(subcommand: string): string {
+  const profile = gitProfiles.get(subcommand);
+  if (profile === undefined) throw new Error("No reusable Git option profile");
+  const flags = profile.flags.filter((flag) => flag !== "--").join(", ");
+  const values = profile.values.map((option) => `${option} VALUE`).join(", ");
+  const remote =
+    subcommand === "push" ||
+    subcommand === "fetch" ||
+    subcommand === "pull" ||
+    subcommand === "remote"
+      ? " Remote operands must be configured names or permitted explicit URLs."
+      : "";
+  return `Direct argv git ${subcommand} for Workspace Agents in this protected project repository. Only these options are reusable: ${flags || "none"}${values ? `; ${values}` : ""}; -- and permitted operands.${remote} Shell commands and unlisted Git options still ask.`;
 }
 
 function safeRemote(
@@ -420,18 +441,19 @@ export function localExecRules(project: string) {
   const add = (prefix: readonly string[]) => {
     const parsed = prefixSchema.parse(prefix);
     if (!validPrefix(parsed)) throw new Error("Unsafe Always-allow prefix");
+    let ruleId: z.infer<typeof projectRuleSchema>["id"] | undefined;
     lockedUpdate(project, () => {
       const existing = readProject(project).rules;
-      if (
-        !existing.some(
-          (rule) => JSON.stringify(rule.prefix) === JSON.stringify(parsed),
-        )
-      )
-        writeProject(project, [
-          ...existing,
-          { id: projectRuleIds.rule.generate(), prefix: parsed },
-        ]);
+      ruleId = existing.find(
+        (rule) => JSON.stringify(rule.prefix) === JSON.stringify(parsed),
+      )?.id;
+      if (ruleId === undefined) {
+        ruleId = projectRuleIds.rule.generate();
+        writeProject(project, [...existing, { id: ruleId, prefix: parsed }]);
+      }
     });
+    if (ruleId === undefined) throw new Error("Exec rule was not persisted");
+    return ruleId;
   };
   const remove = (prefix: readonly string[]) => {
     const parsed = prefixSchema.parse(prefix);

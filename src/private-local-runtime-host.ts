@@ -231,6 +231,14 @@ export type PrivateLocalTools = Readonly<{
   processes: PrivateLocalComputerProcesses;
 }>;
 
+export type ExecApprovalDecision = {
+  agentId: string;
+  recordId: string;
+  decision: "approve" | "deny";
+  scope?: "once" | "always";
+  ruleId?: string;
+};
+
 /** Inputs for the one private local Agent opener. */
 export type PrivateLocalRuntimeHostOptions = Readonly<{
   /** Service-selected host configuration, independent of this Agent's Files root. */
@@ -250,6 +258,8 @@ export type PrivateLocalRuntimeHostOptions = Readonly<{
       ruleId: string;
     }>,
   ) => void;
+  /** The human's committed approval choice, without command text or secrets. */
+  onExecApprovalDecision?: (event: Readonly<ExecApprovalDecision>) => void;
   /** Existing Agent database to reopen instead of creating a fresh local store. */
   databasePath?: string | undefined;
   /** Stable Local store identity for replaying one Agent create request. */
@@ -923,7 +933,7 @@ export function createPrivateLocalModelSource(
       throw new ShiitakeError(
         "model",
         "rejected",
-        "No signed-in model provider is available. Run /login, then choose a model with /model.",
+        "No signed-in model provider is available. Use your own Claude or ChatGPT subscription: /login in a Session, or fungi login --provider anthropic --auth-type oauth (Claude) or fungi login --provider openai --auth-type oauth (ChatGPT) in the CLI. For hosted Fungi: fungi login --provider fungi.",
       );
     const choice = startup.preference;
     const selectedProvider = choice.providerId;
@@ -1840,16 +1850,38 @@ export async function openPrivateLocalRuntimeHost(
       lstatSync(join(root, ".git"), { throwIfNoEntry: false }) === undefined
         ? undefined
         : gitDirectories(root, root);
+    const gitGrantFor = (cwd: string, executionPath: string) => {
+      // A nested/Agent-created repository has writable config and hooks.
+      const protectedGit =
+        grantRepository === undefined
+          ? undefined
+          : gitDirectories(root, root, executionPath);
+      const selectedGit = gitDirectories(root, cwd, executionPath);
+      if (
+        protectedGit?.common === undefined ||
+        protectedGit.common !== grantRepository?.common ||
+        protectedGit.worktree !== grantRepository.worktree ||
+        selectedGit?.common !== protectedGit.common ||
+        selectedGit.worktree !== protectedGit.worktree
+      )
+        return undefined;
+      const configuredRemotes = protectedGitRemoteNames(
+        root,
+        protectedGit.common,
+        executionPath,
+      );
+      return configuredRemotes === undefined
+        ? undefined
+        : { configuredRemotes };
+    };
     // The attached human's answer, never form JSON or the model, selects
     // this short-lived intent. Commit the rule before dispatching the command.
-    const ruleIntents = new Map<string, () => void>();
+    const ruleIntents = new Map<string, () => string>();
     const selectRule =
       (recordId: string, prefix: readonly string[]) =>
       (selected: "prefix" | false) => {
         if (selected === "prefix")
-          ruleIntents.set(recordId, () => {
-            execRules.add(prefix);
-          });
+          ruleIntents.set(recordId, () => execRules.add(prefix));
         else ruleIntents.delete(recordId);
       };
     const escapeFence = () =>
@@ -1928,14 +1960,35 @@ export async function openPrivateLocalRuntimeHost(
       decision: async (recordId) => {
         const answered = escapeLedger.get(recordId);
         if (answered?.state === "approved") {
+          let ruleId: string | undefined;
           if (
             answered.module === "computer" &&
             answered.operation === "exec" &&
             answered.authorityFence === escapeFence()
           )
-            ruleIntents.get(recordId)?.();
+            ruleId = ruleIntents.get(recordId)?.();
+          if (answered.module === "computer" && answered.operation === "exec") {
+            const event: ExecApprovalDecision = {
+              agentId,
+              recordId,
+              decision: "approve",
+              scope: ruleIntents.has(recordId) ? "always" : "once",
+            };
+            if (ruleId !== undefined) event.ruleId = ruleId;
+            input.onExecApprovalDecision?.(event);
+          }
           await escapeLedger.apply(recordId, escapeApply);
         }
+        if (
+          answered?.state === "denied" &&
+          answered.module === "computer" &&
+          answered.operation === "exec"
+        )
+          input.onExecApprovalDecision?.({
+            agentId,
+            recordId,
+            decision: "deny",
+          });
         for (const pending of escapeLedger.pendingHandoffs())
           await deliverEscapeResult(pending);
       },
@@ -1986,7 +2039,13 @@ export async function openPrivateLocalRuntimeHost(
           recordId: staged.record.recordId,
           description: staged.record.description,
         } as const;
-        const review = localExecEscapeReview(request, cwd);
+        const review = localExecEscapeReview(
+          request,
+          cwd,
+          "executable" in request && request.executable === "git"
+            ? gitGrantFor(cwd, executionPath)
+            : undefined,
+        );
         const presented = await localTools.presentApproval(
           sessionId,
           pending,
@@ -2007,26 +2066,10 @@ export async function openPrivateLocalRuntimeHost(
           return undefined;
         let configuredRemotes: ReadonlySet<string> | undefined;
         if (request.executable === "git") {
-          // Only the project's own protected common Git directory may use a
-          // Git grant. A nested/Agent-created repository has writable config.
-          const protectedGit =
-            grantRepository === undefined
-              ? undefined
-              : gitDirectories(root, root, executionPath);
-          const selectedGit = gitDirectories(root, cwd, executionPath);
-          if (
-            protectedGit?.common === undefined ||
-            protectedGit.common !== grantRepository?.common ||
-            protectedGit.worktree !== grantRepository.worktree ||
-            selectedGit?.common !== protectedGit.common ||
-            selectedGit.worktree !== protectedGit.worktree
-          )
-            return undefined;
-          configuredRemotes = protectedGitRemoteNames(
-            root,
-            protectedGit.common,
+          configuredRemotes = gitGrantFor(
+            cwd,
             executionPath,
-          );
+          )?.configuredRemotes;
           if (configuredRemotes === undefined) return undefined;
         }
         const matched = execRules.match(

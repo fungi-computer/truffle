@@ -370,7 +370,9 @@ describe("private local RuntimeHost", () => {
     try {
       await expect(
         host.effectiveModel("main", new AbortController().signal),
-      ).rejects.toThrow("No signed-in model provider is available. Run /login");
+      ).rejects.toThrow(
+        "No signed-in model provider is available. Use your own Claude or ChatGPT subscription:",
+      );
     } finally {
       await host.close();
     }
@@ -1267,7 +1269,9 @@ describe("private local RuntimeHost", () => {
       expect(addressed.address).toBe(reopened.session.address);
       await expect(
         reopened.effectiveModel("main", new AbortController().signal),
-      ).rejects.toThrow("No signed-in model provider is available. Run /login");
+      ).rejects.toThrow(
+        "No signed-in model provider is available. Use your own Claude or ChatGPT subscription:",
+      );
       const snapshot = await addressed.read();
       expect(await reopened.session.read()).toEqual(snapshot);
       const other = reopened.getSession("other-conversation");

@@ -24,6 +24,8 @@ export type LocalApprovalReview = {
   justification: string;
   prefix?: readonly string[];
   warning?: string;
+  alwaysAllowCoverage?: string;
+  alwaysAllowUnavailableReason?: string;
 };
 
 type Pending = {

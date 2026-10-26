@@ -335,3 +335,58 @@ test("one typed rule match lands in the isolated HOME service log, without argum
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("approval choices record once/always and the persisted rule id without command text", async () => {
+  const root = await fixture();
+  const directory = join(root, "home", ".fungi", "service");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const diagnostics = openDiagnostics(directory);
+  try {
+    diagnostics.approvalDecision({
+      agentId: "agent-1",
+      recordId: "approval-1",
+      decision: "approve",
+      scope: "once",
+    });
+    diagnostics.approvalDecision({
+      agentId: "agent-1",
+      recordId: "approval-2",
+      decision: "approve",
+      scope: "always",
+      ruleId: "local_exec_rule_1",
+    });
+    diagnostics.approvalDecision({
+      agentId: "agent-1",
+      recordId: "approval-3",
+      decision: "deny",
+    });
+    diagnostics.close();
+    const records = (await readFile(join(directory, "service.jsonl"), "utf8"))
+      .trimEnd()
+      .split("\n")
+      .map((line) =>
+        z.looseObject({ event: z.string() }).parse(JSON.parse(line)),
+      )
+      .filter((record) => record.event === "exec-approval-decision");
+    expect(records).toHaveLength(3);
+    expect(records[0]).toMatchObject({
+      scope: "once",
+      decision: "approve",
+      recordId: "approval-1",
+    });
+    expect(records[1]).toMatchObject({
+      scope: "always",
+      decision: "approve",
+      recordId: "approval-2",
+      ruleId: "local_exec_rule_1",
+    });
+    expect(records[2]).toMatchObject({
+      decision: "deny",
+      recordId: "approval-3",
+    });
+    expect(JSON.stringify(records)).not.toContain("commit");
+  } finally {
+    diagnostics.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

@@ -163,6 +163,7 @@ export async function runPrivateLocalService(
         throw new Error("Local service native staging is not ready");
       return native;
     },
+    diagnostics.approvalDecision,
   );
   const prefix = `/service/${serviceId}`;
   const releaseAccountOwner = registerFungiAccountOwner(

@@ -168,6 +168,75 @@ it("configured names and scheme URLs remain grantable after --", async () => {
   }
 });
 
+it("offers only commands the saved rule can match, without broad Git flag combinations", async () => {
+  const root = await project();
+  const rules = localExecRules(root);
+  expect(rulePrefix(["git", "commit", "-am", "message"])).toEqual([
+    "git",
+    "commit",
+  ]);
+  expect(rulePrefix(["git", "commit", "-am"])).toBeUndefined();
+  expect(rulePrefix(["git", "commit", "-axm", "message"])).toBeUndefined();
+  expect(rulePrefix(["git", "commit", "--exec=sh"])).toBeUndefined();
+  expect(rulePrefix(["git", "push", "origin"], new Set(["origin"]))).toEqual([
+    "git",
+    "push",
+  ]);
+  expect(rulePrefix(["git", "push", "unknown"])).toBeUndefined();
+  const id = rules.add(["git", "commit"]);
+  expect(rules.add(["git", "commit"])).toBe(id);
+  expect(rules.match(["git", "commit", "-am", "message"])).toMatchObject({
+    ruleId: id,
+  });
+  expect(rules.match(["git", "commit", "-axm", "message"])).toBeUndefined();
+});
+
+it("explains why shell and unrecognized Git options cannot offer Always allow", () => {
+  const gitGrant = { configuredRemotes: new Set<string>() };
+  const shell = localExecEscapeReview(
+    { command: "git commit -am message", escape: { justification: "blocked" } },
+    "/project",
+  );
+  expect(shell.prefix).toBeUndefined();
+  expect(shell.alwaysAllowUnavailableReason).toContain("Shell");
+  const unsupported = localExecEscapeReview(
+    {
+      executable: "git",
+      args: ["commit", "-axm", "message"],
+      escape: { justification: "blocked" },
+    },
+    "/project",
+    gitGrant,
+  );
+  expect(unsupported.prefix).toBeUndefined();
+  expect(unsupported.alwaysAllowUnavailableReason).toContain("option");
+  expect(unsupported.warning).toContain("Project hooks");
+  const unprotected = localExecEscapeReview(
+    {
+      executable: "git",
+      args: ["commit", "-m", "message"],
+      escape: { justification: "blocked" },
+    },
+    "/project",
+  );
+  expect(unprotected.prefix).toBeUndefined();
+  expect(unprotected.alwaysAllowUnavailableReason).toContain("protected");
+  expect(unprotected.warning).toContain("Project hooks");
+  const push = localExecEscapeReview(
+    {
+      executable: "git",
+      args: ["push", "origin"],
+      escape: { justification: "blocked" },
+    },
+    "/project",
+    { configuredRemotes: new Set(["origin"]) },
+  );
+  expect(push.alwaysAllowCoverage).toContain("--force-with-lease");
+  expect(push.alwaysAllowCoverage).toContain("--delete");
+  expect(push.alwaysAllowCoverage).toContain("Workspace Agents");
+  expect(push.alwaysAllowCoverage).not.toContain("-am");
+});
+
 it.each(["commit", "push", "merge", "diff"])(
   "the git %s grant review discloses writable project hook files",
   (subcommand) => {
@@ -178,6 +247,7 @@ it.each(["commit", "push", "merge", "diff"])(
         escape: { justification: "Git metadata is read-only" },
       },
       "/project/fungi",
+      { configuredRemotes: new Set() },
     );
     expect(review.prefix).toEqual(["git", subcommand]);
     expect(review.warning).toContain("run code as you");

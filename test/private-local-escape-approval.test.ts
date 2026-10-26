@@ -245,7 +245,7 @@ it("a real Workspace Agent runs a narrow rule without writing a ledger approval"
           "return await env.computers.local.exec(" +
           JSON.stringify({
             executable: "git",
-            args: ["commit", "-m", "rule-matched"],
+            args: ["commit", "-am", "rule-matched"],
           }) +
           ")",
       }),

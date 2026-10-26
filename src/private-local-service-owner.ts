@@ -220,6 +220,9 @@ export function createLocalServiceOwners(
   serviceNative?: () => NonNullable<
     Parameters<typeof openPrivateLocalRuntimeHost>[0]["native"]
   >,
+  onExecApprovalDecision: NonNullable<
+    Parameters<typeof openPrivateLocalRuntimeHost>[0]["onExecApprovalDecision"]
+  > = () => undefined,
 ) {
   const extensions =
     suppliedExtensions ?? localExtensions({ home: configRoot.home });
@@ -1048,6 +1051,7 @@ export function createLocalServiceOwners(
         mail: projectControl ? mailRouting(invocationRoot) : undefined,
         meshAdmission,
         onExecRuleMatch,
+        onExecApprovalDecision,
       };
       if (serviceNative !== undefined)
         options = { ...options, native: serviceNative() };
@@ -1447,6 +1451,7 @@ export function createLocalServiceOwners(
               agentControl: directory(invocationRoot),
               mail: mailRouting(invocationRoot),
               onExecRuleMatch,
+              onExecApprovalDecision,
             };
             if (serviceNative !== undefined)
               options = { ...options, native: serviceNative() };

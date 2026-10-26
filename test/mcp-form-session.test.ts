@@ -13,9 +13,10 @@ import { fauxModelSource, memoryHost } from "@fungi.computer/shiitake/testing";
 import { fromNodeSqlite } from "@fungi.computer/watchdog/node-sqlite";
 import { createPrivateLocalTools } from "../src/private-local-runtime-host.js";
 import { createLocalUiAttachment } from "../src/private-local-ui-attachment.js";
+import { localExecRules } from "../src/private-local-exec-rules.js";
 import { mcpFormApprovalContract } from "../src/private-mcp-form-contract.js";
 
-it("the selected Session presents the real record and only a live host-bound UI can answer its revision, applying once", async () => {
+it("approve once leaves the project rule store empty; an explicit always-allow still writes its prefix", async () => {
   const root = await mkdtemp(join(tmpdir(), "mcp-ledger-session-"));
   const database = new DatabaseSync(":memory:");
   const local = await createPrivateLocalTools(root);
@@ -35,6 +36,7 @@ it("the selected Session presents the real record and only a live host-bound UI 
   });
   const order: string[] = [];
   let ruleIntent = false;
+  const rules = localExecRules(root);
   let actor: ApprovalAnswerer = {
     kind: "human",
     memberId: "fixture-owner",
@@ -68,7 +70,10 @@ it("the selected Session presents the real record and only a live host-bound UI 
   const capability = ledger.capability({
     actor: () => Promise.resolve(actor),
     decision: async (recordId) => {
-      if (ruleIntent) order.push("rule");
+      if (ruleIntent) {
+        order.push("rule");
+        rules.add(["notes", "write"]);
+      }
       await ledger.apply(recordId, effect);
     },
   });
@@ -101,6 +106,7 @@ it("the selected Session presents the real record and only a live host-bound UI 
       cwd: root,
       justification: "Write blocked",
       prefix: ["notes", "write"],
+      alwaysAllowCoverage: "Direct argv notes write in this project",
     },
     (selected) => {
       ruleIntent = selected === "prefix";
@@ -118,6 +124,9 @@ it("the selected Session presents the real record and only a live host-bound UI 
   expect(projection.pending).toHaveLength(1);
   const form = projection.pending[0];
   if (form === undefined) throw new Error("Missing projected approval");
+  expect(form.review?.alwaysAllowCoverage).toBe(
+    "Direct argv notes write in this project",
+  );
   expect(form.id).not.toBe(submitted.recordId);
   expect(form.approval).toEqual(
     await capability.get({ recordId: submitted.recordId }),
@@ -164,19 +173,80 @@ it("the selected Session presents the real record and only a live host-bound UI 
     expect(
       await session
         .extension(mcpFormApprovalContract.id)
-        .call("answer", { ...answer, decision: "always-allow" }),
+        .call("answer", { ...answer, decision: "approve" }),
     ).toMatchObject({
       kind: "answered",
       view: { record: { recordId: submitted.recordId, state: "applied" } },
     });
     expect(await readFile(join(root, "effects.txt"), "utf8")).toBe("saved\n");
-    expect(order).toEqual(["rule", "dispatch"]);
+    expect(order).toEqual(["dispatch"]);
+    expect(rules.list()).toEqual([]);
     expect(
       await session
         .extension(mcpFormApprovalContract.id)
         .call("answer", answer),
     ).toEqual({ kind: "refused", reason: "not-pending" });
     expect(await readFile(join(root, "effects.txt"), "utf8")).toBe("saved\n");
+
+    const second = await ledger.submit(
+      {
+        requester: {
+          principalId: "fixture-agent",
+          agentId: "fixture-agent",
+          sessionId,
+          displayName: "Fixture Agent",
+        },
+        module: "fixture-notes",
+        operation: "write",
+        access: "write",
+        reversibility: "reversible",
+        authorityFence: "fixture-grant:1",
+        idempotencyKey: "fixture-turn:1/tool:2/operation:0",
+        inputJson: '{"text":"saved again"}',
+      },
+      effect,
+    );
+    if (second.kind !== "pending_approval")
+      throw new Error("Fixture did not stage its second approval");
+    const secondPresented = await local.presentApproval(
+      sessionId,
+      second,
+      capability,
+      {
+        command: "notes read",
+        cwd: root,
+        justification: "Read blocked",
+        prefix: ["notes", "read"],
+      },
+      (selected) => {
+        ruleIntent = selected === "prefix";
+      },
+    );
+    if (secondPresented.kind !== "presented")
+      throw new Error("Local host did not present its second ledger record");
+    const secondSlot = (await raw.read()).extensions[
+      mcpFormApprovalContract.id
+    ];
+    if (secondSlot?.status !== "running")
+      throw new Error("Local approval projection unavailable");
+    const secondProjection = Schema.decodeUnknownSync(
+      mcpFormApprovalContract.projection.schema,
+    )(secondSlot.value);
+    const secondForm = secondProjection.pending[0];
+    if (secondForm === undefined)
+      throw new Error("Missing second projected approval");
+    expect(
+      await session.extension(mcpFormApprovalContract.id).call("answer", {
+        id: secondForm.id,
+        decision: "always-allow",
+        expectedRevision: secondForm.approval.record.revision,
+      }),
+    ).toMatchObject({
+      kind: "answered",
+      view: { record: { recordId: second.recordId, state: "applied" } },
+    });
+    expect(rules.list()).toEqual([["notes", "write"]]);
+    expect(order).toEqual(["dispatch", "rule", "dispatch"]);
   } finally {
     await watch?.close();
     attachment.close();
@@ -185,4 +255,15 @@ it("the selected Session presents the real record and only a live host-bound UI 
     database.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+it("the Local form answer schema rejects an omitted or unknown decision", () => {
+  const decodeAnswer = Schema.decodeUnknownSync(
+    mcpFormApprovalContract.commands.answer.input,
+  );
+  const valid = { id: "form-1", expectedRevision: 1 };
+  expect(() => decodeAnswer(valid)).toThrow();
+  expect(() =>
+    decodeAnswer({ ...valid, decision: "approve-everything" }),
+  ).toThrow();
 });
