@@ -17,7 +17,7 @@ import {
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
-import { waitForAgentTerminal } from "@fungi.computer/shiitake/agent-control";
+import { waitForAgentSettlement } from "@fungi.computer/shiitake/agent-control";
 import { capturePrivateLocalConfigRoot } from "../dist/private-local-config-root.js";
 import { LocalSandboxUnavailable } from "../dist/private-local-containment.js";
 import type { LocalAgentControlDirectory } from "../dist/private-local-agent-control.js";
@@ -36,8 +36,12 @@ afterEach(async () => {
   );
 });
 
+// Each case boots a maker and child runtime host and runs Python under the real
+// fungi-bwrap sandbox: 1.6-2.0 s idle on hel1, and past 5.4 s under a batch
+// gate's turbo load, where it crossed Vitest's 5 s default (batches 2112,
+// 2114). The timeout is sized to that measured cost.
 it.runIf(process.platform === "linux").each([false, true])(
-  "a real child inherits its maker's folder and persisted requirement (%s)",
+  "a real child inherits its maker's folder and persisted permission mode (%s)",
   async (required) => {
     // Outside /tmp: reading the existing host sentinel must succeed before
     // its read-only write refusal can establish the child's folder ceiling.
@@ -67,6 +71,7 @@ it.runIf(process.platform === "linux").each([false, true])(
     for (const name of [
       "fungi-bwrap",
       "fungi-seccomp.bpf",
+      "fungi-seccomp-workspace.bpf",
       "fungi-apply-patch",
     ])
       await copyFile(
@@ -90,9 +95,13 @@ it.runIf(process.platform === "linux").each([false, true])(
       `assert pathlib.Path.cwd() == pathlib.Path(${JSON.stringify(folder)})`,
       `outside = pathlib.Path(${JSON.stringify(outside)})`,
       "assert outside.read_text() == 'host sentinel'",
-      "try: outside.write_text('escaped')",
-      "except OSError as error: assert error.errno in (errno.EROFS, errno.EACCES)",
-      "else: raise AssertionError('child broadened its writable folder')",
+      ...(required
+        ? [
+            "try: outside.write_text('escaped')",
+            "except OSError as error: assert error.errno in (errno.EROFS, errno.EACCES)",
+            "else: raise AssertionError('child broadened its writable folder')",
+          ]
+        : ["outside.write_text('escaped')"]),
       "pathlib.Path('child-only').write_text('contained child')",
     ].join("\n");
     let modelCalls = 0;
@@ -121,7 +130,7 @@ it.runIf(process.platform === "linux").each([false, true])(
           invocationRoot: root,
           configRoot,
           folder: "agent",
-          requireSandbox: required,
+          mode: required ? "workspace" : "full-access",
           providerId: "child-sandbox-proof",
           modelId: "child-model",
         },
@@ -168,7 +177,7 @@ it.runIf(process.platform === "linux").each([false, true])(
       expect(readPrivateLocalAgentProfile(store.databasePath)).toMatchObject({
         createdBy: makerId,
         folder: "agent",
-        requireSandbox: required,
+        mode: required ? "workspace" : "full-access",
       });
       const selectedChild = await owners.select({
         invocationRoot: root,
@@ -181,17 +190,19 @@ it.runIf(process.platform === "linux").each([false, true])(
           delivery: "followUp",
           text: "Run the child Computer proof.",
         });
-        const terminal = await waitForAgentTerminal(
+        const terminal = await waitForAgentSettlement(
           selectedChild.session,
           accepted.commandId,
           3_000,
           new AbortController().signal,
-        );
+        ).then(({ terminal }) => terminal);
         expect(terminal).toMatchObject({ outcome: "completed" });
         expect(await readFile(join(folder, "child-only"), "utf8")).toBe(
           "contained child",
         );
-        expect(await readFile(outside, "utf8")).toBe("host sentinel");
+        expect(await readFile(outside, "utf8")).toBe(
+          required ? "host sentinel" : "escaped",
+        );
         expect(modelCalls).toBe(2);
       } finally {
         selectedChild.release();
@@ -205,15 +216,15 @@ it.runIf(process.platform === "linux").each([false, true])(
       if (required) {
         await expect(reopening).rejects.toBeInstanceOf(LocalSandboxUnavailable);
         await expect(reopening).rejects.toMatchObject({
-          reason: { kind: "missing-artifact" },
+          reason: { kind: "install" },
         });
       } else {
         const reopened = await reopening;
         try {
           expect(reopened.sandboxStatus()).toMatchObject({
-            state: "unavailable",
-            requireSandbox: false,
-            reason: { kind: "missing-artifact" },
+            mode: "full-access",
+            available: false,
+            reason: { kind: "install" },
           });
         } finally {
           await reopened.close();
@@ -224,4 +235,5 @@ it.runIf(process.platform === "linux").each([false, true])(
       await owners?.close();
     }
   },
+  20_000,
 );

@@ -41,6 +41,8 @@ function fakeSession(label: string) {
   };
   const session: ShiitakeSession = {
     address: "fixture://" + label,
+    readSettlement: () =>
+      Promise.reject(new Error("settlement is unused in this routing proof")),
     withdraw: () =>
       Promise.reject(new Error("withdraw is unused in this routing proof")),
     latestPending: () =>
@@ -86,10 +88,10 @@ function owner(name: string, closed: string[]): PrivateLocalRuntimeHost {
     setArchived: () => {
       throw new Error("Unexpected archive write");
     },
-    setRequireSandbox: () => {
+    setMode: () => {
       throw new Error("Unexpected sandbox requirement write");
     },
-    sandboxStatus: () => ({ state: "available", requireSandbox: false }),
+    sandboxStatus: () => ({ mode: "workspace", available: true }),
     assertModelReady: () =>
       Promise.reject(new Error("Unexpected model admission")),
     agentId: "fixture-" + name,

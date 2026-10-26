@@ -68,55 +68,62 @@ async function turnFailure(
     );
     const result = await stream.result();
     expect(result.stopReason).toBe("error");
-    expect(acquisition.failureReason?.(result)).toBe(result.errorMessage);
+    const diagnostic = acquisition.failureReason?.(result);
+    const providerError = acquisition.providerError?.(result);
+    expect(diagnostic).not.toContain(bodyMarker);
+    expect(diagnostic?.length).toBeLessThanOrEqual(200);
     expect(requests).toEqual(["https://api.openai.com/v1/responses"]);
-    return result;
+    // The turn's errorMessage is the safe reason; provider prose is a
+    // separate fact handed only to the turn recorder.
+    expect(result.errorMessage).toBe(diagnostic);
+    return { result, diagnostic, providerError };
   } finally {
     await acquisition.release();
   }
 }
 
 it.each([400, 401, 403])(
-  "OpenAI HTTP %i rejection carries only its typed status",
+  "OpenAI HTTP %i rejection keeps Pi text on the turn but only its typed status in the diagnostic",
   async (status) => {
-    const result = await turnFailure(status, { message: bodyMarker });
-    expect(result.errorMessage).toBe(
+    const { providerError, diagnostic } = await turnFailure(status, {
+      message: bodyMarker,
+    });
+    expect(diagnostic).toBe(
       `openai rejected the model request (provider_rejected, HTTP ${String(status)}). Check /login or choose another model with /model.`,
     );
+    expect(providerError).toContain(bodyMarker);
   },
 );
 
 it("a Sign in with ChatGPT usage limit reaches the turn as the typed usage-limit-reached reason", async () => {
-  const result = await turnFailure(429, {
+  const { result, providerError, diagnostic } = await turnFailure(429, {
     code: "subscription_sharing_usage_limit_exceeded",
     message: bodyMarker,
   });
-  expect(result.errorMessage).toBe(
+  expect(diagnostic).toBe(
     "openai usage limit reached (usage-limit-reached). Check ChatGPT Settings > Usage, then try again later.",
   );
-  const serialized = JSON.stringify(result);
-  expect(serialized.includes(bodyMarker)).toBe(false);
+  expect(providerError).toContain(bodyMarker);
   // A usage limit resets after hours: the turn must fail once, not retry.
   expect(isRetryableAssistantError(result)).toBe(false);
 });
 
 it("a throttling 429 stays the retryable service-unavailable reason", async () => {
-  const result = await turnFailure(429, {
+  const { providerError, diagnostic } = await turnFailure(429, {
     code: "rate_limit_exceeded",
     message: "Rate limit reached for requests",
   });
-  expect(result.errorMessage).toBe(
-    "openai service unavailable. Try again shortly.",
-  );
+  expect(diagnostic).toBe("openai service unavailable. Try again shortly.");
+  expect(providerError).toContain("Rate limit reached for requests");
 });
 
 it("any other 429 stays provider_rejected HTTP 429", async () => {
-  const result = await turnFailure(429, {
+  const { providerError, diagnostic } = await turnFailure(429, {
     code: "insufficient_quota",
     message: bodyMarker,
   });
-  expect(result.errorMessage).toBe(
+  expect(diagnostic).toBe(
     "openai rejected the model request (provider_rejected, HTTP 429). Check /login or choose another model with /model.",
   );
-  expect(JSON.stringify(result).includes(bodyMarker)).toBe(false);
+  expect(providerError).toContain(bodyMarker);
 });

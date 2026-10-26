@@ -6,6 +6,7 @@ export declare const nativeDigests: Readonly<
       patch: string;
       bwrap?: string;
       seccomp?: string;
+      seccompWorkspace?: string;
     }>
   >
 >;

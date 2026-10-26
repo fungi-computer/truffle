@@ -33,6 +33,8 @@ it("the selected Session presents the real record and only a live host-bound UI 
     home: { kind: "local", id: "fixture-local" },
     now: () => 10,
   });
+  const order: string[] = [];
+  let ruleIntent = false;
   let actor: ApprovalAnswerer = {
     kind: "human",
     memberId: "fixture-owner",
@@ -55,6 +57,7 @@ it("the selected Session presents the real record and only a live host-bound UI 
         authorityFence: record.authorityFence,
       }),
     dispatch: async ({ input }) => {
+      order.push("dispatch");
       const { text } = Schema.decodeUnknownSync(
         Schema.Struct({ text: Schema.String }),
       )(input);
@@ -65,6 +68,7 @@ it("the selected Session presents the real record and only a live host-bound UI 
   const capability = ledger.capability({
     actor: () => Promise.resolve(actor),
     decision: async (recordId) => {
+      if (ruleIntent) order.push("rule");
       await ledger.apply(recordId, effect);
     },
   });
@@ -92,6 +96,15 @@ it("the selected Session presents the real record and only a live host-bound UI 
     sessionId,
     submitted,
     capability,
+    {
+      command: "notes write",
+      cwd: root,
+      justification: "Write blocked",
+      prefix: ["notes", "write"],
+    },
+    (selected) => {
+      ruleIntent = selected === "prefix";
+    },
   );
   if (presented.kind !== "presented")
     throw new Error("Local host did not present the ledger record");
@@ -120,6 +133,12 @@ it("the selected Session presents the real record and only a live host-bound UI 
       await raw.extension(mcpFormApprovalContract.id).call("answer", answer),
     ).toEqual({ kind: "refused", reason: "not-attached" });
     expect(
+      await raw.extension(mcpFormApprovalContract.id).call("answer", {
+        ...answer,
+        decision: "always-allow",
+      }),
+    ).toEqual({ kind: "refused", reason: "not-attached" });
+    expect(
       await session
         .extension(mcpFormApprovalContract.id)
         .call("answer", answer),
@@ -128,6 +147,7 @@ it("the selected Session presents the real record and only a live host-bound UI 
     expect(
       await session.extension(mcpFormApprovalContract.id).call("answer", {
         ...answer,
+        decision: "always-allow",
         expectedRevision: answer.expectedRevision + 1,
       }),
     ).toEqual({ kind: "refused", reason: "stale-revision" });
@@ -137,19 +157,20 @@ it("the selected Session presents the real record and only a live host-bound UI 
     expect(
       await session
         .extension(mcpFormApprovalContract.id)
-        .call("answer", answer),
+        .call("answer", { ...answer, decision: "always-allow" }),
     ).toEqual({ kind: "refused", reason: "not-eligible" });
     expect(ledger.get(submitted.recordId)?.state).toBe("pending");
     actor = eligibleActor;
     expect(
       await session
         .extension(mcpFormApprovalContract.id)
-        .call("answer", answer),
+        .call("answer", { ...answer, decision: "always-allow" }),
     ).toMatchObject({
       kind: "answered",
       view: { record: { recordId: submitted.recordId, state: "applied" } },
     });
     expect(await readFile(join(root, "effects.txt"), "utf8")).toBe("saved\n");
+    expect(order).toEqual(["rule", "dispatch"]);
     expect(
       await session
         .extension(mcpFormApprovalContract.id)

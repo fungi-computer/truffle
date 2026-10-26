@@ -15,13 +15,13 @@ import {
   localLinuxSandboxPayload,
   verifyLocalLinuxSandboxPayload,
 } from "../src/private-local-bwrap.js";
-import { sandboxPolicy } from "../src/private-local-sandbox-policy.js";
 
 const original = "#!/bin/sh\nexit 0\n";
 const filterBytes = "FILTER_DIGEST_FIXTURE";
 const expected = {
   bwrap: createHash("sha256").update(original).digest("hex"),
   seccomp: createHash("sha256").update(filterBytes).digest("hex"),
+  seccompWorkspace: createHash("sha256").update(filterBytes).digest("hex"),
 };
 const roots: string[] = [];
 afterEach(async () => {
@@ -40,19 +40,28 @@ async function fixture() {
   const executable = join(bin, "fungi-bwrap");
   await writeFile(executable, original, { mode: 0o700 });
   await writeFile(join(bin, "fungi-seccomp.bpf"), filterBytes);
+  await writeFile(join(bin, "fungi-seccomp-workspace.bpf"), filterBytes);
   return { root, project, executable, bin };
 }
 
-function policy(project: string) {
-  return sandboxPolicy(project, join(project, "docs"));
-}
+it("verifies Workspace's independently pinned filter", async () => {
+  const { executable, project, bin } = await fixture();
+  expect(
+    verifyLocalLinuxSandboxPayload(executable, project, expected)
+      .seccompWorkspace,
+  ).toEqual(Buffer.from(filterBytes));
+  await writeFile(join(bin, "fungi-seccomp-workspace.bpf"), "changed");
+  expect(() =>
+    verifyLocalLinuxSandboxPayload(executable, project, expected),
+  ).toThrow("digest mismatch");
+});
 
 it("missing optional package refuses without a PATH fallback", async () => {
   const { executable, project, bin } = await fixture();
   await writeFile(join(bin, "bwrap"), original, { mode: 0o700 });
   vi.stubEnv("FUNGI_BUNDLED_CLI", join(bin, "cli.cjs"));
   vi.stubEnv("PATH", bin);
-  expect(() => localLinuxSandboxPayload(policy(project))).toThrow(
+  expect(() => localLinuxSandboxPayload(project)).toThrow(
     "optional dependencies enabled",
   );
   expect(executable).toContain("fungi-bwrap");
@@ -61,12 +70,12 @@ it("missing optional package refuses without a PATH fallback", async () => {
 it("uses built digests rather than sidecars and returns exactly verified bytes", async () => {
   const { executable, project } = await fixture();
   expect(
-    verifyLocalLinuxSandboxPayload(executable, policy(project), expected)
+    verifyLocalLinuxSandboxPayload(executable, project, expected)
       .executableBytes,
   ).toEqual(Buffer.from(original));
   await writeFile(executable, "#!/bin/sh\nexit 1\n");
   expect(() =>
-    verifyLocalLinuxSandboxPayload(executable, policy(project), expected),
+    verifyLocalLinuxSandboxPayload(executable, project, expected),
   ).toThrow("digest mismatch");
 });
 
@@ -78,7 +87,7 @@ it("rejects a launcher in a sibling Agent folder, even if selected folder is doc
   expect(() =>
     verifyLocalLinuxSandboxPayload(
       join(sibling, "fungi-bwrap"),
-      policy(project),
+      project,
       expected,
     ),
   ).toThrow(/Agent project/);
@@ -99,7 +108,7 @@ it("rejects host launcher and its old sidecar rewritten through Agent hardlinks 
     createHash("sha256").update(altered).digest("hex"),
   );
   expect(() =>
-    verifyLocalLinuxSandboxPayload(executable, policy(project), expected),
+    verifyLocalLinuxSandboxPayload(executable, project, expected),
   ).toThrow(/digest mismatch/);
 });
 
@@ -110,7 +119,7 @@ it("refuses symlinked filter inside project and inside external Git administrati
   await writeFile(join(project, "docs", "filter"), filterBytes);
   await symlink(join(project, "docs", "filter"), filter);
   expect(() =>
-    verifyLocalLinuxSandboxPayload(executable, policy(project), expected),
+    verifyLocalLinuxSandboxPayload(executable, project, expected),
   ).toThrow(/Agent project/);
   await rm(filter);
   const admin = join(root, "bare-repository");
@@ -119,7 +128,7 @@ it("refuses symlinked filter inside project and inside external Git administrati
   await writeFile(join(admin, "filter"), filterBytes);
   await symlink(join(admin, "filter"), filter);
   expect(() =>
-    verifyLocalLinuxSandboxPayload(executable, policy(project), expected),
+    verifyLocalLinuxSandboxPayload(executable, project, expected),
   ).toThrow(/Git-admin/);
 });
 
@@ -127,17 +136,17 @@ it("uses readable installed bytes without their execute bit, but refuses missing
   const { executable, project, bin } = await fixture();
   await chmod(executable, 0o600);
   expect(
-    verifyLocalLinuxSandboxPayload(executable, policy(project), expected)
+    verifyLocalLinuxSandboxPayload(executable, project, expected)
       .executableBytes,
   ).toEqual(Buffer.from(original));
   await rm(executable);
   expect(() =>
-    verifyLocalLinuxSandboxPayload(executable, policy(project), expected),
+    verifyLocalLinuxSandboxPayload(executable, project, expected),
   ).toThrow("is missing");
   await writeFile(executable, original, { mode: 0o700 });
   await rm(join(bin, "fungi-seccomp.bpf"));
   expect(() =>
-    verifyLocalLinuxSandboxPayload(executable, policy(project), expected),
+    verifyLocalLinuxSandboxPayload(executable, project, expected),
   ).toThrow("is missing");
 });
 
@@ -145,11 +154,11 @@ it("refuses changed filter bytes with typed artifact reason", async () => {
   const { executable, project, bin } = await fixture();
   await writeFile(join(bin, "fungi-seccomp.bpf"), "changed filter");
   expect(() =>
-    verifyLocalLinuxSandboxPayload(executable, policy(project), expected),
+    verifyLocalLinuxSandboxPayload(executable, project, expected),
   ).toThrow(
     expect.objectContaining({
       name: "LocalBwrapUnavailable",
-      reason: "digest-mismatch",
+      reason: "install",
     }),
   );
 });

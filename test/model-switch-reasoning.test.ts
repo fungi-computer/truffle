@@ -500,14 +500,14 @@ it.each([
   {
     raw: "synthetic-private-provider-detail",
     message:
-      "openai rejected the model request. Check /login or choose another model with /model.",
+      "openai model request failed without a provider rejection. Retry the request.",
     retry: false,
     overflow: false,
   },
   {
     raw: "429 rate limit synthetic-private-provider-detail",
     message:
-      "openai rejected the model request. Check /login or choose another model with /model.",
+      "openai model request failed without a provider rejection. Retry the request.",
     retry: false,
     overflow: false,
   },
@@ -563,6 +563,52 @@ it.each([
     );
   },
 );
+
+it("retains the provider's partial content and usage on error", async () => {
+  const models = createModels();
+  models.setProvider(openaiProvider());
+  vi.spyOn(models, "checkAuth").mockResolvedValue({
+    type: "oauth",
+    source: "OpenAI login",
+  });
+  const partial = {
+    ...fauxAssistantMessage("saved partial"),
+    usage: { ...fauxAssistantMessage("").usage, output: 73 },
+  };
+  vi.spyOn(models, "streamSimple").mockImplementation(() => {
+    const stream = createAssistantMessageEventStream();
+    stream.push({ type: "start", partial });
+    const error = fauxAssistantMessage("", {
+      stopReason: "error",
+      errorMessage: "upstream connection lost",
+    });
+    stream.push({ type: "error", reason: "error", error });
+    stream.end(error);
+    return stream;
+  });
+  const source = createPrivateLocalModelSource(
+    models,
+    "openai",
+    "gpt-6-astra",
+    "partial",
+  );
+  const acquired = await source.acquire({
+    sessionId: "one",
+    preference: null,
+    signal: new AbortController().signal,
+  });
+  try {
+    if (acquired.stream === undefined) throw new Error("Missing stream");
+    const result = await (
+      await acquired.stream(acquired.model, normalizeContext({ messages: [] }))
+    ).result();
+    expect(result.content).toEqual(partial.content);
+    expect(result.usage.output).toBe(73);
+    expect(result.errorMessage).toMatch(/failed without a provider rejection/u);
+  } finally {
+    await acquired.release();
+  }
+});
 
 it("Agent creation stores its name and reports the requested model, thinking level and working directory", async () => {
   const root = await mkdtemp(join(tmpdir(), "local-create-profile-"));

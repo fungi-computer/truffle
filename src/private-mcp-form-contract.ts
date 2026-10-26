@@ -47,6 +47,15 @@ export type McpFormAnswerResult = typeof answerResult.Type;
 const McpFormPendingSchema = Schema.Struct({
   id: Schema.String,
   approval: ApprovalViewSchema,
+  review: Schema.optionalKey(
+    Schema.Struct({
+      command: Schema.String,
+      cwd: Schema.String,
+      justification: Schema.String,
+      prefix: Schema.optionalKey(Schema.Array(Schema.String)),
+      warning: Schema.optionalKey(Schema.String),
+    }),
+  ),
 });
 
 /** The existing Session extension slot carries only display-safe form data. */
@@ -57,7 +66,7 @@ export const mcpFormApprovalContract = {
       scope: "session",
       input: Schema.Struct({
         id: Schema.String,
-        decision: ApprovalAnswerInputSchema.fields.decision,
+        decision: Schema.Literals(["approve", "deny", "always-allow"]),
         expectedRevision: ApprovalAnswerInputSchema.fields.expectedRevision,
       }),
       output: answerResult,

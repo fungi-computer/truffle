@@ -12,6 +12,7 @@ import { memoryHost, fauxModelSource } from "@fungi.computer/shiitake/testing";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { createPrivateSqliteOwner } from "../src/private-sqlite-owner.js";
 import { createPrivateLocalDelegation } from "../src/private-local-delegation.js";
+import type { BirdDogMail } from "@fungi.computer/bird-dog";
 
 async function throughAgentTools(
   directory: AgentControlDirectory,
@@ -109,6 +110,8 @@ it.each<{
             mail.meta === undefined
               ? target.agent
               : target.agent.withMeta(mail.meta);
+          if (mail.to.sessionId === undefined)
+            throw new Error("Local follow-up mail must name its Session");
           const accepted = await agent
             .session(mail.to.sessionId)
             .send(mail.content, { requestId: mail.key, delivery: "followUp" });
@@ -281,11 +284,14 @@ it.each(["steer", "followUp"] as const)(
           }),
       },
       routing: {
-        deliver: (mail: import("@fungi.computer/bird-dog").BirdDogMail) =>
-          target.agent.session(mail.to.sessionId).send(mail.content, {
+        deliver: (mail: import("@fungi.computer/bird-dog").BirdDogMail) => {
+          if (mail.to.sessionId === undefined)
+            throw new Error("Local follow-up mail must name its Session");
+          return target.agent.session(mail.to.sessionId).send(mail.content, {
             requestId: mail.key,
             delivery: "followUp",
-          }),
+          });
+        },
         readSettlement: () => Promise.resolve(undefined),
       },
       accept: () => Promise.reject(new Error("This test sends no replies")),
@@ -338,3 +344,164 @@ it.each(["steer", "followUp"] as const)(
     }
   },
 );
+
+it("recalls an accepted sessionless follow-up by its returned Session", async () => {
+  const senderDatabase = new DatabaseSync(":memory:");
+  const targetDatabase = new DatabaseSync(":memory:");
+  const target = await memoryHost({
+    owner: createPrivateSqliteOwner(targetDatabase),
+  });
+  const signal = new AbortController().signal;
+  const directory: AgentControlDirectory = {
+    list: () =>
+      Promise.resolve([
+        { agentId: "parent", name: "Parent" },
+        { agentId: "child", name: "Child" },
+      ]),
+    open: () =>
+      Promise.resolve({
+        agent: target.agent,
+        release: () => Promise.resolve(),
+      }),
+  };
+  const delegation = createPrivateLocalDelegation({
+    agentId: "parent",
+    storage: createPrivateSqliteOwner(senderDatabase),
+    directory,
+    routing: {
+      deliver: async (mail) => {
+        if (mail.to.sessionId !== undefined)
+          throw new Error("This test sends sessionless work");
+        const sessionId = await target.agent.createSession(mail.key);
+        const accepted = await target.agent
+          .session(sessionId)
+          .send(mail.content, {
+            requestId: mail.key,
+            delivery: "followUp",
+          });
+        return { ...accepted, sessionId };
+      },
+      readSettlement: () => Promise.resolve(undefined),
+    },
+    accept: () => Promise.reject(new Error("This test receives no replies")),
+  });
+  try {
+    const receipt = await delegation.send(
+      {
+        agentId: "child",
+        requestId: "sessionless-request",
+        text: "Work once",
+        delivery: "followUp",
+      },
+      "parent-main",
+      signal,
+      { toolCallId: "call-1", sendIndex: 0 },
+    );
+    if (receipt.status !== "accepted")
+      throw new Error("Sessionless Local work was not accepted");
+    if (receipt.sessionId === undefined)
+      throw new Error("Sessionless acceptance omitted its Session");
+
+    expect(
+      await delegation.recall(
+        {
+          agentId: "child",
+          sessionId: receipt.sessionId,
+          requestId: "sessionless-request",
+        },
+        "parent-main",
+        signal,
+      ),
+    ).toMatchObject({ status: "accepted" });
+    expect(
+      (await target.agent.session(receipt.sessionId).read()).pending.prompts,
+    ).toEqual([]);
+  } finally {
+    await target.close();
+    senderDatabase.close();
+    targetDatabase.close();
+  }
+});
+
+it("authenticates a schema-valid sessionless undeliverable reply against frozen mail", async () => {
+  const database = new DatabaseSync(":memory:");
+  let frozenMail: BirdDogMail | undefined;
+  const accepted: BirdDogMail[] = [];
+  const delegation = createPrivateLocalDelegation({
+    agentId: "parent",
+    storage: createPrivateSqliteOwner(database),
+    directory: {
+      list: () =>
+        Promise.resolve([
+          { agentId: "parent", name: "Parent" },
+          { agentId: "child", name: "Child" },
+        ]),
+      open: () => Promise.reject(new Error("No Session is opened")),
+    },
+    routing: {
+      deliver: (mail) => {
+        frozenMail = mail;
+        return Promise.resolve({
+          status: "held",
+          reason: "recipient_offline",
+          message: "waiting: recipient offline",
+        });
+      },
+      readSettlement: () => Promise.resolve(undefined),
+    },
+    accept: (mail) => {
+      accepted.push(mail);
+      return Promise.resolve({
+        status: "accepted",
+        commandId: "reply-command",
+        sessionId: "parent-session",
+      });
+    },
+  });
+  try {
+    await delegation.send(
+      {
+        agentId: "child",
+        requestId: "sessionless-offline",
+        text: "Work",
+        delivery: "followUp",
+      },
+      "parent-session",
+      new AbortController().signal,
+      { toolCallId: "call-1", sendIndex: 0 },
+    );
+    if (frozenMail === undefined)
+      throw new Error("Outgoing mail was not frozen");
+    const reply: BirdDogMail = {
+      key: `${frozenMail.key}:reply:0`,
+      to: frozenMail.from,
+      from: { kind: "agent", agentId: "child" },
+      replyTo: [],
+      content: "Not delivered: recipient offline.",
+      createdAt: 1,
+      reply: { outcome: "undeliverable", reason: "recipient_offline" },
+    };
+    await expect(delegation.receive(reply)).resolves.toMatchObject({
+      status: "accepted",
+      commandId: "reply-command",
+    });
+    expect(accepted).toHaveLength(1);
+    expect(accepted[0]).toMatchObject(reply);
+
+    await expect(
+      delegation.receive({
+        ...reply,
+        key: "foreign-mail:reply:0",
+      }),
+    ).rejects.toThrow("Local reply does not match work this Agent sent");
+    await expect(
+      delegation.receive({
+        ...reply,
+        from: { kind: "agent", agentId: "foreign-agent" },
+      }),
+    ).rejects.toThrow("Local mail sender is outside this project");
+    expect(accepted).toHaveLength(1);
+  } finally {
+    database.close();
+  }
+});

@@ -18,11 +18,21 @@ import {
   type LocalUiAttachment,
 } from "./private-local-ui-attachment.js";
 
+export type LocalApprovalReview = {
+  command: string;
+  cwd: string;
+  justification: string;
+  prefix?: readonly string[];
+  warning?: string;
+};
+
 type Pending = {
   sessionId: string;
   approval: ApprovalView;
   approvals: Approvals;
   answering: boolean;
+  review: LocalApprovalReview | undefined;
+  alwaysAllow: ((selected: "prefix" | false) => void) | undefined;
 };
 
 const maximumPendingForms = 100;
@@ -70,12 +80,24 @@ export function createMcpFormSession() {
                   return { kind: "refused", reason: "not-attached" };
                 // Session commit and live UI recheck precede the canonical
                 // decision. Its bound host, never MCP accept, owns apply.
-                return await entry.approvals.answer({
+                if (
+                  input.decision === "always-allow" &&
+                  entry.alwaysAllow === undefined
+                )
+                  return { kind: "refused", reason: "not-pending" };
+                if (input.decision === "always-allow")
+                  entry.alwaysAllow?.("prefix");
+                const result = await entry.approvals.answer({
                   recordId: entry.approval.record.recordId,
-                  decision: input.decision,
+                  decision:
+                    input.decision === "always-allow"
+                      ? "approve"
+                      : input.decision,
                   expectedRevision: input.expectedRevision,
                 });
+                return result;
               } finally {
+                entry.alwaysAllow?.(false);
                 entry.answering = false;
                 const view = await entry.approvals.get({
                   recordId: entry.approval.record.recordId,
@@ -102,7 +124,12 @@ export function createMcpFormSession() {
       read: (_context, sessionId) => ({
         pending: [...pending.entries()]
           .filter(([, entry]) => entry.sessionId === sessionId)
-          .map(([id, entry]) => ({ id, approval: entry.approval })),
+          .map(([id, entry]) => {
+            const item = { id, approval: entry.approval };
+            return entry.review === undefined
+              ? item
+              : { ...item, review: entry.review };
+          }),
       }),
     },
   });
@@ -114,6 +141,8 @@ export function createMcpFormSession() {
     sessionId: string,
     submitted: PendingApproval,
     approvals: Approvals,
+    review?: Pending["review"],
+    alwaysAllow?: (selected: "prefix" | false) => void,
   ) {
     const approval = await approvals.get({ recordId: submitted.recordId });
     if (
@@ -130,13 +159,22 @@ export function createMcpFormSession() {
       const [id, entry] = existing;
       entry.approval = approval;
       entry.approvals = approvals;
+      entry.review = review;
+      entry.alwaysAllow = alwaysAllow;
       await publish?.(sessionId);
       return { kind: "presented", id } as const;
     }
     if (pending.size >= maximumPendingForms)
       return { kind: "refused", reason: "capacity" } as const;
     const id = correlationKey();
-    pending.set(id, { sessionId, approval, approvals, answering: false });
+    pending.set(id, {
+      sessionId,
+      approval,
+      approvals,
+      answering: false,
+      review,
+      alwaysAllow,
+    });
     await publish?.(sessionId);
     return { kind: "presented", id } as const;
   }

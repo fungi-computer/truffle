@@ -8,13 +8,13 @@ import {
 } from "@fungi.computer/bird-dog/effect";
 import * as Effect from "effect/Effect";
 import type { PrivateSqliteDatabase } from "./private-sqlite-owner.js";
-import type { Accepted } from "@fungi.computer/shiitake";
+import type { DelegationReceipt } from "@fungi.computer/shiitake";
 import { messageAuthor } from "@fungi.computer/agar/agents";
 import { z } from "zod";
 
 export type PrivateLocalMailOptions = Readonly<{
   /** Admit one reply at its addressed Agent; a rejection retries later. */
-  deliver: (mail: BirdDogMail) => Promise<Accepted>;
+  deliver: (mail: BirdDogMail) => Promise<DelegationReceipt>;
   scheduleWake?: (at: number) => void;
   now?: () => number;
 }>;

@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import { parseDelegationReceipt } from "@fungi.computer/shiitake/client";
 import type {
   Accepted,
   AbortCommand,
@@ -15,6 +16,7 @@ import type {
   TitleCommand,
 } from "@fungi.computer/shiitake";
 import { logEvent } from "./log-event.js";
+import { modeWithinCeiling } from "./private-local-permission-mode.js";
 import { createPrivateModels } from "./local-models.js";
 import {
   capturePrivateLocalConfigRoot,
@@ -85,7 +87,6 @@ import {
   machineAgentRequestSchema,
   machineDirectorySchema,
 } from "@fungi.computer/seam/machine-link-protocol";
-import { parseAccepted } from "@fungi.computer/shiitake/client";
 import { commandSettlementSchema } from "@fungi.computer/shiitake/fleet";
 import { BirdDogMailSchema } from "@fungi.computer/bird-dog/effect";
 
@@ -98,7 +99,7 @@ export type LocalServiceRuntime = Pick<
   | "effectiveModel"
   | "setModel"
   | "setArchived"
-  | "setRequireSandbox"
+  | "setMode"
   | "sandboxStatus"
   | "pendingDelegation"
   | "assertModelReady"
@@ -157,7 +158,10 @@ type HeldRuntime = Readonly<{
 // Reopen inputs only. Credentials remain with Local's account custodian.
 const recoveryOwnerSchema = selectionSchema
   .omit({ clientPath: true, sessionId: true, uiAttachmentLifetime: true })
-  .extend({ databasePath: z.string().min(1) });
+  .extend({
+    databasePath: z.string().min(1),
+    wakeAt: z.number().optional(),
+  });
 const decodeRecoveryFile = Schema.decodeUnknownResult(
   Schema.fromJsonString(Schema.Array(Schema.Unknown)),
 );
@@ -208,6 +212,14 @@ export function createLocalServiceOwners(
   /** Report only the classification, never the manifest or exception text. */
   onRecoveryDisabled: ServiceLogLifecycle["recoveryDisabled"] = () => undefined,
   configRoot: PrivateLocalConfigRoot = capturePrivateLocalConfigRoot(),
+  meshLinksFactory: typeof createLocalMeshLinks = createLocalMeshLinks,
+  onExecRuleMatch: NonNullable<
+    Parameters<typeof openPrivateLocalRuntimeHost>[0]["onExecRuleMatch"]
+  > = () => undefined,
+  /** Supplied by the listener after startup; individual Agents never close it. */
+  serviceNative?: () => NonNullable<
+    Parameters<typeof openPrivateLocalRuntimeHost>[0]["native"]
+  >,
 ) {
   const extensions =
     suppliedExtensions ?? localExtensions({ home: configRoot.home });
@@ -216,6 +228,34 @@ export function createLocalServiceOwners(
       ? undefined
       : resolve(recoveryDirectory, "owners.json");
   const recovery = new Map<string, z.infer<typeof recoveryOwnerSchema>>();
+  const wakes = new Map<string, z.infer<typeof recoveryOwnerSchema>>();
+  let wakeTimer: NodeJS.Timeout | undefined;
+  function scheduleWakes() {
+    if (wakeTimer !== undefined) clearTimeout(wakeTimer);
+    wakeTimer = undefined;
+    if (stopping || wakes.size === 0) return;
+    let earliest = Infinity;
+    for (const entry of wakes.values())
+      earliest = Math.min(earliest, entry.wakeAt ?? Infinity);
+    wakeTimer = setTimeout(
+      () => {
+        wakeTimer = undefined;
+        if (stopping) return;
+        const due = [...wakes.values()].filter(
+          (entry) => entry.wakeAt !== undefined && entry.wakeAt <= Date.now(),
+        );
+        for (const entry of due) {
+          wakes.delete(entry.databasePath);
+          void ownerFor(entry).catch((cause: unknown) => {
+            logEvent("service-owner.wake", cause);
+          });
+        }
+        scheduleWakes();
+      },
+      Math.min(2_147_483_647, Math.max(0, earliest - Date.now())),
+    );
+    wakeTimer.unref();
+  }
   let loadingRecovery: Promise<RecoveryLoad> | undefined;
   let saving = Promise.resolve();
   const emptySessions = new Map<string, Promise<string>>();
@@ -242,7 +282,7 @@ export function createLocalServiceOwners(
     }
     return undefined;
   }
-  const mesh = createLocalMeshLinks({
+  const mesh = meshLinksFactory({
     credentialPath: configRoot.credentialPath,
     receive: async (record, envelope) => {
       if (envelope.kind === "machineDirectory") {
@@ -315,14 +355,23 @@ export function createLocalServiceOwners(
         if (
           envelope.kind !== "agentMail" ||
           envelope.key !== mail.key ||
-          mail.to.agentId !== address.agentId ||
-          new TextEncoder().encode(JSON.stringify(mail)).byteLength > 256 * 1024
+          mail.to.agentId !== address.agentId
         )
           return "refused";
-        // Only select the physical store here. Never rewrite frozen addresses
-        // or bypass that runtime's own recipient/sender admission.
-        const receipt = await admitted(owner, () => owner.acceptMail(mail));
-        return { status: "accepted", receipt };
+        if (
+          mail.from.sessionId === undefined &&
+          !(
+            mail.replyTo.length === 0 && mail.reply?.outcome === "undeliverable"
+          )
+        )
+          return "refused";
+        const sessionlessAcceptance = mail.to.sessionId === undefined;
+        // Only select the physical store here. Never bypass that runtime's
+        // recipient/sender admission; request keys make acceptance replay-safe.
+        const command = await admitted(owner, () => owner.acceptMail(mail));
+        if (sessionlessAcceptance && command.sessionId === undefined)
+          throw new Error("Sessionless mail acceptance returned no Session");
+        return { status: "accepted", receipt: command };
       } finally {
         release();
       }
@@ -511,6 +560,7 @@ export function createLocalServiceOwners(
     );
     pending = pending.then(async (owner) => {
       roots.set(owner.runtime.databasePath, invocationRoot);
+      if (wakes.delete(owner.runtime.databasePath)) scheduleWakes();
       if (recoveryPath !== undefined) {
         const reference: z.infer<typeof recoveryOwnerSchema> = {
           invocationRoot,
@@ -791,9 +841,12 @@ export function createLocalServiceOwners(
         }
         let runtime: LocalServiceRuntime;
         let idle: boolean;
+        let wakeAt: number | null;
         try {
           ({ runtime } = await pending);
-          idle = await runtime.idle();
+          const state = await runtime.idle();
+          idle = state.idle;
+          wakeAt = state.wakeAt;
         } catch (cause) {
           // One unreadable Agent stays open; the sweep still checks the rest.
           logEvent("service-owner.read-idle", cause);
@@ -809,7 +862,7 @@ export function createLocalServiceOwners(
           idleCandidates.add(databasePath);
           continue;
         }
-        closed.push(releaseStore(databasePath, pending, runtime));
+        closed.push(releaseStore(databasePath, pending, runtime, wakeAt));
       }
       await Promise.all(closed);
     })().finally(() => {
@@ -818,10 +871,23 @@ export function createLocalServiceOwners(
     return sweeping;
   }
 
+  /** Forget empty Agents; retain a future wake for the next service owner. */
+  function rememberIdleWake(databasePath: string, wakeAt: number | null) {
+    const reference = recovery.get(databasePath);
+    if (wakeAt === null || reference === undefined) {
+      recovery.delete(databasePath);
+      return undefined;
+    }
+    const scheduled = { ...reference, wakeAt };
+    recovery.set(databasePath, scheduled);
+    return scheduled;
+  }
+
   function releaseStore(
     databasePath: string,
     pending: Promise<LocalServiceOwner>,
     runtime: LocalServiceRuntime,
+    wakeAt: number | null,
   ) {
     idleCandidates.delete(databasePath);
     released.add(runtime);
@@ -829,7 +895,7 @@ export function createLocalServiceOwners(
       if (value === pending) owners.delete(key);
     emptySessions.delete(databasePath);
     roots.delete(databasePath);
-    recovery.delete(databasePath);
+    const scheduled = rememberIdleWake(databasePath, wakeAt);
     const opened = openedByStore.get(databasePath);
     openedByStore.delete(databasePath);
     if (opened !== undefined) opening.delete(opened);
@@ -838,6 +904,10 @@ export function createLocalServiceOwners(
         await runtime.close();
       } catch (cause) {
         logEvent("service-owner.release-runtime", cause);
+      }
+      if (scheduled !== undefined && !stopping) {
+        wakes.set(databasePath, scheduled);
+        scheduleWakes();
       }
       await saveRecovery();
     })();
@@ -918,6 +988,26 @@ export function createLocalServiceOwners(
       selection.databasePath,
     );
     ensureRunning();
+    if (selection.mode !== undefined && databasePath !== undefined) {
+      const child = readPrivateLocalAgentProfile(databasePath);
+      if (child.createdBy !== null) {
+        const stores = await listPrivateLocalAgentStores(invocationRoot);
+        const creatorPath = stores.find(
+          (path) => basename(dirname(path)) === child.createdBy,
+        );
+        if (
+          creatorPath === undefined ||
+          !modeWithinCeiling(
+            selection.mode,
+            readPrivateLocalAgentProfile(creatorPath).mode,
+          )
+        )
+          throw new AgentCreateRefused(
+            "exceeds_creator",
+            "a created Agent cannot exceed its creator's permission mode",
+          );
+      }
+    }
     const fungiMcp =
       selection.fungiMcp === undefined
         ? undefined
@@ -953,11 +1043,14 @@ export function createLocalServiceOwners(
         invocationRoot,
         databasePath,
         // The host must persist/admit this BEFORE Shiitake can recover work.
-        requireSandbox: selection.requireSandbox,
+        mode: selection.mode,
         agentControl: projectControl ? directory(invocationRoot) : undefined,
         mail: projectControl ? mailRouting(invocationRoot) : undefined,
         meshAdmission,
+        onExecRuleMatch,
       };
+      if (serviceNative !== undefined)
+        options = { ...options, native: serviceNative() };
       if (fungiMcp !== undefined) options = { ...options, fungiMcp };
       const captured = configuration;
       if (captured !== undefined)
@@ -980,8 +1073,8 @@ export function createLocalServiceOwners(
       !sameFungiMcpConnection(owner.fungiMcp, fungiMcp)
     )
       throw new FungiMcpSelectionConflict();
-    if (!openingHere && selection.requireSandbox !== undefined)
-      owner.runtime.setRequireSandbox(selection.requireSandbox);
+    if (!openingHere && selection.mode !== undefined)
+      owner.runtime.setMode(selection.mode);
     return owner.runtime;
   }
 
@@ -1071,14 +1164,20 @@ export function createLocalServiceOwners(
             result.status === "refused"
           )
             throw new Error("Mesh recipient did not return command acceptance");
-          return parseAccepted(JSON.stringify(result.receipt));
+          return parseDelegationReceipt(JSON.stringify(result.receipt));
         }
         const { owner, release } = await control.owner(
           mail.to.agentId,
           new AbortController().signal,
         );
         try {
-          return await admitted(owner, () => owner.acceptMail(mail));
+          const receipt = await admitted(owner, () => owner.acceptMail(mail));
+          if (
+            mail.to.sessionId === undefined &&
+            receipt.sessionId === undefined
+          )
+            throw new Error("Sessionless mail acceptance returned no Session");
+          return receipt;
         } finally {
           release();
         }
@@ -1305,7 +1404,7 @@ export function createLocalServiceOwners(
             "the creating Agent is not in this Local project",
           );
         const creatorStore = dirname(creatorDatabase);
-        const sandbox = readPrivateLocalAgentProfile(creatorDatabase);
+        const creatorProfile = readPrivateLocalAgentProfile(creatorDatabase);
         try {
           await extensions.assertHeldByAgent(creatorStore, requested);
         } catch (error) {
@@ -1343,11 +1442,14 @@ export function createLocalServiceOwners(
               createRequestId: requestId,
               name,
               createdBy,
-              requireSandbox: sandbox.requireSandbox,
-              folder: sandbox.folder,
+              mode: creatorProfile.mode,
+              folder: creatorProfile.folder,
               agentControl: directory(invocationRoot),
               mail: mailRouting(invocationRoot),
+              onExecRuleMatch,
             };
+            if (serviceNative !== undefined)
+              options = { ...options, native: serviceNative() };
             if (model !== undefined)
               options = {
                 ...options,
@@ -1408,7 +1510,8 @@ export function createLocalServiceOwners(
       checkModel: async ({ agentId, sessionId }, signal) => {
         const { owner, release } = await admittedOwner(agentId, signal);
         try {
-          await owner.assertModelReady(sessionId, signal);
+          if (sessionId !== undefined)
+            await owner.assertModelReady(sessionId, signal);
         } finally {
           release();
         }
@@ -1441,6 +1544,7 @@ export function createLocalServiceOwners(
   function close(): Promise<void> {
     stopping = true;
     clearInterval(sweepTimer);
+    if (wakeTimer !== undefined) clearTimeout(wakeTimer);
     closing ??= (async () => {
       const meshResults = await Promise.allSettled([mesh.close()]);
       // End our observers before deciding which Agents have work to resume.
@@ -1484,8 +1588,11 @@ export function createLocalServiceOwners(
               const unused = () =>
                 !uses.has(databasePath) && !gates.has(databasePath);
               try {
-                if (unused() && (await owner.runtime.idle()) && unused())
-                  recovery.delete(databasePath);
+                if (unused()) {
+                  const state = await owner.runtime.idle();
+                  if (state.idle && unused())
+                    rememberIdleWake(databasePath, state.wakeAt);
+                }
               } catch (cause) {
                 logEvent("service-owner.read-idle", cause);
               }
@@ -1582,6 +1689,14 @@ export function createLocalServiceOwners(
     // failed owner so an unavailable project cannot prevent service startup.
     for (const selection of loaded.references) {
       if (stopping) break;
+      if (selection.wakeAt !== undefined && selection.wakeAt > Date.now()) {
+        // A client may already have opened this store while the manifest was
+        // loading. Its runtime now owns the wake; do not arm a second one.
+        await Promise.allSettled(pendingOpenings);
+        if (!owners.has(`store:${selection.databasePath}`))
+          wakes.set(selection.databasePath, selection);
+        continue;
+      }
       try {
         await ownerFor(selection);
       } catch (cause) {
@@ -1595,6 +1710,7 @@ export function createLocalServiceOwners(
           recovery.delete(selection.databasePath);
       }
     }
+    scheduleWakes();
     await saveRecovery();
   }
   /** A person archives or restores any Agent of one project folder. */

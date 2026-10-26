@@ -16,6 +16,13 @@ import {
 import { stopAllRequestSchema } from "./private-local-stop-all.js";
 import { FungiMcpSelectionConflict } from "./private-fungi-mcp-selection.js";
 import { LocalSandboxUnavailable } from "./private-local-containment.js";
+import {
+  createNativePayloadStaging,
+  type NativePayloadStaging,
+} from "./private-local-native-staging.js";
+import { nativePackageStartupError } from "./private-local-native-install-error.js";
+import { LocalBwrapUnavailable } from "./private-local-bwrap.js";
+import { writeFileSync } from "node:fs";
 import { PrivateLocalAuthTarget } from "./private-local-auth-rpc.js";
 import { runLocalAuthCli } from "./auth-cli.js";
 import {
@@ -140,6 +147,7 @@ export async function runPrivateLocalService(
       heap: jsc.heapStats(),
     }),
   });
+  let native: NativePayloadStaging | undefined;
   const owners = createLocalServiceOwners(
     openRuntime,
     directory,
@@ -148,6 +156,13 @@ export async function runPrivateLocalService(
     readRecoveryManifest,
     diagnostics.recoveryDisabled,
     root,
+    undefined,
+    diagnostics.ruleMatch,
+    () => {
+      if (native === undefined)
+        throw new Error("Local service native staging is not ready");
+      return native;
+    },
   );
   const prefix = `/service/${serviceId}`;
   const releaseAccountOwner = registerFungiAccountOwner(
@@ -295,7 +310,11 @@ export async function runPrivateLocalService(
     };
   };
   const shutdown = createPrivateLocalServiceShutdown({
-    closeOwners: owners.close,
+    closeOwners: async () => {
+      await owners.close();
+      // No Agent, including one reopened during recovery, still uses the copy.
+      native?.close();
+    },
     closeServer: async () => {
       await server?.close();
     },
@@ -349,6 +368,29 @@ export async function runPrivateLocalService(
     !request.headers.has("origin") &&
     new URL(request.url).hostname === "127.0.0.1";
   try {
+    // Verify and stage before publishing discovery, even without a selected Agent.
+    try {
+      native = createNativePayloadStaging(directory);
+    } catch (cause) {
+      if (cause instanceof LocalBwrapUnavailable) {
+        // A detached child has no stderr. Only this classified startup refusal
+        // crosses to the starting client; never export arbitrary exception text.
+        const marker = process.env.FUNGI_NATIVE_STARTUP_REFUSAL;
+        if (marker !== undefined) {
+          try {
+            writeFileSync(marker, "native-package", {
+              flag: "wx",
+              mode: 0o600,
+            });
+          } catch (reportFailure) {
+            // A broken report channel cannot replace the native refusal.
+            logEvent("service-listener.native-refusal-report", reportFailure);
+          }
+        }
+        throw nativePackageStartupError(cause);
+      }
+      throw cause;
+    }
     app.use("*", async (context, next) => {
       const request = context.req.raw;
       // Local client only: no browser-origin admission or DNS rebinding authority.

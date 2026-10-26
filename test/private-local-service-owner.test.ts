@@ -36,22 +36,45 @@ import {
 } from "./fixtures/effective-model.js";
 
 describe("persistent Local service owners", () => {
-  it("passes the requirement before opening can execute or recover affected work", async () => {
+  it("rejects a pre-mode Agent store with LocalStoreSchemaError rather than defaulting it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "fungi-pre-mode-store-"));
+    const path = join(root, "agent.sqlite");
+    const database = new DatabaseSync(path);
+    try {
+      database.exec(
+        "CREATE TABLE private_local_identity (singleton INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, name TEXT, created_by TEXT, archived INTEGER NOT NULL, folder TEXT NOT NULL, require_sandbox INTEGER NOT NULL)",
+      );
+      database.exec(
+        "INSERT INTO private_local_identity VALUES (1, 'old', 'Old', NULL, 0, '.', 0)",
+      );
+    } finally {
+      database.close();
+    }
+    try {
+      expect(() => readPrivateLocalAgentProfile(path)).toThrow(
+        LocalStoreSchemaError,
+      );
+    } finally {
+      await rm(root, { recursive: true });
+    }
+  });
+
+  it("passes the mode before opening can execute or recover affected work", async () => {
     const root = await realpath(
       await mkdtemp(join(tmpdir(), "fungi-required-open-")),
     );
     const databasePath = join(root, "agent.sqlite");
-    await writeFile(databasePath, "owned opener fixture");
+    writeFreshStore(databasePath, "owned opener fixture");
     let openedWithRequirement = false;
     let recoveredWithoutRequirement = false;
     const owners = createLocalServiceOwners((options) => {
-      openedWithRequirement = options.requireSandbox === true;
+      openedWithRequirement = options.mode === "workspace";
       // Model an opener that begins recovery before resolving. A setter on
       // the returned host would already be too late at this boundary.
-      if (options.requireSandbox !== true) recoveredWithoutRequirement = true;
+      if (options.mode !== "workspace") recoveredWithoutRequirement = true;
       return Promise.reject(
         new LocalSandboxUnavailable({
-          kind: "missing",
+          kind: "install",
           message: "Owned missing-backend fixture",
         }),
       );
@@ -62,7 +85,7 @@ describe("persistent Local service owners", () => {
           invocationRoot: root,
           databasePath,
           sessionId: "main",
-          requireSandbox: true,
+          mode: "workspace",
         }),
       ).rejects.toBeInstanceOf(LocalSandboxUnavailable);
       expect(openedWithRequirement).toBe(true);
@@ -911,7 +934,7 @@ it.each(["corrupt", "mixed"])(
         ...fixtureModelControls,
         ...fixtureMailControls,
         // It holds work, so shutdown keeps its reference for the next start.
-        idle: () => Promise.resolve(false),
+        idle: () => Promise.resolve({ idle: false, wakeAt: null }),
         getSession: (sessionId) =>
           // SAFETY: This fixture observes only the Session address.
           ({ address: `session:${sessionId}` }) as ShiitakeSession,
@@ -998,6 +1021,7 @@ function agentControlSession(sessionId: string): ShiitakeSession {
     Promise.reject(new Error("unused in the Agent-control proofs"));
   return {
     address: `session:${sessionId}`,
+    readSettlement: unused,
     latestPending: unused,
     withdraw: unused,
     read: unused,
@@ -1101,6 +1125,85 @@ describe("an Agent creating an Agent", () => {
     if (directory === undefined) throw new Error("Local directory missing");
     return { root, creatorStore, opened, enabled, directory, owners };
   }
+
+  it("passes a read-only creator's mode and folder to its child, never the new-Agent default", async () => {
+    const local = await project({});
+    const database = new DatabaseSync(join(local.creatorStore, "agent.sqlite"));
+    try {
+      database
+        .prepare(
+          "UPDATE private_local_identity SET mode = ? WHERE singleton = 1",
+        )
+        .run("read-only");
+    } finally {
+      database.close();
+    }
+    try {
+      await local.directory.create(
+        { requestId: "read-only-child", createdBy: creator },
+        new AbortController().signal,
+      );
+      expect(
+        local.opened.find(
+          ({ createRequestId }) => createRequestId === "read-only-child",
+        ),
+      ).toMatchObject({ mode: "read-only", folder: "." });
+    } finally {
+      await local.owners.close();
+      await rm(local.root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses widening a created Agent beyond its read-only creator", async () => {
+    const local = await project({});
+    const creatorDatabase = new DatabaseSync(
+      join(local.creatorStore, "agent.sqlite"),
+    );
+    try {
+      creatorDatabase
+        .prepare(
+          "UPDATE private_local_identity SET mode = ? WHERE singleton = 1",
+        )
+        .run("read-only");
+    } finally {
+      creatorDatabase.close();
+    }
+    const child = join(
+      local.root,
+      ".fungi",
+      "agents",
+      "local_store_child",
+      "agent.sqlite",
+    );
+    await mkdir(dirname(child), { recursive: true });
+    writeFreshStore(child, "child", creator);
+    const childDatabase = new DatabaseSync(child);
+    try {
+      childDatabase
+        .prepare(
+          "UPDATE private_local_identity SET mode = ? WHERE singleton = 1",
+        )
+        .run("read-only");
+    } finally {
+      childDatabase.close();
+    }
+    try {
+      await expect(
+        local.owners.select({
+          invocationRoot: local.root,
+          databasePath: child,
+          mode: "full-access",
+        }),
+      ).rejects.toMatchObject({
+        name: "AgentCreateRefused",
+        reason: "exceeds_creator",
+      });
+      expect(readPrivateLocalAgentProfile(child).mode).toBe("read-only");
+    } finally {
+      await local.owners.close();
+      await rm(local.root, { recursive: true, force: true });
+    }
+  });
 
   it("gives an Agent no more permissions than its maker: asking for what the creator lacks is refused and creates nothing", async () => {
     const local = await project({});

@@ -11,6 +11,7 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
+  readdir,
   readFile,
   realpath,
   rm,
@@ -22,7 +23,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
-import { closeSync, constants, openSync } from "node:fs";
+import { closeSync, constants, existsSync, openSync } from "node:fs";
 import { Socket } from "node:net";
 import { once } from "node:events";
 import {
@@ -38,9 +39,10 @@ import {
 } from "@fungi.computer/shiitake";
 import {
   type AgentControlDirectory,
-  waitForAgentTerminal,
+  waitForAgentSettlement,
 } from "@fungi.computer/shiitake/agent-control";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { afterEach, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -58,6 +60,8 @@ import {
 } from "../src/private-local-runtime-host.js";
 import { capturePrivateLocalConfigRoot } from "../src/private-local-config-root.js";
 import { createPrivateSqliteOwner } from "../src/private-sqlite-owner.js";
+import { createLocalUiAttachment } from "../dist/private-local-ui-attachment.js";
+import { mcpFormApprovalContract } from "../src/private-mcp-form-contract.js";
 import { createPrivateLocalDelegation } from "../src/private-local-delegation.js";
 import { createPrivateLocalMailRoom } from "../src/private-local-mail.js";
 
@@ -106,6 +110,7 @@ async function sandboxProductionFixture(available = false) {
     for (const name of [
       "fungi-bwrap",
       "fungi-seccomp.bpf",
+      "fungi-seccomp-workspace.bpf",
       "fungi-apply-patch",
     ])
       await copyFile(
@@ -165,6 +170,173 @@ async function openProductionHost(
   return open(...args);
 }
 
+it("Full access runs a real Agent command bare outside its folder without bwrap", async () => {
+  const fixture = await sandboxProductionFixture();
+  const outside = join(dirname(fixture.root), "home", "outside");
+  fixture.faux.setResponses([
+    fauxAssistantMessage(
+      fauxToolCall("execute", {
+        code: 'return await env.computers.local.exec({ command: "printf outside > ../home/outside" })',
+      }),
+      { stopReason: "toolUse" },
+    ),
+    fauxAssistantMessage("Full access completed"),
+  ]);
+  const host = await openProductionHost(
+    { ...fixture.options, mode: "full-access" },
+    fixture.models,
+  );
+  try {
+    expect(host.sandboxStatus().mode).toBe("full-access");
+    const accepted = await host.session.command({
+      type: "prompt",
+      requestId: "full-access-outside-folder",
+      delivery: "followUp",
+      text: "Write the outside file.",
+    });
+    await expect(
+      waitForAgentSettlement(
+        host.session,
+        accepted.commandId,
+        3_000,
+        new AbortController().signal,
+      ).then(({ terminal }) => terminal),
+    ).resolves.toMatchObject({ outcome: "completed" });
+    expect(await readFile(outside, "utf8")).toBe("outside");
+  } finally {
+    await host.close();
+  }
+});
+
+it("a fresh Agent defaults to Full access with the failed sandbox probe reason", async () => {
+  const fixture = await sandboxProductionFixture();
+  const host = await openProductionHost(fixture.options, fixture.models);
+  try {
+    expect(host.sandboxStatus()).toMatchObject({
+      mode: "full-access",
+      available: false,
+      reason: { kind: "install" },
+    });
+  } finally {
+    await host.close();
+  }
+});
+
+it("explicit Workspace without bwrap refuses before opening or running a command", async () => {
+  const fixture = await sandboxProductionFixture();
+  await expect(
+    openProductionHost(
+      { ...fixture.options, mode: "workspace" },
+      fixture.models,
+    ),
+  ).rejects.toMatchObject({
+    name: "LocalSandboxUnavailable",
+    reason: { kind: "install" },
+  });
+  expect(fixture.modelCalls()).toBe(0);
+  await expect(access(fixture.sentinel)).rejects.toMatchObject({
+    code: "ENOENT",
+  });
+});
+
+it("refuses a new Workspace Agent before creating its store", async () => {
+  const fixture = await sandboxProductionFixture();
+  await expect(
+    openPrivateLocalRuntimeHost(
+      { ...fixture.options, mode: "workspace" },
+      fixture.models,
+    ),
+  ).rejects.toMatchObject({
+    name: "LocalSandboxUnavailable",
+    reason: { kind: "install" },
+  });
+  // The probe runs before the store file exists, so a refused new Agent
+  // leaves no agent.sqlite behind for a later open to misread as an old store.
+  const agents = join(fixture.root, ".fungi", "agents");
+  const stores = existsSync(agents)
+    ? (await readdir(agents, { recursive: true })).filter((entry) =>
+        entry.endsWith("agent.sqlite"),
+      )
+    : [];
+  expect(stores).toEqual([]);
+});
+
+it("refuses a Workspace reopen before changing the persisted Full access mode", async () => {
+  const fixture = await sandboxProductionFixture();
+  const initial = await openPrivateLocalRuntimeHost(
+    { ...fixture.options, mode: "full-access" },
+    fixture.models,
+  );
+  const databasePath = initial.databasePath;
+  await initial.close();
+  await expect(
+    openPrivateLocalRuntimeHost(
+      { ...fixture.options, databasePath, mode: "workspace" },
+      fixture.models,
+    ),
+  ).rejects.toMatchObject({
+    name: "LocalSandboxUnavailable",
+    reason: { kind: "install" },
+  });
+  const database = new DatabaseSync(databasePath);
+  try {
+    expect(
+      database
+        .prepare("SELECT mode FROM private_local_identity WHERE singleton = 1")
+        .get(),
+    ).toMatchObject({ mode: "full-access" });
+  } finally {
+    database.close();
+  }
+});
+
+it("refuses an existing child whose stored mode exceeds the requested creator ceiling", async () => {
+  const fixture = await sandboxProductionFixture();
+  const creator = await openPrivateLocalRuntimeHost(
+    { ...fixture.options, mode: "full-access" },
+    fixture.models,
+  );
+  const createdBy = creator.agentId;
+  await creator.close();
+  const child = await openPrivateLocalRuntimeHost(
+    {
+      ...fixture.options,
+      createRequestId: "child-ceiling-reopen",
+      createdBy,
+      mode: "full-access",
+    },
+    fixture.models,
+  );
+  const databasePath = child.databasePath;
+  await child.close();
+  await expect(
+    openPrivateLocalRuntimeHost(
+      {
+        ...fixture.options,
+        databasePath,
+        createdBy,
+        mode: "read-only",
+      },
+      fixture.models,
+    ),
+  ).rejects.toMatchObject({
+    name: "AgentCreateRefused",
+    reason: "exceeds_creator",
+  });
+  const database = new DatabaseSync(databasePath);
+  try {
+    expect(
+      database
+        .prepare(
+          "SELECT mode, created_by FROM private_local_identity WHERE singleton = 1",
+        )
+        .get(),
+    ).toMatchObject({ mode: "full-access", created_by: createdBy });
+  } finally {
+    database.close();
+  }
+});
+
 it.runIf(process.platform === "linux").each(["run", "start"])(
   "contains real Local Computer %s, preserving stdin and owned seccomp fd3",
   async (operation) => {
@@ -187,9 +359,7 @@ it.runIf(process.platform === "linux").each(["run", "start"])(
       "try: host.write_text('escaped')",
       "except OSError as error: assert error.errno in (errno.EROFS, errno.EACCES)",
       "else: raise AssertionError('host write was allowed')",
-      "try: socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)",
-      "except PermissionError: pass",
-      "else: raise AssertionError('maintained seccomp filter was absent')",
+      "socket.socket(socket.AF_UNIX, socket.SOCK_STREAM).close()",
       "try: os.fstat(3)",
       "except OSError as error: assert error.errno == errno.EBADF",
       "else: raise AssertionError('filter fd leaked into target')",
@@ -213,15 +383,15 @@ it.runIf(process.platform === "linux").each(["run", "start"])(
       ),
       fauxAssistantMessage("Native containment proof completed"),
     ]);
-    const options: typeof fixture.options & { requireSandbox?: boolean } = {
+    const options: typeof fixture.options & { mode?: "workspace" } = {
       ...fixture.options,
+      mode: "workspace",
     };
-    if (operation === "start") options.requireSandbox = true;
     const host = await openProductionHost(options, fixture.models);
     try {
       expect(host.sandboxStatus()).toEqual({
-        state: "available",
-        requireSandbox: operation === "start",
+        mode: "workspace",
+        available: true,
       });
       const accepted = await host.session.command({
         type: "prompt",
@@ -230,12 +400,12 @@ it.runIf(process.platform === "linux").each(["run", "start"])(
         text: "Execute the native containment proof.",
       });
       await expect(
-        waitForAgentTerminal(
+        waitForAgentSettlement(
           host.session,
           accepted.commandId,
           3_000,
           new AbortController().signal,
-        ),
+        ).then(({ terminal }) => terminal),
       ).resolves.toMatchObject({ outcome: "completed" });
       expect(await readFile(fixture.sentinel, "utf8")).toBe("filtered");
       expect(await readFile(hostSentinel, "utf8")).toBe("host sentinel");
@@ -272,7 +442,7 @@ it.runIf(process.platform === "linux").each(["run", "start"])(
       fauxAssistantMessage("Background process started"),
     ]);
     const host = await openProductionHost(
-      { ...fixture.options, requireSandbox: true },
+      { ...fixture.options, mode: "workspace" },
       fixture.models,
     );
     // A parent-owned writer prevents EOF before the contained command attaches.
@@ -303,12 +473,12 @@ it.runIf(process.platform === "linux").each(["run", "start"])(
       keepOpen = undefined;
       if (operation === "start")
         await expect(
-          waitForAgentTerminal(
+          waitForAgentSettlement(
             host.session,
             accepted.commandId,
             3_000,
             new AbortController().signal,
-          ),
+          ).then(({ terminal }) => terminal),
         ).resolves.toMatchObject({ outcome: "completed" });
       const ended = once(reader, "end", {
         signal: AbortSignal.timeout(3_000),
@@ -320,12 +490,12 @@ it.runIf(process.platform === "linux").each(["run", "start"])(
           if (operation === "run") {
             await host.session.abort();
             await expect(
-              waitForAgentTerminal(
+              waitForAgentSettlement(
                 host.session,
                 accepted.commandId,
                 3_000,
                 new AbortController().signal,
-              ),
+              ).then(({ terminal }) => terminal),
             ).resolves.toMatchObject({ outcome: "cancelled" });
           }
           await host.close();
@@ -397,7 +567,7 @@ it.runIf(process.platform === "linux")(
       },
     ]);
     const host = await openProductionHost(
-      { ...fixture.options, requireSandbox: true },
+      { ...fixture.options, mode: "workspace" },
       fixture.models,
     );
     try {
@@ -408,12 +578,12 @@ it.runIf(process.platform === "linux")(
         text: "Edit and patch the controlled ordinary and protected files.",
       });
       await expect(
-        waitForAgentTerminal(
+        waitForAgentSettlement(
           host.session,
           accepted.commandId,
           3_000,
           new AbortController().signal,
-        ),
+        ).then(({ terminal }) => terminal),
       ).resolves.toMatchObject({ outcome: "completed" });
       expect(toolResults).toBe(4);
       expect(
@@ -428,54 +598,127 @@ it.runIf(process.platform === "linux")(
   },
 );
 
-it.runIf(process.platform === "linux")(
-  "applies live persisted requirement changes before subsequent real launches",
-  async () => {
+it
+  .runIf(process.platform === "linux")
+  .each(["patch", "edit", "write"] as const)(
+  "a real Read-only Session refuses Files %s without staging or writing",
+  async (kind) => {
     const fixture = await sandboxProductionFixture(true);
+    const path = join(fixture.root, "note.txt");
+    await writeFile(path, "before\n");
+    const patch =
+      kind === "write"
+        ? "*** Begin Patch\n*** Add File: new.txt\n+new\n*** End Patch\n"
+        : "*** Begin Patch\n*** Update File: note.txt\n@@\n-before\n+after\n*** End Patch\n";
+    const toolName = kind === "edit" ? "execute" : "apply_patch";
+    let refusal = "";
+    fixture.faux.setResponses([
+      fauxAssistantMessage(
+        kind === "edit"
+          ? fauxToolCall("execute", {
+              code:
+                "return await env.computers.local.files.edit(" +
+                JSON.stringify({
+                  path: "note.txt",
+                  oldText: "before",
+                  newText: "after",
+                }) +
+                ")",
+            })
+          : fauxToolCall("apply_patch", { patch }),
+        { stopReason: "toolUse" },
+      ),
+      (context) => {
+        const tool = context.messages.find(
+          (message) =>
+            message.role === "toolResult" && message.toolName === toolName,
+        );
+        if (tool?.role !== "toolResult")
+          throw new Error("Files tool result missing");
+        refusal = tool.content
+          .filter((part) => part.type === "text")
+          .map((part) => part.text)
+          .join("\n");
+        return fauxAssistantMessage("Switch to Workspace to edit.");
+      },
+    ]);
+    const host = await openProductionHost(
+      { ...fixture.options, mode: "read-only" },
+      fixture.models,
+    );
+    const attachment = createLocalUiAttachment("main");
+    const attached = host.getSession("main", attachment);
+    try {
+      const accepted = await host.session.command({
+        type: "prompt",
+        requestId: "refuse-" + kind,
+        delivery: "followUp",
+        text: "Try Files " + kind + ".",
+      });
+      await expect(
+        waitForAgentSettlement(
+          host.session,
+          accepted.commandId,
+          3_000,
+          new AbortController().signal,
+        ).then(({ terminal }) => terminal),
+      ).resolves.toMatchObject({ outcome: "completed" });
+      expect(refusal).toContain("Read-only mode: switch to Workspace to edit");
+      expect(await readFile(path, "utf8")).toBe("before\n");
+      await expect(
+        readFile(join(fixture.root, "new.txt"), "utf8"),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      const database = new DatabaseSync(host.databasePath);
+      try {
+        expect(
+          database
+            .prepare("SELECT count(*) AS total FROM approval_records")
+            .get(),
+        ).toMatchObject({ total: 0 });
+      } finally {
+        database.close();
+      }
+      const snapshot = await attached.read();
+      const slot = snapshot.extensions[mcpFormApprovalContract.id];
+      if (slot?.status !== "running")
+        throw new Error("Approval projection unavailable");
+      expect(
+        Schema.decodeUnknownSync(mcpFormApprovalContract.projection.schema)(
+          slot.value,
+        ).pending,
+      ).toEqual([]);
+    } finally {
+      attachment.close();
+      await host.close();
+    }
+  },
+);
+
+it.runIf(process.platform === "linux")(
+  "rejects a live switch to Workspace without sandbox, retaining the persisted Full access mode",
+  async () => {
+    const fixture = await sandboxProductionFixture();
     const host = await openProductionHost(fixture.options, fixture.models);
     try {
-      expect(host.sandboxStatus()).toMatchObject({ state: "available" });
-      // An installed artifact that disappears after readiness is not a
-      // missing optional package; the next launch must never run bare.
-      await rm(join(fixture.bin, "fungi-bwrap"));
-      for (const required of [undefined, true, false]) {
-        if (required !== undefined)
-          expect(() => {
-            host.setRequireSandbox(required);
-          }).toThrow(
-            expect.objectContaining({ name: "LocalSandboxUnavailable" }),
-          );
-        fixture.faux.setResponses([
-          fauxAssistantMessage(
-            fauxToolCall("execute", {
-              code: 'return await env.computers.local.exec({ command: "printf executed > computer-executed" })',
-            }),
-            { stopReason: "toolUse" },
-          ),
-          fauxAssistantMessage("Live launch attempt completed"),
-        ]);
-        const accepted = await host.session.command({
-          type: "prompt",
-          requestId: `live-requirement-${String(required)}`,
-          delivery: "followUp",
-          text: "Run the controlled Computer sentinel command.",
-        });
-        await expect(
-          waitForAgentTerminal(
-            host.session,
-            accepted.commandId,
-            3_000,
-            new AbortController().signal,
-          ),
-        ).resolves.toMatchObject({ outcome: "completed" });
-        expect(host.sandboxStatus()).toMatchObject({
-          state: "unavailable",
-          requireSandbox: required === true,
-          reason: { kind: "missing-artifact" },
-        });
-        await expect(access(fixture.sentinel)).rejects.toMatchObject({
-          code: "ENOENT",
-        });
+      expect(() => {
+        host.setMode("workspace");
+      }).toThrow("Packaged fungi-apply-patch digest mismatch");
+      expect(host.sandboxStatus()).toMatchObject({
+        mode: "full-access",
+        available: false,
+        reason: { kind: "install" },
+      });
+      const database = new DatabaseSync(host.databasePath);
+      try {
+        expect(
+          database
+            .prepare(
+              "SELECT mode FROM private_local_identity WHERE singleton = 1",
+            )
+            .get(),
+        ).toMatchObject({ mode: "full-access" });
+      } finally {
+        database.close();
       }
     } finally {
       await host.close();
@@ -484,12 +727,12 @@ it.runIf(process.platform === "linux")(
 );
 
 it.runIf(process.platform === "linux")(
-  "enforces requireSandbox before real Local execution with a partial native package",
+  "enforces Workspace before real Local execution with a partial native package",
   async () => {
     const fixture = await sandboxProductionFixture();
     const run = async () => {
       const host = await openProductionHost(
-        { ...fixture.options, requireSandbox: true },
+        { ...fixture.options, mode: "workspace" },
         fixture.models,
       );
       try {
@@ -499,19 +742,19 @@ it.runIf(process.platform === "linux")(
           delivery: "followUp",
           text: "Run the Computer sentinel command.",
         });
-        await waitForAgentTerminal(
+        await waitForAgentSettlement(
           host.session,
           accepted.commandId,
           3_000,
           new AbortController().signal,
-        );
+        ).then(({ terminal }) => terminal);
       } finally {
         await host.close();
       }
     };
     await expect(run()).rejects.toMatchObject({
       name: "LocalSandboxUnavailable",
-      reason: { kind: "missing-artifact" },
+      reason: { kind: "install" },
     });
     expect(fixture.modelCalls()).toBe(0);
     await expect(access(fixture.sentinel)).rejects.toMatchObject({
@@ -521,7 +764,7 @@ it.runIf(process.platform === "linux")(
 );
 
 it.runIf(process.platform === "linux")(
-  "refuses bare Local execution with a partial native package even when optional",
+  "defaults to Full access and runs bare when the native sandbox package is partial",
   async () => {
     const fixture = await sandboxProductionFixture();
     const host = await openProductionHost(fixture.options, fixture.models);
@@ -533,20 +776,19 @@ it.runIf(process.platform === "linux")(
         text: "Run the Computer sentinel command.",
       });
       await expect(
-        waitForAgentTerminal(
+        waitForAgentSettlement(
           host.session,
           accepted.commandId,
           3_000,
           new AbortController().signal,
-        ),
+        ).then(({ terminal }) => terminal),
       ).resolves.toMatchObject({ outcome: "completed" });
       expect(host.sandboxStatus()).toMatchObject({
-        state: "unavailable",
-        reason: { kind: "missing-artifact" },
+        mode: "full-access",
+        available: false,
+        reason: { kind: "install" },
       });
-      await expect(access(fixture.sentinel)).rejects.toMatchObject({
-        code: "ENOENT",
-      });
+      expect(await readFile(fixture.sentinel, "utf8")).toBe("executed");
     } finally {
       await host.close();
     }
@@ -554,12 +796,22 @@ it.runIf(process.platform === "linux")(
 );
 
 it.runIf(process.platform === "linux")(
-  "enforces persisted requireSandbox, then recovers after explicit disable and native repair",
+  "enforces persisted Workspace, then recovers after explicit Full access and native repair",
   async () => {
     const fixture = await sandboxProductionFixture();
     const initial = await openProductionHost(fixture.options, fixture.models);
     const databasePath = initial.databasePath;
     await initial.close();
+    const profile = new DatabaseSync(databasePath);
+    try {
+      profile
+        .prepare(
+          "UPDATE private_local_identity SET mode = ? WHERE singleton = 1",
+        )
+        .run("workspace");
+    } finally {
+      profile.close();
+    }
 
     // Admit through the real Session/SQLite contract, with only its scheduling
     // paused. Do not invent queue rows or a model/tool settlement. Reopening
@@ -622,29 +874,29 @@ it.runIf(process.platform === "linux")(
 
     const options = { ...fixture.options, databasePath };
     await expect(
-      openProductionHost({ ...options, requireSandbox: true }, fixture.models),
+      openProductionHost({ ...options, mode: "workspace" }, fixture.models),
     ).rejects.toMatchObject({
       name: "LocalSandboxUnavailable",
-      reason: { kind: "missing-artifact" },
+      reason: { kind: "install" },
     });
-    // No flag is passed on this second open: the persisted requirement must
-    // still win over the default OFF before any recovered model/tool work.
+    // No flag is passed on this second open: persisted Workspace must still
+    // win over the new-Agent default before any recovered model/tool work.
     await expect(
       openProductionHost(options, fixture.models),
     ).rejects.toMatchObject({
       name: "LocalSandboxUnavailable",
-      reason: { kind: "missing-artifact" },
+      reason: { kind: "install" },
     });
     expect(fixture.modelCalls()).toBe(0);
     await expect(access(fixture.sentinel)).rejects.toMatchObject({
       code: "ENOENT",
     });
 
-    // Repair the partial package before the positive recovery control. Turning
-    // the requirement off alone must not authorize a bare command.
+    // Repair the partial package before the positive recovery control.
     for (const name of [
       "fungi-bwrap",
       "fungi-seccomp.bpf",
+      "fungi-seccomp-workspace.bpf",
       "fungi-apply-patch",
     ])
       await copyFile(
@@ -656,17 +908,17 @@ it.runIf(process.platform === "linux")(
     // No new prompt is sent. The SAME durable command must recover and run
     // within a valid sandbox.
     const recovered = await openProductionHost(
-      { ...options, requireSandbox: false },
+      { ...options, mode: "workspace" },
       fixture.models,
     );
     try {
       await expect(
-        waitForAgentTerminal(
+        waitForAgentSettlement(
           recovered.session,
           commandId,
           3_000,
           new AbortController().signal,
-        ),
+        ).then(({ terminal }) => terminal),
       ).resolves.toMatchObject({ commandId, outcome: "completed" });
       expect(await readFile(fixture.sentinel, "utf8")).toBe("executed");
       expect(fixture.modelCalls()).toBe(2);
@@ -951,12 +1203,12 @@ it("joins project Agent ownership to real Local Shiitake control", async () => {
       delivery: "followUp",
       requestId: "local-seed",
     });
-    await waitForAgentTerminal(
+    await waitForAgentSettlement(
       seedSession,
       seed.commandId,
       5_000,
       new AbortController().signal,
-    );
+    ).then(({ terminal }) => terminal);
 
     const parentHost = await owners.select({
       invocationRoot: root,

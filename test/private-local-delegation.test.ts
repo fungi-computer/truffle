@@ -249,22 +249,33 @@ it.each(["completed", "failed", "cancelled"] as const)(
         String(childTerminal?.commandId),
       );
       if (outcome === "failed") {
-        expect((await local.child.session.read()).terminals).toEqual([
-          childTerminal,
-        ]);
+        const child = await local.child.session.read();
+        expect(child.terminals).toEqual([childTerminal]);
+        expect(
+          child.messages.find(({ value }) => value.role === "assistant")?.value,
+        ).toMatchObject({
+          // The turn keeps the safe reason; the provider's own text is a
+          // separate retained fact for the failed-turn bubble and its details.
+          errorMessage:
+            "faux-child model request failed without a provider rejection. Retry the request.",
+          providerError:
+            "provider_error: 401 Authorization: Bearer sk-live-0123456789abcdefABCDEF\nretry later",
+        });
         expect(facts?.diagnostic).toBe(childTerminal?.diagnostic);
-        // Local's model door already reports provider failures in its own words.
+        // A provider failure without rejection evidence must not blame login.
         expect(facts?.diagnostic).toMatch(
-          /^faux-child rejected the model request/u,
+          /^faux-child model request failed without a provider rejection/u,
         );
         expect(facts?.diagnostic).not.toMatch(/sk-live|\n/u);
         expect(facts?.diagnostic?.length).toBeLessThanOrEqual(200);
+        expect(JSON.stringify(reply)).not.toContain("sk-live");
+        expect(JSON.stringify(parentContexts)).not.toContain("sk-live");
       } else expect(facts?.diagnostic).toBeUndefined();
       expect(JSON.stringify(reply?.value)).toContain(
         outcome === "cancelled"
           ? "Work cancelled."
           : outcome === "failed"
-            ? // Local's model door keeps no text from a failed call.
+            ? // This provider failed before it produced any reply text.
               "The delegated work ended failed without reply text."
             : "Child result",
       );

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -10,7 +10,7 @@ import {
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
-import { waitForAgentTerminal } from "@fungi.computer/shiitake/agent-control";
+import { waitForAgentSettlement } from "@fungi.computer/shiitake/agent-control";
 import { z } from "zod";
 import { capturePrivateLocalConfigRoot } from "../dist/private-local-config-root.js";
 import { sandboxUnavailableReasonSchema } from "../dist/private-local-containment.js";
@@ -27,11 +27,12 @@ import {
 } from "../dist/private-local-service.js";
 
 it.skipIf(process.platform !== "linux")(
-  "real Local selection returns 409 and the SDK preserves typed sandbox refusal",
+  "real Local selection returns 409 for a project containing host files and the SDK preserves typed refusal",
   async () => {
     const root = await mkdtemp(join(tmpdir(), "fungi-sandbox-service-"));
     const project = join(root, "project");
     const home = join(root, "home");
+    const runtime = join(root, "runtime");
     const bin = join(
       project,
       "node_modules",
@@ -41,13 +42,33 @@ it.skipIf(process.platform !== "linux")(
     );
     await mkdir(join(project, ".git"), { recursive: true });
     await mkdir(home);
+    await mkdir(runtime, { mode: 0o700 });
     await mkdir(bin, { recursive: true });
-    await writeFile(
-      join(bin, "fungi-apply-patch"),
-      "#!/bin/sh\nprintf 'Unexpected native patch call' >&2\nexit 1\n",
-      { mode: 0o700 },
+    for (const name of [
+      "fungi-apply-patch",
+      "fungi-bwrap",
+      "fungi-seccomp.bpf",
+      "fungi-seccomp-workspace.bpf",
+    ])
+      await copyFile(
+        join(import.meta.dir, "..", "native", "bin", name),
+        join(bin, name),
+      );
+    const previousEnvironment = new Map(
+      [
+        "HOME",
+        "XDG_RUNTIME_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "FUNGI_BUNDLED_CLI",
+      ].map((key) => [key, process.env[key]]),
     );
-    const bundledCli = process.env.FUNGI_BUNDLED_CLI;
+    process.env.HOME = home;
+    process.env.XDG_RUNTIME_DIR = runtime;
+    process.env.XDG_CONFIG_HOME = join(home, "config");
+    process.env.XDG_CACHE_HOME = join(home, "cache");
+    process.env.XDG_DATA_HOME = join(home, "data");
     process.env.FUNGI_BUNDLED_CLI = join(project, "fungi.cjs");
     const configRoot = capturePrivateLocalConfigRoot(home);
     const directory = await serviceDirectory(configRoot.serviceDirectory);
@@ -74,11 +95,11 @@ it.skipIf(process.platform !== "linux")(
         return fauxAssistantMessage("Computer completed");
       },
     ]);
-    const requirements: (boolean | undefined)[] = [];
+    const modes: ("read-only" | "workspace" | "full-access" | undefined)[] = [];
     const running = runPrivateLocalService(
       directory,
       (options) => {
-        requirements.push(options.requireSandbox);
+        modes.push(options.mode);
         return openPrivateLocalRuntimeHost(
           {
             ...options,
@@ -111,7 +132,7 @@ it.skipIf(process.platform !== "linux")(
           body: JSON.stringify({
             invocationRoot: project,
             clientPath: "/usr/bin:/bin",
-            requireSandbox: true,
+            mode: "workspace",
           }),
         },
       );
@@ -120,7 +141,7 @@ it.skipIf(process.platform !== "linux")(
         status: 409,
         body: {
           code: "sandbox_unavailable",
-          reason: { kind: "unsafe-native-payload" },
+          reason: { kind: "install" },
         },
       });
       const body = z
@@ -129,29 +150,36 @@ it.skipIf(process.platform !== "linux")(
           reason: sandboxUnavailableReasonSchema,
         })
         .parse(responseBody);
-      expect(body.reason.kind).toBe("unsafe-native-payload");
+      expect(body.reason.kind).toBe("install");
+      // A refused first selection must not reserve an Agent id or open an
+      // empty SQLite file that the next selection mistakes for an old store.
+      await assert.rejects(access(join(project, ".fungi", "agents")), {
+        code: "ENOENT",
+      });
       const manager = createPrivateLocalServiceManager({ directory, home });
       const refused = manager.connect({
         invocationRoot: project,
-        requireSandbox: true,
+        mode: "workspace",
       });
       await assert.rejects(refused, LocalSandboxUnavailable);
       await assert.rejects(refused, { reason: body.reason });
-      expect(requirements).toEqual([true, true]);
+      await assert.rejects(access(join(project, ".fungi", "agents")), {
+        code: "ENOENT",
+      });
+      expect(modes).toEqual(["workspace", "workspace"]);
       expect(modelCalls).toBe(0);
       await assert.rejects(access(sentinel), { code: "ENOENT" });
 
-      // Optional mode can connect, but may not run an in-project native
-      // package bare when the Agent triggers a Computer command.
+      // Full access is an explicit, persistent choice, not an optional
+      // sandbox retry. It does not grant sandboxed access to host files.
       const permitted = await manager.connect({
         invocationRoot: project,
-        requireSandbox: false,
+        mode: "full-access",
       });
       try {
         expect(await permitted.sandboxStatus()).toEqual({
-          state: "unavailable",
-          requireSandbox: false,
-          reason: body.reason,
+          mode: "full-access",
+          available: true,
         });
         const accepted = await permitted.session.command({
           type: "prompt",
@@ -159,15 +187,15 @@ it.skipIf(process.platform !== "linux")(
           delivery: "followUp",
           text: "Run the Computer sentinel command.",
         });
-        const terminal = await waitForAgentTerminal(
+        const terminal = await waitForAgentSettlement(
           permitted.session,
           accepted.commandId,
           3_000,
           new AbortController().signal,
-        );
+        ).then(({ terminal }) => terminal);
         expect(terminal).toMatchObject({ outcome: "completed" });
-        await assert.rejects(access(sentinel), { code: "ENOENT" });
-        expect(requirements).toEqual([true, true, false]);
+        await access(sentinel);
+        expect(modes).toEqual(["workspace", "workspace", "full-access"]);
       } finally {
         await permitted.close();
       }
@@ -176,8 +204,10 @@ it.skipIf(process.platform !== "linux")(
       try {
         await running;
       } finally {
-        if (bundledCli === undefined) delete process.env.FUNGI_BUNDLED_CLI;
-        else process.env.FUNGI_BUNDLED_CLI = bundledCli;
+        for (const [key, value] of previousEnvironment) {
+          if (value === undefined) Reflect.deleteProperty(process.env, key);
+          else process.env[key] = value;
+        }
         await rm(root, { recursive: true, force: true });
       }
     }

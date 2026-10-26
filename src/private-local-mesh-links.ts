@@ -46,13 +46,22 @@ type ServiceLink = {
  * Service-owned native I/O only. The account owns pins, Carrier owns retry
  * custody, and the addressed runtime owns acceptance. No mail is queued here.
  */
-export function createLocalMeshLinks(options: {
-  credentialPath: string;
-  receive: (
-    record: EnrolledLocalMachine,
-    envelope: PostEnvelope,
-  ) => Promise<PostDeliveryResult>;
-}) {
+export function createLocalMeshLinks(
+  options: {
+    credentialPath: string;
+    receive: (
+      record: EnrolledLocalMachine,
+      envelope: PostEnvelope,
+    ) => Promise<PostDeliveryResult>;
+  },
+  timing: Readonly<{
+    wait: (ms: number, signal: AbortSignal) => Promise<void>;
+    random: () => number;
+  }> = {
+    wait: (ms, signal) => delay(ms, undefined, { signal }),
+    random: Math.random,
+  },
+) {
   const account = createLocalMachineEnrollmentAccount(options.credentialPath);
   const links = new Map<string, ServiceLink>();
   let stopping = false;
@@ -80,6 +89,49 @@ export function createLocalMeshLinks(options: {
       (await current(link.record))
     );
   }
+
+  // WebSocket's error event does not expose the HTTP upgrade response. A
+  // freshly signed plain GET can surface the receiver's upgrade hint. The
+  // response is NOT signed: this is diagnostic only, never authority to stop.
+  async function upgradeAdvertised(
+    record: EnrolledLocalMachine,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    try {
+      const url = machineLinkDialUrl(
+        record.authority.origin,
+        record.scopeId,
+        record.deviceId,
+      );
+      const signer = await importSeamSigner(
+        `${record.deviceId}:${record.privateKey}`,
+      );
+      const signature = await signSeamRequest(
+        signer,
+        machineLinkAudience(record.scopeId, record.deviceId),
+        "GET",
+        url.href,
+        unsignedPayload,
+      );
+      const response = await fetch(url, {
+        headers: { [seamHeader]: signature },
+        signal: AbortSignal.any([signal, AbortSignal.timeout(10_000)]),
+      });
+      await response.body?.cancel();
+      return (
+        response.status === 426 &&
+        response.headers.get("x-fungi-machine-link-action") === "upgrade fungi"
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  /** Equal jitter avoids synchronized immediate retries even at the 15 s cap. */
+  const retryMs = (failures: number, random: number) => {
+    const ceiling = Math.min(15_000, 500 * 2 ** Math.min(failures, 5));
+    return Math.floor((ceiling * (1 + random)) / 2);
+  };
 
   async function connection(
     record: EnrolledLocalMachine,
@@ -241,18 +293,37 @@ export function createLocalMeshLinks(options: {
           stop,
           channel: undefined,
           done: (async (): Promise<"stopped"> => {
+            let failures = 0;
+            let upgradeNotified = false;
             while (!stopped()) {
               try {
                 if (!(await current(record))) return "stopped";
                 await connection(record, stop.signal, (channel) => {
                   link.channel = channel;
+                  if (channel !== undefined) {
+                    failures = 0;
+                    upgradeNotified = false;
+                  }
                 });
               } catch (cause) {
                 if (stopped()) return "stopped";
                 logEvent("mesh-link.connection", cause);
+                const advertised = await upgradeAdvertised(record, stop.signal);
+                if (stopped()) return "stopped";
+                if (advertised) {
+                  // A forged refusal can delay a link, not permanently kill it.
+                  // Emit once per outage and retry at the bounded cap.
+                  if (!upgradeNotified) console.error("upgrade fungi");
+                  upgradeNotified = true;
+                  failures = 5;
+                }
               }
               try {
-                await delay(1000, undefined, { signal: stop.signal });
+                await timing.wait(
+                  retryMs(failures, timing.random()),
+                  stop.signal,
+                );
+                failures = Math.min(failures + 1, 5);
               } catch (cause) {
                 if (stopped()) return "stopped";
                 throw cause;
@@ -279,7 +350,8 @@ export function createLocalMeshLinks(options: {
       const link = links.get(localMeshLinkKey(record));
       const channel = link?.channel;
       if (channel === undefined || !(await isCurrent(record))) {
-        link?.stop.abort();
+        // An unavailable send is Carrier's retry, not authority to retire a
+        // service-owned link while its redial is waiting.
         throw new MachineLinkPostUnavailable({ reason: "closed" });
       }
       return await channel.deliver(envelope);

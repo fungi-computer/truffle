@@ -292,8 +292,8 @@ it.each(["held", "eio", "invalid-json", "non-array"])(
   async (mode) => {
     const root = await syntheticProject("fungi-service-held-read-");
     const directory = await serviceDirectory(join(root, "service"));
-    const home = join(root, "home");
-    await mkdir(home);
+    // Bun follows HOME for Agent temp; it must not resolve inside the project.
+    const home = await mkdtemp(join(tmpdir(), "fungi-service-held-home-"));
     const saved = ["A", "B", "C"].map((name) => ({
       invocationRoot: root,
       databasePath: join(root, `${name}.sqlite`),
@@ -310,6 +310,8 @@ it.each(["held", "eio", "invalid-json", "non-array"])(
           ? "{}"
           : JSON.stringify(saved.slice(0, 2));
     await writeFile(manifest, original);
+    // The service-owned native copy must not live inside the selected project.
+    const runtime = await mkdtemp(join(tmpdir(), "fungi-held-runtime-"));
     const readHeld = Promise.withResolvers<undefined>();
     const clientOpened = Promise.withResolvers<undefined>();
     const child = spawn(
@@ -329,6 +331,7 @@ it.each(["held", "eio", "invalid-json", "non-array"])(
           XDG_CONFIG_HOME: join(home, "config"),
           XDG_DATA_HOME: join(home, "data"),
           XDG_CACHE_HOME: join(home, "cache"),
+          XDG_RUNTIME_DIR: runtime,
         },
         stdout: "inherit",
         stderr: "ignore",
@@ -358,7 +361,17 @@ it.each(["held", "eio", "invalid-json", "non-array"])(
           signal: abort.signal,
         },
       );
-      await clientOpened.promise;
+      await Promise.race([
+        clientOpened.promise,
+        selecting.then((response) => {
+          assert.equal(
+            response.status,
+            200,
+            "Service selection refused before opening the client",
+          );
+          return clientOpened.promise;
+        }),
+      ]);
       child.send("release-read");
       expect((await selecting).status).toBe(200);
       const status = liveServiceStatusSchema.parse(
@@ -443,6 +456,8 @@ it.each(["held", "eio", "invalid-json", "non-array"])(
         await child.exited;
       }
       await rm(root, { recursive: true, force: true });
+      await rm(runtime, { recursive: true, force: true });
+      await rm(home, { recursive: true, force: true });
     }
   },
   15_000,
@@ -521,7 +536,7 @@ it.each([
         ...fixtureModelControls,
         ...fixtureMailControls,
         // Its queued prompts are work the next service must resume.
-        idle: () => Promise.resolve(false),
+        idle: () => Promise.resolve({ idle: false, wakeAt: null }),
         name: "fake-agent",
         bindSessionPath: () => true,
         close: async () => {

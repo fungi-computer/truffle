@@ -36,5 +36,5 @@ export function modelFailureMessage(
   }
   if (failure.rejection?.code === "provider_rejected")
     return `${provider} rejected the model request (${failure.rejection.code}, HTTP ${String(failure.rejection.status)}). Check /login or choose another model with /model.`;
-  return `${provider} rejected the model request. Check /login or choose another model with /model.`;
+  return `${provider} model request failed without a provider rejection. Retry the request.`;
 }

@@ -2,17 +2,107 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { z } from "zod";
 import { createModels } from "@earendil-works/pi-ai";
 import {
   fauxAssistantMessage,
   fauxProvider,
 } from "@earendil-works/pi-ai/providers/faux";
 import { Shiitake, type ModelAcquisition } from "@fungi.computer/shiitake";
-import { waitForAgentTerminal } from "@fungi.computer/shiitake/agent-control";
+import { waitForAgentSettlement } from "@fungi.computer/shiitake/agent-control";
 import { nodeRuntimeHost } from "@fungi.computer/shiitake/node";
 import { expect, it, vi } from "vitest";
 import { createPrivateLocalModelSource } from "../src/private-local-runtime-host.js";
 import { createPrivateSqliteOwner } from "../src/private-sqlite-owner.js";
+
+it("keeps upstream failure prose out of a Local compaction notice", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "local-summary-failure-"));
+  const database = new DatabaseSync(join(directory, "agent.sqlite"));
+  const host = nodeRuntimeHost(() => undefined);
+  const models = createModels();
+  const provider = fauxProvider({
+    provider: "faux-safe",
+    models: [
+      { id: "owned-model", contextWindow: 1_000_000, maxTokens: 100_000 },
+    ],
+    tokenSize: { min: 100, max: 100 },
+  });
+  models.setProvider(provider.provider);
+  const source = createPrivateLocalModelSource(
+    models,
+    "faux-safe",
+    "owned-model",
+    "summary-failure",
+  );
+  const agent = await Shiitake.make({
+    store: createPrivateSqliteOwner(database),
+    runtime: host.runtime,
+    extensions: { roster: [], grants: [] },
+    instructions: {
+      load: () => Promise.resolve({ revision: "test", text: "Reply." }),
+    },
+    model: source,
+  });
+  try {
+    const session = agent.session("main");
+    for (let index = 0; index < 2; index++) {
+      provider.setResponses([fauxAssistantMessage("history".repeat(15_000))]);
+      const accepted = await session.send(`Build history ${String(index)}`);
+      expect(
+        await waitForAgentSettlement(
+          session,
+          accepted.commandId,
+          10_000,
+          new AbortController().signal,
+        ).then(({ terminal }) => terminal),
+      ).toMatchObject({ outcome: "completed" });
+    }
+    const secret =
+      "provider_error: 401 Authorization: Bearer sk-live-fake-secret";
+    provider.setResponses([
+      fauxAssistantMessage("", {
+        stopReason: "error",
+        errorMessage: secret,
+      }),
+    ]);
+    const accepted = await session.command({
+      type: "compact",
+      requestId: "failed-summary",
+    });
+    expect(
+      await waitForAgentSettlement(
+        session,
+        accepted.commandId,
+        10_000,
+        new AbortController().signal,
+      ).then(({ terminal }) => terminal),
+    ).toMatchObject({ outcome: "failed" });
+    const notice = z.object({
+      kind: z.literal("compaction_notice"),
+      result: z.literal("failed"),
+      trigger: z.literal("manual"),
+      diagnostic: z.string(),
+    });
+    const rows = database
+      .prepare(
+        "SELECT data_json FROM session_entries WHERE type = 'compaction_notice'",
+      )
+      .all()
+      .map((row) =>
+        notice.parse(
+          JSON.parse(z.object({ data_json: z.string() }).parse(row).data_json),
+        ),
+      );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.diagnostic).toContain("Summarization failed:");
+    expect(rows[0]?.diagnostic).not.toContain(secret);
+  } finally {
+    await agent.close();
+    await host.close();
+    database.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 30_000);
 
 it("keeps the Local door's reason on the first terminal before cleanup, settlement and reopen", async () => {
   const directory = await mkdtemp(join(tmpdir(), "local-owned-failure-"));
@@ -75,17 +165,17 @@ it("keeps the Local door's reason on the first terminal before cleanup, settleme
   try {
     const session = current.agent.session("main");
     const accepted = await session.send("Fail safely");
-    const waiting = waitForAgentTerminal(
+    const waiting = waitForAgentSettlement(
       session,
       accepted.commandId,
       1000,
       new AbortController().signal,
-    );
+    ).then(({ terminal }) => terminal);
     failureAllowed.resolve(undefined);
     await releaseStarted.promise;
     const first = await waiting;
     const reason =
-      "faux-safe rejected the model request. Check /login or choose another model with /model.";
+      "faux-safe model request failed without a provider rejection. Retry the request.";
     expect(first).toMatchObject({ outcome: "failed", diagnostic: reason });
     expect((await session.read()).terminals).toEqual([first]);
     expect(
@@ -98,6 +188,10 @@ it("keeps the Local door's reason on the first terminal before cleanup, settleme
     )?.value;
     if (projected?.role !== "assistant")
       throw new Error("Expected the Local door's assistant failure");
+    expect(projected.errorMessage).toBe(reason);
+    expect(projected.providerError).toBe(
+      `provider_error: 401 ${privateMarker}`,
+    );
     // Even an identical decoded Pi message is not this acquisition's producer.
     if (acquisition?.failureReason === undefined)
       throw new Error("Expected the Local door's failure provenance");
@@ -111,7 +205,14 @@ it("keeps the Local door's reason on the first terminal before cleanup, settleme
       ).toBe(reason);
     });
     expect((await session.read()).terminals).toEqual([first]);
-    expect(JSON.stringify(await session.read())).not.toContain(privateMarker);
+    expect(JSON.stringify((await session.read()).terminals)).not.toContain(
+      privateMarker,
+    );
+    expect(
+      current.database
+        .prepare("SELECT failure_reason FROM watchdog_jobs WHERE job_id = ?")
+        .get(accepted.commandId)?.failure_reason,
+    ).not.toContain(privateMarker);
     await current.agent.close();
     await current.host.close();
     current.database.close();
@@ -119,13 +220,22 @@ it("keeps the Local door's reason on the first terminal before cleanup, settleme
     expect((await current.agent.session("main").read()).terminals).toEqual([
       first,
     ]);
+    const reopened = (await current.agent.session("main").read()).messages.find(
+      ({ value }) => value.role === "assistant",
+    )?.value;
+    expect(reopened?.role === "assistant" && reopened.errorMessage).toBe(
+      reason,
+    );
+    expect(reopened?.role === "assistant" && reopened.providerError).toBe(
+      `provider_error: 401 ${privateMarker}`,
+    );
     expect(
-      await waitForAgentTerminal(
+      await waitForAgentSettlement(
         current.agent.session("main"),
         accepted.commandId,
         1000,
         new AbortController().signal,
-      ),
+      ).then(({ terminal }) => terminal),
     ).toEqual(first);
     expect(failures).toEqual([]);
   } finally {

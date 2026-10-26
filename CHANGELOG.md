@@ -1,5 +1,111 @@
 # @fungi.computer/truffle
 
+## 0.3.0
+
+### Minor Changes
+
+- Changes since 0.2.2:
+
+  - fix(local): receive Spore release version from CLI owner
+  - fix(local): explain native package startup refusal
+  - fix(local): fall back when no session bus address exists
+  - feat(local): keep Oyster MCP keys in OS keychain
+  - fix(local): keep native patch source independent of package exports
+  - fix(local): align native patch resolution for linked installs
+  - fix(local): carry service native through joined rules host
+  - feat(local): stage verified native payload once per service
+  - fix(local): render host Git hook warning without duplicated grant label
+  - fix(local): select reviewed Git profile without an assertion
+  - fix(local): disclose diff hook risk without repeating card label
+  - fix(local): fence grants to protected Git remote names
+  - fix(local): admit Seatbelt Workspace fallback temp under cache
+  - fix(local): disclose Git hook execution on grant cards
+  - fix(local): preserve macOS fallback Agent temp under Seatbelt
+  - fix(local): allow only reviewed Git grant options
+  - fix(local): inject OS home into Linux permission profile
+  - fix(local): refuse read-only Files edits without approval
+  - fix(local): close Seatbelt mode and hidden-record bypasses
+  - fix(local): cover absent Fungi cache in Workspace
+  - fix(local): refuse local-path remotes in project git rules
+  - fix(local): fence Git grants to protected repositories and safe argv
+  - fix(local): verify and stage native payload once per owner
+  - fix(local): ship both Linux permission filters in native CLI
+  - fix(local): narrow project rules and audit matched commands
+  - fix(local): enforce macOS Seatbelt permission modes
+  - feat(local): enforce Linux permission sandbox profiles
+  - fix(shiitake): prove in-flight settlement waits over HTTP
+  - fix(shiitake): await exact command settlement without session watches
+  - fix(local): tighten permission approval edge cases
+  - fix(truffle): report real mode and background sandbox denial hints
+  - fix(local): probe new sandboxed Agents before creating stores
+  - fix(truffle): check protected Files targets before and after approval
+  - fix(truffle): withhold git option grants for absolute executables
+  - fix(truffle): refuse derived git option prefixes
+  - fix(truffle): export process output used by sandbox diagnostics
+  - feat(local): remember human-approved exec prefixes
+  - fix: isolate provider prose to recorded failed turns
+  - feat(local): stage read-only Files writes for human approval
+  - fix: distinguish absent provider text from safe diagnostics
+  - fix: retain provider error text on failed turns
+  - fix(local): make Git gate proof and documentation checkout-safe
+  - feat(local): dispatch approved sandbox escapes once through ledger handoff
+  - fix(local): align Codex-style Git gates and docs
+  - feat(local): stage sandbox escapes as approval records
+  - feat(local): report likely sandbox denial in exec results
+  - fix: bound hung model attempts and retain failed partials
+  - feat(local): make workspace Git metadata read-only
+  - fix: admit Local permission modes before persisting Agents
+  - feat: enforce local agent permission modes across service and tests
+  - feat: introduce local agent permission modes
+  - fix(mesh): unify sessionless delegation acceptance
+  - fix(local): refuse discovery when a Git-reported path is access-denied
+  - fix(local): handle sandbox Git discovery failures explicitly
+  - fix(local): make commondir read-only and parse Git output as raw bytes
+  - fix(local): ask Git for sandbox Git admin instead of walking payload
+  - fix(mesh): route Local acceptance through Shiitake
+  - fix(mesh): type atomic sessionless admission
+  - fix(mesh): checkpoint atomic local notice staging
+  - feat(mesh): wip sessionless acceptance checkpoint
+  - fix(mesh): preserve held custody separately
+  - fix(local): keep mesh redial alive after unsigned upgrade hints
+  - feat(local): back off mesh redials and refuse incompatible protocol
+  - feat(mesh): distinguish held delegation mail
+  - fix(local): clear sleep-wake lint violations
+  - fix(mesh): accept frozen undeliverable replies after leave
+  - fix(local): preserve open agent wakes on shutdown
+  - feat(local): restore future wakes without opening agents
+  - feat(local): release agents waiting for future wakes
+  - feat(bird-dog): bound mail content by UTF-8 bytes
+  - fix(spore): stop Bun loading Agent project config into host
+  - fix(truffle): refuse agent-writable host JavaScript at sandbox admission
+  - fix(shiitake): merge integration permission callers into settlement waits
+  - fix(local): merge S1 sandboxed creation guard
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/approvals@0.1.0
+  - @fungi.computer/bird-dog@0.2.0
+  - @fungi.computer/carrier@0.2.0
+  - @fungi.computer/cordyceps@0.4.0
+  - @fungi.computer/graft@0.1.2
+  - @fungi.computer/knapsack@0.3.0
+  - @fungi.computer/seam@0.2.0
+  - @fungi.computer/shiitake-extensions@0.2.0
+  - @fungi.computer/shiitake@0.4.0
+  - @fungi.computer/agar@0.3.1
+  - @fungi.computer/mycelium@0.2.2
+  - @fungi.computer/zookeeper@0.0.3
+  - @fungi.computer/nacre@0.0.2
+
 ## 0.2.2
 
 ### Patch Changes

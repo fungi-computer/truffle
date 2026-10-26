@@ -26,9 +26,12 @@ import {
   type PrivateLocalAuthTarget,
 } from "./private-local-auth-rpc.js";
 import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 import { readInstalledLocalClientBuildId } from "./private-local-client-version.js";
+import { nativePackageStartupError } from "./private-local-native-install-error.js";
 export { readInstalledLocalClientBuildId } from "./private-local-client-version.js";
 export { privateLocalServiceVersion } from "./private-local-service-discovery.js";
 import {
@@ -356,6 +359,7 @@ export function createPrivateLocalServiceManager(
     request.signal?.throwIfAborted();
     const directory = await serviceDirectory(selectedDirectory);
     const release = await acquireServiceLock(directory, "startup");
+    let nativeRefusalDirectory: string | undefined;
     try {
       const registration = await readServiceRegistration(directory);
       const existing =
@@ -378,6 +382,10 @@ export function createPrivateLocalServiceManager(
         fileURLToPath(
           new URL("./private-local-service-process.js", import.meta.url),
         );
+      nativeRefusalDirectory = await mkdtemp(
+        join(directory, ".native-startup-refusal-"),
+      );
+      const nativeRefusal = join(nativeRefusalDirectory, "native-package");
       const child = spawn(
         options.executable ?? process.execPath,
         [
@@ -391,7 +399,11 @@ export function createPrivateLocalServiceManager(
           stdio: "ignore",
           // Service startup retains its existing inherited inputs. This is
           // not a Computer exec child: only its selected host HOME is pinned.
-          env: { ...process.env, HOME: root.home },
+          env: {
+            ...process.env,
+            HOME: root.home,
+            FUNGI_NATIVE_STARTUP_REFUSAL: nativeRefusal,
+          },
         },
       );
       let failure: Error | undefined;
@@ -416,8 +428,21 @@ export function createPrivateLocalServiceManager(
             );
           return accept(ready);
         }
-        if (hasExited())
+        if (hasExited()) {
+          const refusal = await readFile(nativeRefusal, "utf8").catch(
+            (cause: unknown) => {
+              if (
+                cause instanceof Error &&
+                "code" in cause &&
+                cause.code === "ENOENT"
+              )
+                return undefined;
+              throw cause;
+            },
+          );
+          if (refusal === "native-package") throw nativePackageStartupError();
           throw new Error("Local service exited before its handshake");
+        }
         await delay(100, undefined, { signal: request.signal });
       }
       child.kill("SIGTERM");
@@ -429,7 +454,13 @@ export function createPrivateLocalServiceManager(
           : `Local service did not become ready; child ${String(child.pid)} is still running`,
       );
     } finally {
-      await release();
+      // The token is per spawn and cannot survive a failed or successful start.
+      try {
+        if (nativeRefusalDirectory !== undefined)
+          await rm(nativeRefusalDirectory, { recursive: true, force: true });
+      } finally {
+        await release();
+      }
     }
   }
   type SelectionInput =

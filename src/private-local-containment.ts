@@ -1,43 +1,28 @@
 import { spawnSync } from "node:child_process";
-import {
-  closeSync,
-  mkdtempSync,
-  openSync,
-  realpathSync,
-  rmSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { closeSync, openSync, realpathSync } from "node:fs";
+import { userInfo } from "node:os";
 import { LocalBwrapUnavailable } from "./private-local-bwrap.js";
 import {
   createNativePayloadStaging,
   type NativePayloadStaging,
 } from "./private-local-native-staging.js";
 import { linuxSandboxCommand } from "./private-local-linux-sandbox.js";
-import { seatbeltCommand } from "./private-local-seatbelt.js";
+import {
+  seatbeltCommand,
+  UnsafeSeatbeltFolder,
+} from "./private-local-seatbelt.js";
 import {
   sandboxPolicy,
+  linuxSandboxProfile,
+  UnsafeGitMarker,
   UnsafeHostCode,
   UnsafeNativePayload,
 } from "./private-local-sandbox-policy.js";
 import { z } from "zod";
+import type { LocalPermissionMode } from "./private-local-permission-mode.js";
 
 export const sandboxUnavailableReasonSchema = z.strictObject({
-  kind: z.enum([
-    "unsupported-platform",
-    "invalid-folder",
-    "missing",
-    "missing-artifact",
-    "invalid-digest",
-    "digest-mismatch",
-    "unreadable",
-    "not-executable",
-    "staging-failed",
-    "unsafe-native-payload",
-    "unsafe-host-code",
-    "startup-refused",
-    "backend-refused",
-  ]),
+  kind: z.enum(["unsupported", "install", "folder", "startup-refused"]),
   message: z.string(),
 });
 
@@ -55,7 +40,7 @@ export class LocalSandboxUnavailable extends Error {
 export type SandboxCommand = Readonly<{
   executable: string;
   args: readonly string[];
-  environment: Readonly<{ TMPDIR: string }>;
+  environment: Readonly<{ TMPDIR: string; SSH_AUTH_SOCK?: string }>;
   /** Linux only: feed these verified bytes to fd3; never inherit arbitrary fds. */
   seccompFilter?: Uint8Array;
 }>;
@@ -77,14 +62,18 @@ export type SandboxAdmission =
 export function sandboxUnavailableReason(
   cause: unknown,
 ): SandboxUnavailableReason {
+  if (cause instanceof UnsafeGitMarker)
+    return { kind: "folder", message: cause.message };
+  if (cause instanceof UnsafeSeatbeltFolder)
+    return { kind: "folder", message: cause.message };
   if (cause instanceof UnsafeHostCode)
-    return { kind: "unsafe-host-code", message: cause.message };
+    return { kind: "install", message: cause.message };
   if (cause instanceof UnsafeNativePayload)
-    return { kind: "unsafe-native-payload", message: cause.message };
+    return { kind: "install", message: cause.message };
   if (cause instanceof LocalBwrapUnavailable)
     return { kind: cause.reason, message: cause.message };
   return {
-    kind: "backend-refused",
+    kind: "startup-refused",
     message:
       cause instanceof Error ? cause.message : "Sandbox preparation failed.",
   };
@@ -100,9 +89,18 @@ export function establishLocalSandbox(
     project: string;
     /** Absolute folder selected by the Local owner. */
     folder: string;
+    mode: Exclude<LocalPermissionMode, "full-access">;
+    temporaryDirectory: string;
     platform?: string;
   }>,
   staging?: NativePayloadStaging,
+  /** Host startup probe; a Linux command-generation test can supply its own runner. */
+  runProbe?: (command: SandboxCommand) => Readonly<{
+    status: number | null;
+    stderr: string;
+    signal: string | null;
+    error?: Error;
+  }>,
 ): SandboxAdmission {
   try {
     sandboxPolicy(input.project, input.folder);
@@ -110,7 +108,7 @@ export function establishLocalSandbox(
     return {
       state: "unavailable",
       reason: {
-        kind: "invalid-folder",
+        kind: "folder",
         message:
           cause instanceof Error ? cause.message : "Invalid sandbox folder.",
       },
@@ -121,39 +119,46 @@ export function establishLocalSandbox(
     return {
       state: "unavailable",
       reason: {
-        kind: "unsupported-platform",
-        message: `Local sandbox is unavailable on ${platform}.`,
+        kind: "unsupported",
+        message: `${input.mode === "workspace" ? "Workspace" : "Read-only"} on ${platform} needs a supported OS sandbox; use --yolo or run on macOS/Linux.`,
       },
     };
 
-  const native = staging ?? createNativePayloadStaging(input.project);
-  let agentTemporaryDirectory: string | undefined;
+  let native: NativePayloadStaging | undefined;
   try {
-    // Native staging is never granted as an Agent-writable temporary root.
-    if (platform === "darwin")
-      agentTemporaryDirectory = realpathSync(
-        mkdtempSync(join(tmpdir(), "fungi-sandbox-")),
-      );
-    const agentTemporary = agentTemporaryDirectory;
-    const environmentTmp = agentTemporary ?? "/tmp";
+    native =
+      staging ??
+      (platform === "linux"
+        ? createNativePayloadStaging(input.project)
+        : undefined);
+    const environmentTmp =
+      platform === "linux" ? "/tmp" : input.temporaryDirectory;
     let closed = false;
     const sandbox: LocalSandbox = {
       command: (cwd, argv, readOnlyHelperFile) => {
         if (closed)
           throw new LocalSandboxUnavailable({
-            kind: "backend-refused",
+            kind: "startup-refused",
             message: "Sandbox has been closed.",
           });
         // Failed/incomplete authority discovery is not an unavailable backend:
         // it must not turn into an authorized unsandboxed retry.
         const policy = sandboxPolicy(input.project, input.folder);
         try {
+          const profile = linuxSandboxProfile(
+            policy,
+            input.mode,
+            input.temporaryDirectory,
+            process.env,
+            userInfo().homedir,
+            platform,
+          );
           const linuxPayload =
-            platform === "linux" ? native.linux(policy) : undefined;
+            platform === "linux" ? native?.linux(profile) : undefined;
           const stagedHelper =
             readOnlyHelperFile === undefined
               ? undefined
-              : native.patch(readOnlyHelperFile);
+              : native?.patch(readOnlyHelperFile);
           const stagedArgv: readonly [string, ...string[]] =
             stagedHelper === undefined
               ? argv
@@ -168,24 +173,23 @@ export function establishLocalSandbox(
           const launch =
             linuxPayload !== undefined
               ? linuxSandboxCommand(
-                  policy,
+                  profile,
                   linuxPayload,
                   cwd,
                   stagedArgv,
                   undefined,
                   stagedHelper,
                 )
-              : seatbeltCommand(
-                  {
-                    ...policy,
-                    temporaryDirectory: environmentTmp,
-                  },
-                  stagedArgv,
-                );
-          return {
-            ...launch,
-            environment: { TMPDIR: environmentTmp },
+              : seatbeltCommand(profile, stagedArgv);
+          let environment: SandboxCommand["environment"] = {
+            TMPDIR: environmentTmp,
           };
+          if (platform === "linux" && profile.sshAgentSocket !== undefined)
+            environment = {
+              TMPDIR: environmentTmp,
+              SSH_AUTH_SOCK: profile.sshAgentSocket,
+            };
+          return { ...launch, environment };
         } catch (cause) {
           throw new LocalSandboxUnavailable(sandboxUnavailableReason(cause));
         }
@@ -193,12 +197,7 @@ export function establishLocalSandbox(
       close: () => {
         if (closed) return;
         closed = true;
-        try {
-          if (staging === undefined) native.close();
-        } finally {
-          if (agentTemporary !== undefined)
-            rmSync(agentTemporary, { recursive: true });
-        }
+        if (staging === undefined) native?.close();
       },
     };
     const command = sandbox.command(realpathSync(input.folder), [
@@ -207,7 +206,9 @@ export function establishLocalSandbox(
     let filterDescriptor: number | undefined;
     const probe = () => {
       if (command.seccompFilter !== undefined) {
-        const path = native.probeFilter(command.seccompFilter);
+        const path = native?.probeFilter(command.seccompFilter);
+        if (path === undefined)
+          throw new Error("No Linux filter staging owner");
         filterDescriptor = openSync(path, "r");
       }
       return spawnSync(command.executable, [...command.args], {
@@ -227,7 +228,7 @@ export function establishLocalSandbox(
     };
     const result = (() => {
       try {
-        return probe();
+        return runProbe?.(command) ?? probe();
       } finally {
         if (filterDescriptor !== undefined) closeSync(filterDescriptor);
       }
@@ -239,22 +240,18 @@ export function establishLocalSandbox(
         state: "unavailable",
         reason: {
           kind: "startup-refused",
-          message:
+          message: `${input.mode === "workspace" ? "Workspace" : "Read-only"} on this ${platform === "darwin" ? "Mac" : "Linux host"} needs a working ${platform === "darwin" ? "sandbox-exec profile probe" : "bwrap installation"}; use --yolo or ${platform === "darwin" ? "check the failed Seatbelt profile probe" : "fix the sandbox installation"}. ${
             result.error?.message ??
             (stderr.length > 0
               ? stderr
-              : `Sandbox startup exited ${String(result.status)} (${String(result.signal)}).`),
+              : `Sandbox startup exited ${String(result.status)} (${String(result.signal)}).`)
+          }`,
         },
       };
     }
     return { state: "ready", sandbox };
   } catch (cause) {
-    try {
-      if (staging === undefined) native.close();
-    } finally {
-      if (agentTemporaryDirectory !== undefined)
-        rmSync(agentTemporaryDirectory, { recursive: true });
-    }
+    if (staging === undefined) native?.close();
     return {
       state: "unavailable",
       reason:

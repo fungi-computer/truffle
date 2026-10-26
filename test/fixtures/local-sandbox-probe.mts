@@ -30,17 +30,16 @@ assert.throws(
     renameSync(join(folder, ".git"), join(folder, ".git2"));
   },
   {
-    code: "EBUSY",
+    code: "EROFS",
   },
 );
 const database = new DatabaseSync(join(folder, ".fungi", "agent.sqlite"));
 assert.throws(() => {
-  database.exec("UPDATE identity SET require_sandbox = 0");
+  database.exec("UPDATE identity SET mode = 'full-access'");
 });
 assert.equal(
-  database.prepare("SELECT require_sandbox FROM identity").get()
-    ?.require_sandbox,
-  1,
+  database.prepare("SELECT mode FROM identity").get()?.mode,
+  "workspace",
 );
 database.close();
 assert.equal(process.env.XDG_RUNTIME_DIR, undefined);
@@ -82,7 +81,12 @@ for (const argv of [
   assert.notEqual(result.status, 0, result.stderr);
 }
 assert.equal(readFileSync(join(folder, ".git", "config"), "utf8"), config);
-writeFileSync(join(folder, "allowed"), "folder write\n");
+assert.throws(
+  () => {
+    writeFileSync(join(folder, "allowed"), "folder write\n");
+  },
+  { code: "EROFS" },
+);
 for (const argv of [
   ["add", "allowed"],
   [
@@ -91,6 +95,7 @@ for (const argv of [
     "-c",
     "user.email=sandbox@example.invalid",
     "commit",
+    "--allow-empty",
     "-m",
     "folder fixture",
   ],
@@ -99,7 +104,11 @@ for (const argv of [
     cwd: folder,
     encoding: "utf8",
   });
-  assert.equal(result.status, 0, result.stderr);
+  assert.notEqual(result.status, 0, result.stderr);
+  assert.match(
+    result.stderr,
+    /read-only file system|permission denied|operation not permitted/iu,
+  );
 }
 console.log(
   "PASS: real Linux folder/state/Git/home/network/runtime focused probes; not hostile-program isolation or joined Local lifecycle qualification",

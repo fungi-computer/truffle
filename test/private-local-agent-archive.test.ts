@@ -127,6 +127,7 @@ function session(commandId: string | undefined): ShiitakeSession {
     Promise.reject(new Error("unused in the archive proofs"));
   return {
     address: "session:main",
+    readSettlement: unused,
     latestPending: unused,
     withdraw: unused,
     read: () => Promise.resolve(snapshot(commandId)),

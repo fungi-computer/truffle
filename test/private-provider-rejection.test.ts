@@ -21,7 +21,7 @@ it("does not infer a provider retry class from assistant error prose", () => {
       }),
     }),
   ).toBe(
-    "openai rejected the model request. Check /login or choose another model with /model.",
+    "openai model request failed without a provider rejection. Retry the request.",
   );
 });
 

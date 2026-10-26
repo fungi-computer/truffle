@@ -26,6 +26,7 @@ import { Knapsack, type KnapsackComputer } from "@fungi.computer/knapsack";
 import { Mycelium, type InvocationContext } from "@fungi.computer/mycelium";
 import {
   createPrivateInvocationComputer,
+  likelySandboxDenied,
   runPrivateInvocationProcess,
 } from "../src/private-invocation-computer.js";
 
@@ -40,6 +41,11 @@ const execResultSchema = z.strictObject({
   exitCode: z.number().int(),
   stdout: z.string(),
   stderr: z.string(),
+  sandbox: z.strictObject({
+    mode: z.enum(["full-access", "workspace", "read-only"]),
+    likelyDenied: z.boolean(),
+    ranOutsideSandbox: z.boolean(),
+  }),
   truncated: z.union([
     z.literal(false),
     z
@@ -67,6 +73,141 @@ async function temporaryDirectory(label: string) {
   temporaryDirectories.push(directory);
   return directory;
 }
+
+it("Workspace escape stages without executing, while Full access ignores escape", async () => {
+  const root = await temporaryDirectory("escape");
+  const marker = join(root, "ran");
+  let mode: "workspace" | "full-access" = "workspace";
+  const stages: string[] = [];
+  const computer = await createPrivateInvocationComputer(
+    root,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    () => mode,
+    async ({ request, cwd }) => {
+      expect(cwd).toBe(await realpath(root));
+      stages.push(JSON.stringify(request));
+      return {
+        kind: "pending_approval",
+        recordId: "one",
+        description: {
+          title: "computer.exec",
+          inputBytes: 1,
+          inputSha256: "a".repeat(64),
+        },
+      };
+    },
+  );
+  const input = {
+    executable: "touch",
+    args: [marker],
+    escape: { justification: "sandbox denied" },
+  };
+  expect(await computer.call("exec", input, invocation())).toMatchObject({
+    kind: "pending_approval",
+    recordId: "one",
+  });
+  expect(await exists(marker)).toBe(false);
+  expect(await computer.call("exec", input, invocation())).toMatchObject({
+    kind: "pending_approval",
+    recordId: "one",
+  });
+  expect(stages).toHaveLength(2);
+  mode = "full-access";
+  expect(await computer.call("exec", input, invocation())).toMatchObject({
+    status: "completed",
+    sandbox: { mode: "full-access" },
+  });
+  expect(await exists(marker)).toBe(true);
+  expect(stages).toHaveLength(2);
+});
+
+it("a direct argv prefix may run by policy, but shell text still asks", async () => {
+  const root = await temporaryDirectory("prefix-policy");
+  const decisions: string[] = [];
+  let allowed = true;
+  const computer = await createPrivateInvocationComputer(
+    root,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    () => "workspace",
+    () => {
+      decisions.push("card");
+      return Promise.resolve({
+        kind: "pending_approval",
+        recordId: "shell",
+        description: {
+          title: "computer.exec",
+          inputBytes: 1,
+          inputSha256: "a".repeat(64),
+        },
+      });
+    },
+    ({ request }) => {
+      if (
+        !allowed ||
+        !("executable" in request) ||
+        request.executable !== "git"
+      )
+        return Promise.resolve(undefined);
+      decisions.push("policy");
+      return Promise.resolve({
+        status: "completed",
+        exitCode: 0,
+        stdout: "policy result",
+        stderr: "",
+        truncated: false,
+        sandbox: {
+          mode: "workspace",
+          likelyDenied: false,
+          ranOutsideSandbox: true,
+        },
+      });
+    },
+  );
+  expect(
+    await computer.call(
+      "exec",
+      { executable: "git", args: ["push", "-u", "origin", "b"] },
+      invocation(),
+    ),
+  ).toMatchObject({ status: "completed", stdout: "policy result" });
+  expect(
+    await computer.call(
+      "exec",
+      { command: "git push; touch ~/x", escape: { justification: "blocked" } },
+      invocation(),
+    ),
+  ).toMatchObject({ kind: "pending_approval" });
+  expect(
+    await computer.call(
+      "exec",
+      {
+        executable: "sh",
+        args: ["-c", "git push; touch ~/x"],
+        escape: { justification: "blocked" },
+      },
+      invocation(),
+    ),
+  ).toMatchObject({ kind: "pending_approval" });
+  allowed = false;
+  expect(
+    await computer.call(
+      "exec",
+      {
+        executable: "git",
+        args: ["push", "-u", "origin", "b"],
+        escape: { justification: "rule removed" },
+      },
+      invocation(),
+    ),
+  ).toMatchObject({ kind: "pending_approval" });
+  expect(decisions).toEqual(["policy", "card", "card", "card"]);
+});
 
 function invocation(signal = new AbortController().signal): InvocationContext {
   return { executionId: "local-exec-proof", deadlineAt: null, signal };
@@ -185,6 +326,59 @@ async function abortThroughMycelium(
 }
 
 describe("private invocation Computer", () => {
+  it("marks sandbox denials without treating ordinary shell failures as denials", () => {
+    const result = {
+      status: "failed" as const,
+      exitCode: 1,
+      stdout: "",
+      stderr: "fatal: could not lock config file: Device or resource busy",
+      truncated: false as const,
+    };
+    expect(likelySandboxDenied("workspace", result)).toBe(true);
+    expect(
+      likelySandboxDenied("read-only", { ...result, stderr: "EROFS" }),
+    ).toBe(true);
+    expect(
+      likelySandboxDenied("workspace", {
+        ...result,
+        stderr: "seccomp blocked",
+      }),
+    ).toBe(true);
+    expect(likelySandboxDenied("workspace", { ...result, exitCode: 2 })).toBe(
+      false,
+    );
+    expect(likelySandboxDenied("workspace", { ...result, exitCode: 126 })).toBe(
+      false,
+    );
+    expect(likelySandboxDenied("workspace", { ...result, exitCode: 127 })).toBe(
+      false,
+    );
+    expect(
+      likelySandboxDenied("workspace", { ...result, stderr: "bad syntax" }),
+    ).toBe(false);
+    expect(likelySandboxDenied("full-access", result)).toBe(false);
+  });
+
+  it("reports the live mode and the denial hint on a real command", async () => {
+    const root = await temporaryDirectory("computer-denial");
+    const computer = await createPrivateInvocationComputer(
+      root,
+      "/usr/bin:/bin",
+      undefined,
+      homedir(),
+      undefined,
+      () => "workspace",
+    );
+    const result = await call(computer, {
+      command: "printf 'sh: operation not permitted\\n' >&2; exit 1",
+    });
+    expect(result.sandbox).toEqual({
+      mode: "workspace",
+      likelyDenied: true,
+      ranOutsideSandbox: true,
+    });
+  });
+
   it("refuses NUL shell input with an actionable error and keeps later exec calls usable", async () => {
     const root = await temporaryDirectory("computer-nul");
     const computer = await createPrivateInvocationComputer(
@@ -343,18 +537,18 @@ describe("private invocation Computer", () => {
       "-c",
       "while :; do sleep 1; done",
     ]);
-    const result = execResultSchema.parse(
-      await runPrivateInvocationProcess(
-        command,
-        new AbortController().signal,
-        20,
-        {
-          requestedMs: 840_001,
-          describeCommand: () => "while :; do sleep 1; done",
-        },
-      ),
+    const result = await runPrivateInvocationProcess(
+      command,
+      new AbortController().signal,
+      20,
+      {
+        requestedMs: 840_001,
+        describeCommand: () => "while :; do sleep 1; done",
+      },
     );
     expect(result.status).toBe("deadline_exceeded");
+    if (result.status !== "deadline_exceeded")
+      throw new Error("Expected a command timeout");
     expect(result.message).toContain("timeoutMs=20 ms");
     expect(result.message).toContain("clamped from the requested 840001 ms");
     expect(result.message).toContain("780000 ms");
@@ -377,6 +571,11 @@ describe("private invocation Computer", () => {
       stdout: "stdout",
       stderr: "stderr",
       truncated: false,
+      sandbox: {
+        mode: "full-access",
+        likelyDenied: false,
+        ranOutsideSandbox: true,
+      },
     });
     expect(performance.now() - started).toBeLessThan(900);
     const truncated = await call(computer, {

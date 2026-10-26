@@ -141,6 +141,12 @@ export type ServiceLogEvent =
       event: "recovery-persistence-disabled";
       code: RecoveryPersistenceFailureCode;
     }>
+  | Readonly<{
+      event: "exec-rule-match";
+      agentId: string;
+      executable: string;
+      ruleId: string;
+    }>
   | Readonly<{ event: "memory"; rss: number; heap: HeapStatistics }>
   | Readonly<{ event: "memory-unavailable"; failure: FailureMetadata }>
   | Readonly<{
@@ -175,6 +181,12 @@ export type ServiceLogLifecycle = Readonly<{
   ready: (serviceId: string) => void;
   stopping: (reason: ServiceLogShutdownReason) => void;
   failure: (failure: FailureMetadata) => void;
+  ruleMatch: (
+    match: Omit<
+      Extract<ServiceLogEvent, { event: "exec-rule-match" }>,
+      "event"
+    >,
+  ) => void;
   recoveryDisabled: (code: RecoveryPersistenceFailureCode) => void;
   /** Synchronous, so it lands before the bounded drain exits the process. */
   drainTimeout: (
@@ -378,6 +390,9 @@ export function createServiceLogLifecycle(
     },
     failure(failure) {
       emit({ event: "failure", failure });
+    },
+    ruleMatch(match) {
+      emit({ event: "exec-rule-match", ...match });
     },
     recoveryDisabled(code) {
       if (closed || recovery !== undefined) return;

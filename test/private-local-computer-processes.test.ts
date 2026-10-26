@@ -26,6 +26,48 @@ import {
   type MyceliumJsonValue,
 } from "@fungi.computer/mycelium";
 import { createPrivateInvocationComputer } from "../src/private-invocation-computer.js";
+
+it("an escaped start stages without starting a process", async () => {
+  const { root, processes } = await fixture("escape-start");
+  const marker = join(root, "started");
+  let stages = 0;
+  const computer = await createPrivateInvocationComputer(
+    root,
+    "/usr/bin:/bin",
+    processes.scope("escape"),
+    undefined,
+    undefined,
+    () => "workspace",
+    ({ request }) => {
+      expect(request.operation).toBe("start");
+      stages++;
+      return Promise.resolve({
+        kind: "pending_approval",
+        recordId: "start-record",
+        description: {
+          title: "computer.exec",
+          inputBytes: 1,
+          inputSha256: "a".repeat(64),
+        },
+      });
+    },
+  );
+  expect(
+    await computer.call(
+      "exec",
+      {
+        operation: "start",
+        executable: "touch",
+        args: [marker],
+        escape: { justification: "sandbox denied" },
+      },
+      invocation(),
+    ),
+  ).toMatchObject({ kind: "pending_approval", recordId: "start-record" });
+  expect(stages).toBe(1);
+  expect(processes.scope("escape").list()).toEqual([]);
+  await expect(access(marker)).rejects.toThrow();
+});
 import {
   createPrivateLocalComputerProcesses,
   type PrivateLocalComputerProcesses,
@@ -48,6 +90,37 @@ async function fixture(label: string) {
   });
   return { root, processes };
 }
+
+it("background wait reports a likely sandbox denial with the Agent's mode", async () => {
+  const { root, processes } = await fixture("denial-hint");
+  const computer = await createPrivateInvocationComputer(
+    root,
+    "/usr/bin:/bin",
+    processes.scope("denial-hint"),
+    undefined,
+    undefined,
+    () => "workspace",
+  );
+  const started = z.object({ process: z.object({ id: z.string() }) }).parse(
+    await computer.call(
+      "exec",
+      {
+        operation: "start",
+        command: "printf 'operation not permitted\\n' >&2; exit 1",
+      },
+      invocation(),
+    ),
+  );
+  expect(
+    await computer.call(
+      "exec",
+      { operation: "wait", id: started.process.id, timeoutMs: 10_000 },
+      invocation(),
+    ),
+  ).toMatchObject({
+    sandbox: { mode: "workspace", likelyDenied: true, ranOutsideSandbox: true },
+  });
+});
 
 async function computerFor(
   root: string,

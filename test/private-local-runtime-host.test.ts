@@ -576,7 +576,7 @@ describe("private local RuntimeHost", () => {
         const result = await stream.result();
         expect(result.stopReason).toBe("error");
         expect(result.errorMessage).toBe(
-          "openai rejected the model request. Check /login or choose another model with /model.",
+          "openai model request failed without a provider rejection. Retry the request.",
         );
         await acquisition.release();
       }

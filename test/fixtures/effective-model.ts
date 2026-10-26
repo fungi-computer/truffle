@@ -9,7 +9,7 @@ export const fixtureModelControls: Pick<
   PrivateLocalRuntimeHost,
   | "setModel"
   | "setArchived"
-  | "setRequireSandbox"
+  | "setMode"
   | "sandboxStatus"
   | "assertModelReady"
   | "prepareReload"
@@ -18,10 +18,10 @@ export const fixtureModelControls: Pick<
   setArchived: () => {
     throw new Error("Unexpected fixture Agent archive write");
   },
-  setRequireSandbox: () => {
-    throw new Error("Unexpected fixture sandbox requirement write");
+  setMode: () => {
+    throw new Error("Unexpected fixture Agent mode write");
   },
-  sandboxStatus: () => ({ state: "available", requireSandbox: false }),
+  sandboxStatus: () => ({ mode: "workspace", available: true }),
   setModel: () =>
     Promise.reject(new Error("Unexpected fixture Agent model write")),
   assertModelReady: (_sessionId, signal) => {
@@ -55,7 +55,7 @@ export const fixtureMailControls: Pick<
   PrivateLocalRuntimeHost,
   "acceptMail" | "readSettlement" | "pendingDelegation" | "idle"
 > = {
-  idle: () => Promise.resolve(true),
+  idle: () => Promise.resolve({ idle: true, wakeAt: null }),
   pendingDelegation: () => Promise.resolve(undefined),
   acceptMail: () => Promise.reject(new Error("Unexpected fixture mail")),
   readSettlement: () =>

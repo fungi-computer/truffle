@@ -3,8 +3,8 @@
 ; rust-v0.162.1 (7a078f6bb4).
 ; Changed by Botanical: no network fragments, PTY/device write grants, shared
 ; memory or power-management grants. Reads and parameterized folder/temp writes
-; are composed by private-local-seatbelt.ts. Protect .fungi and Git hooks/config,
-; not all of .git. Denials carry fungi-safe for diagnostic correlation.
+; are composed by private-local-seatbelt.ts. Protect .fungi and the whole
+; existing .git administration. Denials carry fungi-safe for diagnostic correlation.
 ;
 ; inspired by Chrome's sandbox policy:
 ; https://source.chromium.org/chromium/chromium/src/+/main:sandbox/policy/mac/common.sb;l=273-319;drc=7b3962fe2e5fc9e2ee58000dc8fbf3429d84d3bd

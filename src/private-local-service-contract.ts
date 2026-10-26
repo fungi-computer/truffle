@@ -12,6 +12,7 @@ import type { PrivateLocalEffectiveModel } from "./private-local-effective-model
 import type { StopAllResult } from "./private-local-stop-all.js";
 import type { ServiceDiagnosticsStatus } from "./private-local-service-log.js";
 import type { LocalSandboxStatus } from "./private-local-sandbox.js";
+import type { LocalPermissionMode } from "./private-local-permission-mode.js";
 import type { LocalUiAttachmentLifetime } from "./private-local-ui-attachment.js";
 
 /** Live health, not the on-disk identity record or a cached connection snapshot. */
@@ -38,8 +39,8 @@ export type PrivateLocalServiceSelection = Readonly<{
   /** TUI/form watches own their attachment; ACP retains it until connection close. */
   uiAttachmentLifetime?: LocalUiAttachmentLifetime | undefined;
   clientPath?: string | undefined;
-  /** Person-selected sandbox requirement, not an approval setting. */
-  requireSandbox?: boolean | undefined;
+  /** Person-selected Agent mode, not an approval setting. */
+  mode?: LocalPermissionMode | undefined;
   databasePath?: string | undefined;
   sessionId?: string | undefined;
   fungiMcp?: PrivateFungiMcpSelection | undefined;
@@ -49,7 +50,7 @@ export type PrivateLocalSessionCreation = Readonly<{
   invocationRoot: string;
   uiAttachmentLifetime?: LocalUiAttachmentLifetime | undefined;
   clientPath?: string | undefined;
-  requireSandbox?: boolean | undefined;
+  mode?: LocalPermissionMode | undefined;
   databasePath: string;
   requestId: string;
   fungiMcp?: PrivateFungiMcpSelection | undefined;
@@ -124,7 +125,7 @@ export type PrivateLocalSessionChoice = Readonly<{
   resume: (
     options?: PrivateLocalServiceRequestOptions & {
       fungiMcp?: PrivateFungiMcpSelection | undefined;
-      requireSandbox?: boolean | undefined;
+      mode?: LocalPermissionMode | undefined;
     },
   ) => Promise<PrivateLocalServiceConnection>;
 }>;

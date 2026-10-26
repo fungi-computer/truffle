@@ -1,6 +1,4 @@
 import { access, constants } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
-import { createRequire } from "node:module";
 import process from "node:process";
 import * as ChildProcess from "effect/process/ChildProcess";
 import type { FilesPatch, FilesPort } from "@fungi.computer/knapsack";
@@ -11,26 +9,10 @@ import {
   runPrivateInvocationProcess,
   type LocalSandboxLaunch,
 } from "./private-invocation-computer.js";
-import { createNativePayloadStaging } from "./private-local-native-staging.js";
-
-function patchExecutable(): string {
-  if (process.env.FUNGI_BUNDLED_CLI) {
-    const name = `@fungi.computer/spore-native-${process.platform}-${process.arch}`;
-    try {
-      return createRequire(process.env.FUNGI_BUNDLED_CLI).resolve(
-        `${name}/bin/fungi-apply-patch`,
-      );
-    } catch (cause) {
-      throw new Error(
-        `Missing ${name}; reinstall Fungi with npm optional dependencies enabled`,
-        { cause },
-      );
-    }
-  }
-  return fileURLToPath(
-    new URL("../native/bin/fungi-apply-patch", import.meta.url),
-  );
-}
+import {
+  createNativePayloadStaging,
+  packagedPatchPath,
+} from "./private-local-native-staging.js";
 const maximumPatchBytes = 128 * 1024;
 const mismatchExitCode = 23;
 const formatExitCode = 24;
@@ -79,7 +61,7 @@ export async function createPrivateFilesPatch(
   read: FilesPort["read"],
   sandbox?: LocalSandboxLaunch,
 ): Promise<FilesPatch | undefined> {
-  const executable = patchExecutable();
+  const executable = packagedPatchPath();
   try {
     // Advertise the installed helper if present; only the verified private
     // copy is executed, so its source does not need an execute bit.
@@ -105,7 +87,7 @@ export async function createPrivateFilesPatch(
       if (executableToRun === undefined)
         throw new Error("Native Files helper was not staged");
       const env: NodeJS.ProcessEnv = { ...process.env, ...launch?.environment };
-      if (launch !== undefined && !("bareNative" in launch)) {
+      if (launch !== undefined) {
         delete env.XDG_RUNTIME_DIR;
         delete env.DBUS_SESSION_BUS_ADDRESS;
       }

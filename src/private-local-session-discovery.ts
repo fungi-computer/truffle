@@ -3,6 +3,7 @@ import { basename, dirname, join, resolve } from "node:path";
 import * as Effect from "effect/Effect";
 import { parseModelPreferenceJson } from "@fungi.computer/shiitake/model-preference";
 import { z } from "zod";
+import { localPermissionModeSchema } from "./private-local-permission-mode.js";
 import { readAgentDefaultModelJson } from "./private-local-agent-default-model.js";
 import {
   localAgentFolderSchema,
@@ -157,7 +158,8 @@ const storedProfileSchema = z.strictObject({
   name: z.string().nullable(),
   createdBy: z.string().nullable(),
   archived: z.union([z.literal(0), z.literal(1)]),
-  requireSandbox: z.union([z.literal(0), z.literal(1)]),
+  mode: localPermissionModeSchema,
+  writableFolders: z.array(z.string()),
   folder: localAgentFolderSchema,
   model: z.string(),
 });
@@ -188,21 +190,30 @@ export function readPrivateLocalAgentProfile(path: string) {
       .prepare("PRAGMA table_info(private_local_identity)")
       .all();
     if (
-      !["name", "created_by", "archived", "require_sandbox", "folder"].every(
-        (required) => columns.some((column) => column.name === required),
-      )
+      ![
+        "name",
+        "created_by",
+        "archived",
+        "mode",
+        "writable_folders",
+        "folder",
+      ].every((required) => columns.some((column) => column.name === required))
     )
       throw new LocalStoreSchemaError(path);
     const identity = database
       .prepare(
-        "SELECT name, created_by, archived, require_sandbox, folder FROM private_local_identity WHERE singleton = 1",
+        "SELECT name, created_by, archived, mode, writable_folders, folder FROM private_local_identity WHERE singleton = 1",
       )
       .get();
+    const writableFolders = storedProfileSchema.shape.writableFolders.parse(
+      JSON.parse(z.string().parse(identity?.writable_folders)),
+    );
     const stored = storedProfileSchema.parse({
       name: identity?.name,
       createdBy: identity?.created_by,
       archived: identity?.archived,
-      requireSandbox: identity?.require_sandbox,
+      mode: identity?.mode,
+      writableFolders,
       folder: identity?.folder,
       model: readAgentDefaultModelJson(database),
     });
@@ -210,7 +221,8 @@ export function readPrivateLocalAgentProfile(path: string) {
       name: stored.name ?? undefined,
       createdBy: stored.createdBy,
       archived: stored.archived === 1,
-      requireSandbox: stored.requireSandbox === 1,
+      mode: stored.mode,
+      writableFolders: stored.writableFolders,
       folder: stored.folder,
       model: parseModelPreferenceJson(stored.model),
     };
@@ -346,7 +358,7 @@ export function projectPrivateLocalSessionDiscovery(
               databasePath,
               sessionId,
               fungiMcp: resumeRequest?.fungiMcp,
-              requireSandbox: resumeRequest?.requireSandbox,
+              mode: resumeRequest?.mode,
             },
             resumeRequest,
           ),

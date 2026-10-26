@@ -34,6 +34,9 @@ for (const platform of platforms) {
   if (platform.startsWith("linux-")) {
     entry.bwrap = digest(await readFile(resolve(root, "fungi-bwrap")));
     entry.seccomp = digest(await readFile(resolve(root, "fungi-seccomp.bpf")));
+    entry.seccompWorkspace = digest(
+      await readFile(resolve(root, "fungi-seccomp-workspace.bpf")),
+    );
   }
   digests[platform] = entry;
 }

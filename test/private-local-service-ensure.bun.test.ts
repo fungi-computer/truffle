@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -21,6 +22,7 @@ import {
 } from "../src/private-local-service.js";
 import {
   acquireServiceLock,
+  privateLocalServiceProtocol,
   readServiceRegistration,
   serviceDirectory,
 } from "../src/private-local-service-discovery.js";
@@ -43,11 +45,31 @@ async function installedPrefix() {
   const bin = join(prefix, "bin");
   const dist = join(prefix, "dist");
   const temporary = join(home, "tmp");
+  const runtime = join(home, "runtime");
+  const native = join(
+    prefix,
+    "node_modules",
+    "@fungi.computer",
+    `spore-native-${process.platform}-${process.arch}`,
+    "bin",
+  );
   await Promise.all([
     mkdir(bin, { recursive: true }),
     mkdir(dist, { recursive: true }),
     mkdir(temporary),
+    mkdir(runtime, { mode: 0o700 }),
+    mkdir(native, { recursive: true }),
   ]);
+  for (const name of [
+    "fungi-apply-patch",
+    ...(process.platform === "linux"
+      ? ["fungi-bwrap", "fungi-seccomp.bpf", "fungi-seccomp-workspace.bpf"]
+      : []),
+  ])
+    await copyFile(
+      join(import.meta.dir, "..", "native", "bin", name),
+      join(native, name),
+    );
   const launcher = join(dist, "fungi.cjs");
   const cli = join(dist, "cli.js");
   // The installed-build reader keys on this launcher's name and its adjacent
@@ -77,6 +99,7 @@ async function installedPrefix() {
     XDG_CONFIG_HOME: join(home, "config"),
     XDG_CACHE_HOME: join(home, "cache"),
     XDG_DATA_HOME: join(home, "data"),
+    XDG_RUNTIME_DIR: runtime,
     PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
     FUNGI_LAUNCHER: launcher,
   };
@@ -119,6 +142,7 @@ beforeEach(async () => {
     "FUNGI_BUNDLED_BUILD_ID",
     "FUNGI_BUNDLED_CLI",
     "FUNGI_LAUNCHER",
+    "XDG_RUNTIME_DIR",
     "PATH",
   ])
     previousEnvironment.set(key, process.env[key]);
@@ -129,6 +153,7 @@ beforeEach(async () => {
   process.env.FUNGI_BUNDLED_BUILD_ID = clientVersion;
   process.env.FUNGI_BUNDLED_CLI = installed.cli;
   process.env.FUNGI_LAUNCHER = installed.env.FUNGI_LAUNCHER;
+  process.env.XDG_RUNTIME_DIR = installed.env.XDG_RUNTIME_DIR;
   process.env.PATH = installed.env.PATH;
 });
 
@@ -267,7 +292,10 @@ describe("every client start ensures a service of its own build", () => {
     const started = await createPrivateLocalServiceManager({
       directory,
     }).start();
-    expect(started).toMatchObject({ protocol: 3, version: clientVersion });
+    expect(started).toMatchObject({
+      protocol: privateLocalServiceProtocol,
+      version: clientVersion,
+    });
     expect(started.pid).not.toBe(stale.child.pid);
     await stale.child.exited;
     expect(stale.child.signalCode).toBeNull();
@@ -325,7 +353,10 @@ describe("every client start ensures a service of its own build", () => {
     const started = await createPrivateLocalServiceManager({
       directory,
     }).start();
-    expect(started).toMatchObject({ protocol: 3, version: clientVersion });
+    expect(started).toMatchObject({
+      protocol: privateLocalServiceProtocol,
+      version: clientVersion,
+    });
     await other.child.exited;
     expect(other.child.exitCode).toBe(0);
   }, 30_000);

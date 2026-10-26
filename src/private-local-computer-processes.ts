@@ -82,6 +82,9 @@ export type PrivateLocalProcess = z.output<typeof processSchema>;
 /** The intentional shell form of background `start`. */
 const shellStartInput = z.strictObject({
   operation: z.literal("start"),
+  escape: z
+    .strictObject({ justification: z.string().min(1).max(2048) })
+    .optional(),
   command: z.string().min(1).max(maximumLaunchTextLength),
   stdin: launchStdinSchema.optional(),
   cwd: launchCwdSchema.optional(),
@@ -90,6 +93,9 @@ const shellStartInput = z.strictObject({
 const directStartInput = z
   .strictObject({
     operation: z.literal("start"),
+    escape: z
+      .strictObject({ justification: z.string().min(1).max(2048) })
+      .optional(),
     executable: z.string().min(1),
     args: z.array(z.string()).default([]),
     stdin: launchStdinSchema.optional(),
@@ -697,6 +703,13 @@ export const backgroundExecInput = z.union([
 const backgroundResult = readOutput.extend({
   timedOut: z.boolean(),
   signalled: z.boolean().optional(),
+  sandbox: z
+    .strictObject({
+      mode: z.enum(["full-access", "workspace", "read-only"]),
+      likelyDenied: z.boolean(),
+      ranOutsideSandbox: z.boolean(),
+    })
+    .optional(),
 });
 export const backgroundExecOutput = z.union([backgroundResult, listOutput]);
 

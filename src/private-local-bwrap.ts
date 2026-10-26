@@ -7,20 +7,12 @@ import { nativeDigests } from "./private-local-native-digests.js";
 import {
   assertHostOwnedNativeFile,
   UnsafeNativePayload,
-  type LocalSandboxPolicy,
 } from "./private-local-sandbox-policy.js";
 
 export class LocalBwrapUnavailable extends Error {
   override readonly name = "LocalBwrapUnavailable";
   constructor(
-    readonly reason:
-      | "missing"
-      | "missing-artifact"
-      | "invalid-digest"
-      | "digest-mismatch"
-      | "unreadable"
-      | "not-executable"
-      | "staging-failed",
+    readonly reason: "install",
     message: string,
     options?: ErrorOptions,
   ) {
@@ -29,13 +21,16 @@ export class LocalBwrapUnavailable extends Error {
 }
 
 export type LinuxSandboxPayload = {
+  readonly sourcePath: string;
   readonly executableBytes: Uint8Array;
-  readonly seccompFilter: Uint8Array;
+  readonly seccomp: Uint8Array;
+  readonly seccompWorkspace: Uint8Array;
 };
 
 export type LinuxSandboxDigests = Readonly<{
   bwrap: string;
   seccomp: string;
+  seccompWorkspace: string;
 }>;
 
 /** Packaged patch has no sidecar; the built module owns its digest. */
@@ -49,7 +44,7 @@ export function verifiedNativePatchHelper(
   const expected = nativeDigests[`${process.platform}-${process.arch}`]?.patch;
   if (expected === undefined)
     throw new LocalBwrapUnavailable(
-      "invalid-digest",
+      "install",
       "No built native patch digest for this platform; reinstall Fungi.",
     );
   return verifiedBytes(
@@ -61,25 +56,36 @@ export function verifiedNativePatchHelper(
   );
 }
 
-/** Check both packaged artifacts on every use; never cache verification. */
+/** Verify the three packaged Linux files once before copying into service-owned staging. */
 export function verifyLocalLinuxSandboxPayload(
   executable: string,
-  policy: LocalSandboxPolicy,
+  project: string,
   expected: LinuxSandboxDigests,
+  readNativeSource: NativeSourceReader = readFileSync,
 ): LinuxSandboxPayload {
   const executableBytes = verifiedBytes(
     executable,
     "fungi-bwrap",
-    policy.projectRoot,
+    project,
     expected.bwrap,
+    readNativeSource,
   );
   return {
+    sourcePath: executable,
     executableBytes,
-    seccompFilter: verifiedBytes(
+    seccomp: verifiedBytes(
       join(dirname(executable), "fungi-seccomp.bpf"),
       "fungi-seccomp.bpf",
-      policy.projectRoot,
+      project,
       expected.seccomp,
+      readNativeSource,
+    ),
+    seccompWorkspace: verifiedBytes(
+      join(dirname(executable), "fungi-seccomp-workspace.bpf"),
+      "fungi-seccomp-workspace.bpf",
+      project,
+      expected.seccompWorkspace,
+      readNativeSource,
     ),
   };
 }
@@ -96,14 +102,14 @@ function verifiedBytes(
     assertHostOwnedNativeFile(project, path);
     if (!statSync(path).isFile())
       throw new LocalBwrapUnavailable(
-        "not-executable",
+        "install",
         `Packaged ${label} is not a regular file; reinstall Fungi.`,
       );
     bytes = readNativeSource(path);
   } catch (cause) {
     if (cause instanceof Error && "code" in cause && cause.code === "ENOENT")
       throw new LocalBwrapUnavailable(
-        "missing-artifact",
+        "install",
         `Packaged ${label} is missing; reinstall Fungi with optional dependencies enabled.`,
         { cause },
       );
@@ -113,14 +119,14 @@ function verifiedBytes(
     )
       throw cause;
     throw new LocalBwrapUnavailable(
-      "unreadable",
+      "install",
       `Packaged ${label} cannot be read; reinstall Fungi. No command was started.`,
       { cause },
     );
   }
   if (createHash("sha256").update(bytes).digest("hex") !== expected)
     throw new LocalBwrapUnavailable(
-      "digest-mismatch",
+      "install",
       `Packaged ${label} digest mismatch; reinstall Fungi. No command was started.`,
     );
   return bytes;
@@ -128,12 +134,17 @@ function verifiedBytes(
 
 /** Same optional native-package lookup as apply_patch, with no PATH fallback. */
 export function localLinuxSandboxPayload(
-  policy: LocalSandboxPolicy,
+  project: string,
+  readNativeSource: NativeSourceReader = readFileSync,
 ): LinuxSandboxPayload {
   const digest = nativeDigests[`${process.platform}-${process.arch}`];
-  if (digest?.bwrap === undefined || digest.seccomp === undefined)
+  if (
+    digest?.bwrap === undefined ||
+    digest.seccomp === undefined ||
+    digest.seccompWorkspace === undefined
+  )
     throw new LocalBwrapUnavailable(
-      "invalid-digest",
+      "install",
       "No built native Linux payload digest for this platform; reinstall Fungi.",
     );
   let executable: string;
@@ -146,10 +157,10 @@ export function localLinuxSandboxPayload(
         name,
       );
     } catch (cause) {
-      throw new LocalBwrapUnavailable("missing-artifact", message, { cause });
+      throw new LocalBwrapUnavailable("install", message, { cause });
     }
     if (directories === null)
-      throw new LocalBwrapUnavailable("missing-artifact", message);
+      throw new LocalBwrapUnavailable("install", message);
     let packageRoot: string | undefined;
     for (const directory of directories) {
       const candidate = join(directory, name);
@@ -159,27 +170,27 @@ export function localLinuxSandboxPayload(
           break;
         }
       } catch (cause) {
-        throw new LocalBwrapUnavailable("missing-artifact", message, { cause });
+        throw new LocalBwrapUnavailable("install", message, { cause });
       }
     }
     if (packageRoot === undefined)
       throw new LocalBwrapUnavailable(
-        "missing",
+        "install",
         `Missing ${name}; reinstall Fungi with optional dependencies enabled.`,
       );
     // Package metadata (including exports) is not an authority for whether
     // native bytes are absent. Check the package's location before its bin.
     try {
-      assertHostOwnedNativeFile(policy.projectRoot, packageRoot);
+      assertHostOwnedNativeFile(project, packageRoot);
       if (!statSync(packageRoot).isDirectory())
-        throw new LocalBwrapUnavailable("missing-artifact", message);
+        throw new LocalBwrapUnavailable("install", message);
     } catch (cause) {
       if (
         cause instanceof UnsafeNativePayload ||
         cause instanceof LocalBwrapUnavailable
       )
         throw cause;
-      throw new LocalBwrapUnavailable("missing-artifact", message, { cause });
+      throw new LocalBwrapUnavailable("install", message, { cause });
     }
     executable = join(packageRoot, "bin", "fungi-bwrap");
   } else {
@@ -187,8 +198,14 @@ export function localLinuxSandboxPayload(
       new URL("../native/bin/fungi-bwrap", import.meta.url),
     );
   }
-  return verifyLocalLinuxSandboxPayload(executable, policy, {
-    bwrap: digest.bwrap,
-    seccomp: digest.seccomp,
-  });
+  return verifyLocalLinuxSandboxPayload(
+    executable,
+    project,
+    {
+      bwrap: digest.bwrap,
+      seccomp: digest.seccomp,
+      seccompWorkspace: digest.seccompWorkspace,
+    },
+    readNativeSource,
+  );
 }

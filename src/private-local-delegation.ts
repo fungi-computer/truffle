@@ -1,9 +1,9 @@
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
-import { deterministicReplayKey } from "@fungi.computer/cairn";
 import type {
   Accepted,
   CancelResult,
   CommandSettlement,
+  DelegationReceipt,
   VerifiedAgentReply,
 } from "@fungi.computer/shiitake";
 import type {
@@ -14,6 +14,7 @@ import type {
 } from "@fungi.computer/shiitake/agent-control";
 import { AgentArchiveRefused } from "@fungi.computer/shiitake/agent-control";
 import {
+  agentDelegationRequestKey,
   createFleetDelegation,
   delegationProvenance,
   delegationReplyMeta,
@@ -29,7 +30,7 @@ const grantLifetimeMs = 60_000;
  * owner when it is idle; `readSettlement` reads one exact command there.
  */
 export type PrivateLocalMailRouting = Readonly<{
-  deliver: (mail: BirdDogMail) => Promise<Accepted>;
+  deliver: (mail: BirdDogMail) => Promise<DelegationReceipt>;
   readSettlement: (
     agentId: string,
     sessionId: string,
@@ -91,27 +92,22 @@ export function createPrivateLocalDelegation(
     return agents;
   }
 
-  function requestKey(task: AgentRecallInput, sourceSessionId: string) {
-    return deterministicReplayKey("local-agent-delegation", [
-      input.agentId,
-      sourceSessionId,
-      task.agentId,
-      task.sessionId,
-      task.requestId,
-    ]);
-  }
-
   /** Send with one caller-owned identity; follow-up replies return here. */
   async function send(
     task: AgentDelegationInput,
     sourceSessionId: string,
     signal: AbortSignal,
     invocation?: AgentDelegationInvocation,
-  ): Promise<Accepted> {
+  ): Promise<DelegationReceipt> {
     if (invocation === undefined)
       throw new Error("Delegation requires a tool invocation");
     const agents = await authorizedMembers(task.agentId, signal);
-    const requestId = await requestKey(task, sourceSessionId);
+    const requestId = await agentDelegationRequestKey({
+      owner: { kind: "local", agentId: input.agentId },
+      sourceSessionId,
+      targetAgentId: task.agentId,
+      requestId: task.requestId,
+    });
     signal.throwIfAborted();
     if (task.delivery === "steer") {
       const opened = await input.directory.open(task.agentId, signal);
@@ -158,13 +154,25 @@ export function createPrivateLocalDelegation(
     signal: AbortSignal,
   ): Promise<CancelResult> {
     await authorizedMembers(task.agentId, signal);
-    const requestId = await requestKey(task, sourceSessionId);
+    const requestId = await agentDelegationRequestKey({
+      owner: { kind: "local", agentId: input.agentId },
+      sourceSessionId,
+      targetAgentId: task.agentId,
+      requestId: task.requestId,
+    });
     signal.throwIfAborted();
     const opened = await input.directory.open(task.agentId, signal);
     try {
-      const session = opened.agent.session(task.sessionId);
-      const admitted =
-        fleet.receipt(requestId) ?? (await session.withdraw(requestId));
+      const receipt = fleet.receipt(requestId);
+      if (
+        receipt?.sessionId !== undefined &&
+        receipt.sessionId !== task.sessionId
+      )
+        return { status: "unknown" };
+      const session = opened.agent.session(
+        receipt?.sessionId ?? task.sessionId,
+      );
+      const admitted = receipt ?? (await session.withdraw(requestId));
       return admitted.status === "accepted"
         ? await session.cancel({
             commandId: admitted.commandId,
@@ -186,7 +194,15 @@ export function createPrivateLocalDelegation(
     if (mail.to.agentId !== input.agentId && mesh === undefined)
       throw new Error("Local addressed mail recipient is not authorized");
     const agents = mesh ?? (await members(new AbortController().signal));
-    if (!agents.some(({ agentId }) => agentId === mail.from.agentId))
+    const delegation =
+      mail.replyTo.length === 0 ? fleet.authenticateReply(mail) : undefined;
+    const frozenUndeliverable =
+      delegation?.reply.outcome === "undeliverable" &&
+      delegation.reply.agentId === mail.from.agentId;
+    if (
+      !agents.some(({ agentId }) => agentId === mail.from.agentId) &&
+      !frozenUndeliverable
+    )
       throw new Error("Local mail sender is outside this project");
     if (mail.replyTo.length > 0) {
       const [destination] = mail.replyTo;
@@ -198,15 +214,23 @@ export function createPrivateLocalDelegation(
         throw new Error("Local delegated work must reply to its sender");
       return input.accept(mail, mail.meta);
     }
-    const delegation = fleet.authenticateReply(mail);
+    if (mail.reply?.outcome === "accepted") {
+      const receipt = fleet.recordAcceptedNotice(mail);
+      if (receipt === undefined)
+        throw new Error("Local acceptance notice does not match sent work");
+      return receipt;
+    }
     if (delegation === undefined)
       throw new Error("Local reply does not match work this Agent sent");
     const replier = agents.find(
       ({ agentId }) => agentId === delegation.reply.agentId,
     );
-    if (replier === undefined)
+    if (replier === undefined && !frozenUndeliverable)
       throw new Error("Local reply sender is outside this project");
-    const meta = delegationReplyMeta(delegation, replier.name);
+    const meta = delegationReplyMeta(
+      delegation,
+      replier?.name ?? delegation.reply.agentId,
+    );
     return input.accept({ ...mail, meta }, meta, delegation.reply);
   }
 

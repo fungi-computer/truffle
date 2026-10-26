@@ -2,7 +2,14 @@ import { afterEach, expect, mock, spyOn, test } from "bun:test";
 import { heapStats } from "bun:jsc";
 import { Buffer } from "node:buffer";
 import fs, { createReadStream, statSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -288,3 +295,43 @@ test.skipIf(process.platform === "win32")(
     }
   },
 );
+
+test("one typed rule match lands in the isolated HOME service log, without arguments or environment", async () => {
+  const root = await fixture();
+  const home = join(root, "home");
+  const directory = join(home, ".fungi", "service");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const diagnostics = openDiagnostics(directory);
+  try {
+    diagnostics.ruleMatch({
+      agentId: "agent-1",
+      executable: "git",
+      ruleId: "sha256-rule-id",
+    });
+    diagnostics.close();
+    const log = await readFile(join(directory, "service.jsonl"), "utf8");
+    const records = log
+      .trimEnd()
+      .split(String.fromCharCode(10))
+      .map((line) =>
+        z.looseObject({ event: z.string() }).parse(JSON.parse(line)),
+      );
+    const matched = records.filter(
+      (record) => record.event === "exec-rule-match",
+    );
+    expect(matched).toHaveLength(1);
+    expect(matched[0]).toEqual({
+      source: "local-service",
+      event: "exec-rule-match",
+      timestamp: expect.any(String),
+      pid: process.pid,
+      version: "source",
+      agentId: "agent-1",
+      executable: "git",
+      ruleId: "sha256-rule-id",
+    });
+  } finally {
+    diagnostics.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

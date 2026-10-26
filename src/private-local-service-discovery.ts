@@ -15,6 +15,7 @@ import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import lockfile from "proper-lockfile";
 import { z } from "zod";
+import { localPermissionModeSchema } from "./private-local-permission-mode.js";
 import { localServiceIds } from "./private-local-service-ids.js";
 import {
   acquireServiceOwnerLease,
@@ -29,7 +30,7 @@ export { sandboxStatusSchema } from "./private-local-sandbox.js";
  * The client-service wire contract. Bump it with any change an older client
  * cannot read; a running client then asks its window to restart.
  */
-export const privateLocalServiceProtocol = 3;
+export const privateLocalServiceProtocol = 4;
 
 /** This build's identity: the packed CLI's content hash, or `source` for a source run. */
 export function privateLocalServiceVersion(): string {
@@ -97,7 +98,7 @@ export const selectionSchema = z.strictObject({
   uiAttachmentLifetime: localUiAttachmentLifetimeSchema.optional(),
   invocationRoot: z.string().min(1),
   clientPath: privateLocalExecPathSchema,
-  requireSandbox: z.boolean().optional(),
+  mode: localPermissionModeSchema.optional(),
   databasePath: z.string().min(1).optional(),
   sessionId: z.string().min(1).optional(),
   fungiMcp: fungiMcpSelectionSchema.optional(),
@@ -106,7 +107,7 @@ export const sessionCreationSchema = z.strictObject({
   uiAttachmentLifetime: localUiAttachmentLifetimeSchema.optional(),
   invocationRoot: z.string().min(1),
   clientPath: privateLocalExecPathSchema,
-  requireSandbox: z.boolean().optional(),
+  mode: localPermissionModeSchema.optional(),
   databasePath: z.string().min(1),
   requestId: z.string().min(1),
   fungiMcp: fungiMcpSelectionSchema.optional(),

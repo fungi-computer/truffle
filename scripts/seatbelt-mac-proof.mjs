@@ -13,12 +13,15 @@ import {
   realpathSync,
   unlinkSync,
   writeFileSync,
+  symlinkSync,
 } from "node:fs";
 import { join } from "node:path";
+import { seatbeltCommand } from "../src/private-local-seatbelt.ts";
+import { establishLocalSandbox } from "../src/private-local-containment.ts";
 import {
-  seatbeltCommand,
-  seatbeltReadiness,
-} from "../src/private-local-seatbelt.ts";
+  linuxSandboxProfile,
+  sandboxPolicy,
+} from "../src/private-local-sandbox-policy.ts";
 
 if (process.platform !== "darwin") {
   console.log(
@@ -67,18 +70,33 @@ assert.equal(bare(["/usr/bin/git", "init", "-q"]).status, 0);
 writeFileSync(join(folder, "readme"), "project read\n");
 writeFileSync(join(folder, ".git", "hooks", "original"), "unchanged\n");
 const config = readFileSync(join(folder, ".git", "config"), "utf8");
-const policy = {
-  writableRoot: folder,
-  temporaryDirectory,
-  readOnly: [
-    join(folder, ".fungi"),
-    join(folder, ".git", "hooks"),
-    join(folder, ".git", "config"),
-  ],
-  immovable: [join(folder, ".git")],
-};
-function sandboxed(argv, override = policy) {
-  const command = seatbeltCommand(override, argv);
+const policy = sandboxPolicy(project, folder);
+assert.ok(policy.readOnly.includes(join(folder, ".git")));
+const admissions = new Map();
+for (const mode of ["read-only", "workspace"]) {
+  const admission = establishLocalSandbox({
+    project,
+    folder,
+    mode,
+    temporaryDirectory,
+  });
+  assert.equal(
+    admission.state,
+    "ready",
+    `${mode} product admission: ${admission.reason?.message ?? "no sandbox"}`,
+  );
+  admissions.set(mode, admission.sandbox);
+}
+process.once("exit", () => {
+  for (const sandbox of admissions.values()) sandbox.close();
+});
+function sandboxCommand(argv, mode = "workspace") {
+  const command = admissions.get(mode).command(folder, argv);
+  assert.equal(command.executable, "/usr/bin/sandbox-exec");
+  return command;
+}
+function sandboxed(argv, mode = "workspace") {
+  const command = sandboxCommand(argv, mode);
   return bare([command.executable, ...command.args]);
 }
 let failures = 0;
@@ -92,7 +110,9 @@ function check(name, expected, run) {
   return result;
 }
 const sh = (command) => sandboxed(["/bin/sh", "-c", command]);
-console.log("ADAPTER PROOF ONLY: not joined Agent/spawn-path acceptance.");
+console.log(
+  "PRODUCT ADMISSION AND COMMAND PROOF: not full Agent/Files acceptance.",
+);
 console.log(bare(["/usr/bin/sw_vers"]).stdout.trim());
 const man = bare(["/usr/bin/man", "sandbox-exec"]);
 console.log(
@@ -101,8 +121,89 @@ console.log(
     .filter((line) => /deprecat/i.test(line))
     .join("\n"),
 );
-console.log("readiness:", JSON.stringify(seatbeltReadiness(policy)));
-assert.equal(seatbeltReadiness(policy).ready, true);
+for (const mode of ["read-only", "workspace"])
+  check(`${mode} real startup`, "allowed", () =>
+    sandboxed(["/usr/bin/true"], mode),
+  );
+const unavailable = establishLocalSandbox({
+  project,
+  folder,
+  mode: "workspace",
+  temporaryDirectory,
+  platform: "unsupported",
+});
+assert.equal(unavailable.state, "unavailable");
+assert.equal(unavailable.reason.kind, "unsupported");
+console.log("unsupported mode: refused", unavailable.reason.message);
+check("Read-only folder write", "refused", () =>
+  sandboxed(["/usr/bin/touch", join(folder, "read-only-denied")], "read-only"),
+);
+check("Read-only temp write", "allowed", () =>
+  sandboxed(
+    ["/usr/bin/touch", join(temporaryDirectory, "read-only-ok")],
+    "read-only",
+  ),
+);
+// With no XDG_RUNTIME_DIR the host selects this HOME-based Agent temp. Keep
+// the proof in our disposable HOME while passing that exact path to admission.
+const fallbackTemp = join(process.env.HOME, ".cache", "fungi", "tmp", "agent");
+mkdirSync(fallbackTemp, { recursive: true, mode: 0o700 });
+for (const mode of ["read-only", "workspace"]) {
+  check(`${mode} fallback temp write`, "allowed", () => {
+    const admission = establishLocalSandbox({
+      project,
+      folder,
+      mode,
+      temporaryDirectory: fallbackTemp,
+    });
+    assert.equal(
+      admission.state,
+      "ready",
+      admission.reason?.message ?? "fallback temp admission failed",
+    );
+    try {
+      const command = admission.sandbox.command(folder, [
+        "/usr/bin/touch",
+        join(fallbackTemp, `allowed-${mode}`),
+      ]);
+      return bare([command.executable, ...command.args]);
+    } finally {
+      admission.sandbox.close();
+    }
+  });
+}
+mkdirSync(join(process.env.HOME, ".config", "fungi"), { recursive: true });
+writeFileSync(join(process.env.HOME, ".config", "fungi", "secret"), "hidden");
+check("Workspace Fungi credentials read", "refused", () =>
+  sandboxed(["/bin/cat", join(process.env.HOME, ".config", "fungi", "secret")]),
+);
+const hidden = join(process.env.HOME, ".config", "fungi");
+for (const unsafeFolder of [
+  process.env.HOME,
+  join(process.env.HOME, ".config"),
+  join(process.env.HOME, ".fungi"),
+]) {
+  mkdirSync(unsafeFolder, { recursive: true });
+  const refused = establishLocalSandbox({
+    project: process.env.HOME,
+    folder: unsafeFolder,
+    mode: "workspace",
+    temporaryDirectory,
+  });
+  assert.equal(refused.state, "unavailable", unsafeFolder);
+  assert.equal(refused.reason.kind, "folder", unsafeFolder);
+  assert.match(
+    refused.reason.message,
+    /hidden record or its parent|protected/u,
+  );
+}
+check("hidden directory rename", "refused", () =>
+  sandboxed(["/bin/mv", hidden, join(process.env.HOME, ".config", "exposed")]),
+);
+check("hidden secret unlink", "refused", () =>
+  sandboxed(["/bin/rm", join(hidden, "secret")]),
+);
+assert.equal(readFileSync(join(hidden, "secret"), "utf8"), "hidden");
 check("inside direct argv", "allowed", () =>
   sandboxed(["/usr/bin/touch", join(folder, "ok")]),
 );
@@ -132,14 +233,34 @@ check("config alias", "refused", () =>
 );
 check("Git directory rename", "refused", () => sh("mv .git .git2"));
 check("hooks remove", "refused", () => sh("rm -rf .git/hooks"));
+check("Git config hard link", "refused", () =>
+  sandboxed([
+    "/bin/ln",
+    join(folder, ".git", "config"),
+    join(folder, "git-hardlink"),
+  ]),
+);
+check("hidden secret hard link", "refused", () =>
+  sandboxed([
+    "/bin/ln",
+    join(hidden, "secret"),
+    join(folder, "hidden-hardlink"),
+  ]),
+);
+symlinkSync(join(folder, ".git", "config"), join(folder, "git-symlink"));
+check("symlink into .git write", "refused", () =>
+  sh("echo planted > git-symlink"),
+);
 assert.equal(readFileSync(join(folder, ".git", "config"), "utf8"), config);
+assert.equal(readFileSync(join(hidden, "secret"), "utf8"), "hidden");
 assert.equal(
   readFileSync(join(folder, ".git", "hooks", "original"), "utf8"),
   "unchanged\n",
 );
-check("git add/commit", "allowed", () =>
+check("git add", "refused", () => sh("git add readme"));
+check("git commit", "refused", () =>
   sh(
-    "git add readme && git -c user.name=Proof -c user.email=proof@example.invalid -c commit.gpgsign=false commit -qm proof",
+    "git -c user.name=Proof -c user.email=proof@example.invalid -c commit.gpgsign=false commit --allow-empty -qm proof",
   ),
 );
 check("public network", "refused", () =>
@@ -185,7 +306,16 @@ for (const transport of ["loopback", "unix"]) {
     assert.equal(control.status, 0, control.stderr);
     assert.equal(control.stdout, "proof-control");
     assert.equal(received, 1);
-    const command = seatbeltCommand(policy, argv);
+    if (transport === "loopback") {
+      const readOnly = sandboxCommand(argv, "read-only");
+      const denied = await request([readOnly.executable, ...readOnly.args]);
+      console.log(
+        `Read-only live network: status=${denied.status} received=${received}`,
+      );
+      assert.notEqual(denied.status, 0, "Read-only must refuse live loopback");
+      assert.equal(received, 1, "Read-only must not reach the listener");
+    }
+    const command = sandboxCommand(argv, "workspace");
     const refused = await request([command.executable, ...command.args]);
     console.log(
       `${transport} live listener: expected=refused actual=${refused.status === 7 ? "refused" : "FAIL"} status=${refused.status} control=0 received=${received} ${refused.stderr.trim()}`,
@@ -237,16 +367,19 @@ assert.equal(
   false,
   "sandbox must not launch the app",
 );
-const wrapped = seatbeltCommand(policy, [
-  "/usr/bin/touch",
-  join(folder, "failure-marker"),
-]);
+const wrapped = seatbeltCommand(
+  linuxSandboxProfile(policy, "workspace", temporaryDirectory, {
+    HOME: process.env.HOME,
+  }),
+  ["/usr/bin/touch", join(folder, "failure-marker")],
+);
 wrapped.args[1] = "(invalid-profile";
 check("sandbox start failure, no bare retry", "refused", () =>
   bare([wrapped.executable, ...wrapped.args]),
 );
 assert.equal(existsSync(join(folder, "failure-marker")), false);
 assert.equal(existsSync(join(project, "outside")), false);
+assert.equal(existsSync(join(folder, "read-only-denied")), false);
 assert.equal(existsSync(join(folder, ".fungi", "x")), false);
 assert.equal(existsSync(join(process.env.HOME, "x")), false);
 assert.equal(
@@ -257,6 +390,6 @@ check("bare outside-folder positive control", "allowed", () =>
   bare(["/usr/bin/touch", join(project, "outside")]),
 );
 console.log(
-  `${failures === 0 ? "PASS" : "FAIL"}: light Seatbelt adapter matrix (${failures} mismatches); scratch retained, no background children started.`,
+  `${failures === 0 ? "PASS" : "FAIL"}: Seatbelt product-path matrix (${failures} mismatches); scratch removed on exit, no background children started.`,
 );
 process.exitCode = failures === 0 ? 0 : 1;

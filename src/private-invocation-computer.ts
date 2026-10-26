@@ -37,22 +37,18 @@ import {
 import { privateLocalExecEnvironment } from "./private-local-exec-environment.js";
 import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import type { SandboxCommand } from "./private-local-containment.js";
+import type { LocalPermissionMode } from "./private-local-permission-mode.js";
+import type {
+  PendingApproval,
+  ApprovalRefusal,
+} from "@fungi.computer/approvals";
 
-/** A bare fallback for the native Files engine still names only staged bytes. */
-export type BareNativeCommand = SandboxCommand & Readonly<{ bareNative: true }>;
-
-/** Only Files supplies a helper; generic exec can still fall back to its argv. */
-export type LocalSandboxLaunch = {
-  (
-    cwd: string,
-    argv: readonly [string, ...string[]],
-  ): SandboxCommand | undefined;
-  (
-    cwd: string,
-    argv: readonly [string, ...string[]],
-    readOnlyHelperFile: string,
-  ): SandboxCommand | BareNativeCommand;
-};
+/** A Full-access launch is bare; sandboxed launches always supply a command or refuse. */
+export type LocalSandboxLaunch = (
+  cwd: string,
+  argv: readonly [string, ...string[]],
+  readOnlyHelperFile?: string,
+) => SandboxCommand | undefined;
 
 const maximumStreamBytes = 64 * 1_024;
 /** Room inside the stream cap for the visible truncation marker. */
@@ -82,6 +78,9 @@ const capabilityNameSchema = z
   .regex(/^[A-Za-z][A-Za-z0-9_]*$/);
 const runCommonFields = {
   operation: z.literal("run").default("run"),
+  escape: z
+    .strictObject({ justification: z.string().min(1).max(2048) })
+    .optional(),
   cwd: launchCwdSchema.optional(),
   // Accepted up to the full invocation deadline and silently clamped to
   // maximumCommandTimeoutMs (see runCommandAtInvocationBoundary); rejecting
@@ -133,21 +132,106 @@ const commandOutputFields = {
   stderr: z.string(),
   truncated: z.union([z.literal(false), z.array(execTruncation).min(1)]),
 };
+const sandboxResult = z.strictObject({
+  mode: z.enum(["full-access", "workspace", "read-only"]),
+  likelyDenied: z.boolean(),
+  ranOutsideSandbox: z.boolean().default(false),
+});
+const completedOutput = z.strictObject({
+  status: z.enum(["completed", "failed"]),
+  ...commandOutputFields,
+});
+const deadlineOutput = z.strictObject({
+  status: z.literal("deadline_exceeded"),
+  timeoutMs: z.number().int().positive(),
+  elapsedMs: z.number().nonnegative(),
+  message: z.string(),
+  ...commandOutputFields,
+});
 const execOutput = z.discriminatedUnion("status", [
-  z.strictObject({
-    status: z.enum(["completed", "failed"]),
-    ...commandOutputFields,
-  }),
-  z.strictObject({
-    status: z.literal("deadline_exceeded"),
-    timeoutMs: z.number().int().positive(),
-    elapsedMs: z.number().nonnegative(),
-    message: z.string(),
-    ...commandOutputFields,
-  }),
+  completedOutput.extend({ sandbox: sandboxResult }),
+  deadlineOutput.extend({ sandbox: sandboxResult }),
 ]);
 const shellInput = z.union([execInput, backgroundExecInput]);
-const shellOutput = z.union([execOutput, backgroundExecOutput]);
+const pendingOutput = z.strictObject({
+  kind: z.literal("pending_approval"),
+  recordId: z.string(),
+  description: z.strictObject({
+    title: z.string(),
+    inputBytes: z.number(),
+    inputSha256: z.string(),
+  }),
+});
+const refusalOutput = z.strictObject({
+  kind: z.literal("refused"),
+  reason: z.string(),
+});
+const approvalOutput = z.union([pendingOutput, refusalOutput]);
+export const shellOutput = z.union([
+  execOutput,
+  backgroundExecOutput,
+  approvalOutput,
+]);
+/** A host-attested stage door; the Computer cannot mint approval identity itself. */
+export type LocalExecEscapeStage = (
+  input: Readonly<{
+    request:
+      | z.output<typeof execInput>
+      | Extract<z.output<typeof backgroundExecInput>, { operation: "start" }>;
+    cwd: string;
+    mode: Exclude<LocalPermissionMode, "full-access">;
+    denialLine: string | null;
+    context: InvocationContext;
+    executionPath: string;
+  }>,
+) => Promise<PendingApproval | ApprovalRefusal>;
+
+/** Host-only prefix policy: the model has no rule-management door. */
+export type LocalExecPolicyRun = (
+  input: Parameters<LocalExecEscapeStage>[0],
+) => Promise<z.output<typeof shellOutput> | undefined>;
+
+/** Run the recorded command through the normal bounded process door, without a sandbox.
+ * The host supplies the captured PATH and canonical cwd; the record supplies the
+ * exact original request. No model invocation can call this door directly. */
+export async function dispatchApprovedLocalExec(
+  input: unknown,
+  cwd: string,
+  executionPath: string,
+  home: string,
+  processes: PrivateLocalProcessScope,
+  mode: LocalPermissionMode,
+): Promise<ExecOutput | z.output<typeof backgroundExecOutput>> {
+  const request = shellInput.parse(input);
+  if (request.operation === "run") {
+    const result = await runCommandAtInvocationBoundary(
+      request,
+      cwd,
+      executionPath,
+      home,
+      new AbortController().signal,
+    );
+    return execOutput.parse({
+      ...result,
+      sandbox: { mode, likelyDenied: false, ranOutsideSandbox: true },
+    });
+  }
+  if (request.operation !== "start")
+    throw new Error("Only recorded command launches may be dispatched");
+  const output = await callBackgroundExec(
+    processes,
+    request,
+    () => Promise.resolve(cwd),
+    executionPath,
+    new AbortController().signal,
+  );
+  return "text" in output
+    ? {
+        ...output,
+        sandbox: { mode, likelyDenied: false, ranOutsideSandbox: true },
+      }
+    : output;
+}
 
 function computerCapabilities(
   root: string,
@@ -160,7 +244,7 @@ function computerCapabilities(
       kind: "runtime",
       // A filesystem path has no place in the bounded discovery summary.
       // Publish the exact root in the input schema, without truncating it.
-      description: `Shell, terminal, git, builds. cwd uses the root in the input schema. ~/$HOME use home. Or {executable,args}; stdin once, closed. exec kills its group at call end; nohup/& die. timeoutMs default ${String(defaultCommandTimeoutMs)}, max ${String(maximumCommandTimeoutMs)} ms; invocation ${String(invocationDeadlineMs)} ms; deadline returns partial output. Streams keep 64 KiB, then a [stdout|stderr truncated] line; redirect to a file or head/tail.${processes === undefined ? "" : ' Jobs: {operation:"start",command} or executable+args returns process.id; poll/wait: state, exitCode, tail. wait <=60000 ms; timedOut: wait expired. Cancelled wait keeps jobs. maxBytes <=64 KiB, offset/nextOffset; keeps last 8 MiB (logStartOffset). kill stops group; list: Session jobs. Delete/close stop jobs. Use wait, not sleep.'}`,
+      description: `Shell, terminal, git, builds. cwd uses the root in the input schema. ~/$HOME use home. Or {executable,args}; stdin once, closed. exec kills its group at call end; nohup/& die. timeoutMs default ${String(defaultCommandTimeoutMs)}, max ${String(maximumCommandTimeoutMs)} ms; invocation ${String(invocationDeadlineMs)} ms; deadline returns partial output. Streams keep 64 KiB, then a [stdout|stderr truncated] line; redirect to a file or head/tail. Only after a sandbox denial, retry with escape: {justification} to request human approval; no command runs until approval.${processes === undefined ? "" : ' Jobs: {operation:"start",command} or executable+args returns process.id; poll/wait: state, exitCode, tail. wait <=60000 ms; timedOut: wait expired. Cancelled wait keeps jobs. maxBytes <=64 KiB, offset/nextOffset; keeps last 8 MiB (logStartOffset). kill stops group; list: Session jobs. Delete/close stop jobs. Use wait, not sleep.'}`,
       parameters: structuredClone(
         z.toJSONSchema(
           (processes === undefined ? execInput : shellInput).describe(
@@ -170,7 +254,11 @@ function computerCapabilities(
         ),
       ),
       output: structuredClone(
-        z.toJSONSchema(processes === undefined ? execOutput : shellOutput),
+        z.toJSONSchema(
+          processes === undefined
+            ? z.union([execOutput, approvalOutput])
+            : shellOutput,
+        ),
       ),
     },
   ]);
@@ -201,6 +289,35 @@ type BoundedOutput = Readonly<{
   totalBytes: number;
 }>;
 export type ExecOutput = z.output<typeof execOutput>;
+export type ProcessOutput =
+  z.output<typeof completedOutput> | z.output<typeof deadlineOutput>;
+
+/** Process stderr has no structured errno; classify only this display hint. */
+function classifySandboxDiagnostic(diagnostic: string): "denial" | "other" {
+  return /\b(?:EROFS|EPERM|EBUSY|read-only file system|operation not permitted|permission denied|device or resource busy|seccomp|sandbox|landlock)\b/iu.test(
+    diagnostic,
+  )
+    ? "denial"
+    : "other";
+}
+
+/**
+ * A hint to the model, not evidence that an operation was refused. Only the
+ * sandboxed launch can carry this hint; common shell usage errors and missing
+ * commands are not sandbox denials, even if their stderr mentions permissions.
+ */
+export function likelySandboxDenied(
+  mode: LocalPermissionMode,
+  result: ProcessOutput,
+): boolean {
+  if (
+    mode === "full-access" ||
+    result.exitCode === 0 ||
+    [2, 126, 127].includes(result.exitCode)
+  )
+    return false;
+  return classifySandboxDiagnostic(result.stderr) === "denial";
+}
 
 function isErrnoException(error: Error): error is NodeJS.ErrnoException {
   return "code" in error;
@@ -451,7 +568,7 @@ function commandResult(
   exitCode: number,
   stdout: BoundedOutput,
   stderr: BoundedOutput,
-): ExecOutput {
+): ProcessOutput {
   const standardOutput = textOutput(stdout, "stdout");
   const standardError = textOutput(stderr, "stderr");
   return {
@@ -510,7 +627,7 @@ function buildRunCommand(
       ? ["sh", "-c", request.command]
       : [request.executable, ...request.args];
   // Admission happens before spawn and is never retried after an executable
-  // may have run. Folder validity and requireSandbox belong to the host.
+  // may have run. Folder validity and mode belong to the host.
   const launch = sandbox?.(cwd, argv);
   if (launch !== undefined) {
     delete env.XDG_RUNTIME_DIR;
@@ -556,7 +673,7 @@ async function runCommandAtInvocationBoundary(
   home: string,
   signal: AbortSignal,
   sandbox?: LocalSandboxLaunch,
-): Promise<ExecOutput> {
+): Promise<ProcessOutput> {
   const processCommand = buildRunCommand(
     request,
     cwd,
@@ -606,7 +723,7 @@ export function runPrivateInvocationProcess(
     /** The real command text, for the timeout message; omitted when not meaningful (e.g. a native helper). */
     describeCommand?: () => string;
   }>,
-): Promise<ExecOutput> {
+): Promise<ProcessOutput> {
   return Effect.runPromise(
     Effect.scoped(
       Effect.gen(function* () {
@@ -662,7 +779,7 @@ export function runPrivateInvocationProcess(
             standardOutput.truncation,
             standardError.truncation,
           ),
-        } satisfies ExecOutput;
+        } satisfies ProcessOutput;
       }),
     ).pipe(Effect.provide(NodeServices.layer)),
     { signal },
@@ -676,11 +793,12 @@ async function execute(
   request: z.output<typeof execInput>,
   context: InvocationContext,
   sandbox?: LocalSandboxLaunch,
+  mode: LocalPermissionMode = "full-access",
 ): Promise<ExecOutput> {
   context.signal.throwIfAborted();
   const cwd = await resolveCwd(root, request.cwd);
   context.signal.throwIfAborted();
-  return runCommandAtInvocationBoundary(
+  const result = await runCommandAtInvocationBoundary(
     request,
     cwd,
     executionPath,
@@ -688,6 +806,14 @@ async function execute(
     context.signal,
     sandbox,
   );
+  return execOutput.parse({
+    ...result,
+    sandbox: {
+      mode,
+      likelyDenied: likelySandboxDenied(mode, result),
+      ranOutsideSandbox: sandbox === undefined,
+    },
+  });
 }
 
 /**
@@ -705,9 +831,14 @@ export async function createPrivateInvocationComputer(
   home: string = capturePrivateLocalConfigRoot().home,
   /** Native Local always supplies its live per-Agent admission callback. */
   sandbox?: LocalSandboxLaunch,
+  /** The live Agent mode, captured once at the command boundary. */
+  currentMode: () => LocalPermissionMode = () => "full-access",
+  stageEscape?: LocalExecEscapeStage,
+  runPolicy?: LocalExecPolicyRun,
 ): Promise<KnapsackComputer> {
   const path = parsePrivateLocalExecPath(executionPath);
   const root = await realpath(resolve(invocationRoot));
+  let lastDenialLine: string | null = null;
   return Object.freeze({
     getCapabilities: () =>
       Promise.resolve(computerCapabilities(root, processes)),
@@ -739,19 +870,93 @@ export async function createPrivateInvocationComputer(
               "Computer exec command or argument contains a NUL byte. Remove it or double the backslash in JavaScript escapes (for example, \\\\x00); no process was started.",
           },
         });
-      if (request.operation === "run")
-        return execute(root, path, home, request, context, sandbox);
-      if (processes !== undefined)
-        return jsonValueSchema.parse(
-          await callBackgroundExec(
-            processes,
+      const mode = currentMode();
+      if (
+        mode !== "full-access" &&
+        (request.operation === "run" || request.operation === "start") &&
+        "executable" in request &&
+        runPolicy !== undefined
+      ) {
+        const cwd = await resolveCwd(root, request.cwd);
+        context.signal.throwIfAborted();
+        const allowed = await runPolicy({
+          request,
+          cwd,
+          mode,
+          denialLine: null,
+          context,
+          executionPath: path,
+        });
+        if (allowed !== undefined) return jsonValueSchema.parse(allowed);
+      }
+      if (
+        (request.operation === "run" || request.operation === "start") &&
+        request.escape !== undefined &&
+        mode !== "full-access"
+      ) {
+        if (stageEscape === undefined)
+          throw new Error(
+            "Local escape approval owner is unavailable; command was not run",
+          );
+        const cwd = await resolveCwd(root, request.cwd);
+        context.signal.throwIfAborted();
+        return approvalOutput.parse(
+          await stageEscape({
             request,
-            (requested) => resolveCwd(root, requested),
-            path,
-            context.signal,
-            sandbox,
-          ),
+            cwd,
+            mode,
+            denialLine: lastDenialLine,
+            context,
+            executionPath: path,
+          }),
         );
+      }
+      if (request.operation === "run") {
+        const result = await execute(
+          root,
+          path,
+          home,
+          request,
+          context,
+          sandbox,
+          mode,
+        );
+        lastDenialLine = result.sandbox.likelyDenied
+          ? (result.stderr
+              .split("\n")
+              .find((line) => classifySandboxDiagnostic(line) === "denial") ??
+            null)
+          : null;
+        return result;
+      }
+      if (processes !== undefined) {
+        const output = await callBackgroundExec(
+          processes,
+          request,
+          (requested) => resolveCwd(root, requested),
+          path,
+          context.signal,
+          sandbox,
+        );
+        return jsonValueSchema.parse(
+          "text" in output
+            ? {
+                ...output,
+                sandbox: {
+                  mode,
+                  likelyDenied: likelySandboxDenied(mode, {
+                    status: "failed",
+                    exitCode: output.process.exitCode ?? 0,
+                    stderr: output.text,
+                    stdout: "",
+                    truncated: false,
+                  }),
+                  ranOutsideSandbox: sandbox === undefined,
+                },
+              }
+            : output,
+        );
+      }
       throw new Error(`Computer capability is unavailable: ${selected}`);
     },
   });

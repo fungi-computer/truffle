@@ -78,3 +78,22 @@ it("leaves a non-Git project alone", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+it("does not append to another repository's exclude through a planted pointer", async () => {
+  const root = await mkdtemp(join(tmpdir(), "fungi-exclude-redirect-"));
+  try {
+    const agent = join(root, "agent");
+    const victim = join(root, "victim");
+    await mkdir(agent);
+    await execFile("git", ["init", "-q", victim], {
+      env: { ...process.env, HEAVY: "/nonexistent" },
+    });
+    const exclude = join(victim, ".git", "info", "exclude");
+    const before = await readFile(exclude, "utf8");
+    await writeFile(join(agent, ".git"), `gitdir: ${join(victim, ".git")}\n`);
+    await ensurePrivateLocalGitExclude(agent);
+    expect(await readFile(exclude, "utf8")).toBe(before);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

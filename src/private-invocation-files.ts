@@ -17,6 +17,7 @@ import {
   sniffImageMimeType,
 } from "@fungi.computer/knapsack/files-read";
 import type { InvocationContext } from "@fungi.computer/mycelium";
+import type { LocalPermissionMode } from "./private-local-permission-mode.js";
 import { RE2JS } from "re2js";
 import { createPrivateFilesPatch } from "./private-files-patch.js";
 import {
@@ -28,9 +29,20 @@ import type { LocalSandboxLaunch } from "./private-invocation-computer.js";
 
 /** Same live authority as exec; the policy module owns protected-path checks. */
 export type LocalSandboxWrites = Readonly<{
-  assertWrite(path: string): void;
+  assertWrite(paths: readonly string[]): void;
   launch: LocalSandboxLaunch;
 }>;
+
+const readOnlyFilesMessage = "Read-only mode: switch to Workspace to edit";
+
+/** An expected Files refusal, not a proposal for an approval. */
+class ReadOnlyFilesRefusal extends FilesEditError {
+  constructor(path: string) {
+    super("read-only", path, readOnlyFilesMessage);
+    this.name = "ReadOnlyFilesRefusal";
+    this.message = readOnlyFilesMessage;
+  }
+}
 
 const maximumFileBytes = 128 * 1_024;
 
@@ -728,10 +740,14 @@ export async function createPrivateInvocationFilesPort(
   path: string,
   scanBounds: ScanBounds = defaultScanBounds,
   sandbox?: LocalSandboxWrites,
+  mode: () => LocalPermissionMode = () => "full-access",
 ): Promise<FilesPort> {
   const root = await InvocationRoot.capture(path);
   const write = createWriteQueue();
   const port: FilesPort = {
+    assertEditable(requested) {
+      if (mode() === "read-only") throw new ReadOnlyFilesRefusal(requested);
+    },
     async read(input, context) {
       return await readPage(
         await root.existing(input.path, context),
@@ -769,6 +785,7 @@ export async function createPrivateInvocationFilesPort(
     async replace(input, context) {
       return await write(async () => {
         checkCancellation(context);
+        port.assertEditable?.(input.path);
         const path = await root.existing(input.path, context);
         const current = await readBoundedText(path, context);
         if (current !== input.expectedContent)
@@ -786,7 +803,7 @@ export async function createPrivateInvocationFilesPort(
           );
         }
         checkCancellation(context);
-        sandbox?.assertWrite(path.resolved);
+        sandbox?.assertWrite([path.resolved]);
         await writeFileAtomic(path.resolved, input.content, {
           encoding: "utf8",
         });
@@ -807,6 +824,12 @@ export async function createPrivateInvocationFilesPort(
     patch: (
       input: Parameters<NonNullable<FilesPort["patch"]>>[0],
       context: InvocationContext,
-    ) => write(() => patch(input, context)),
+    ) =>
+      write(async () => {
+        checkCancellation(context);
+        if (mode() === "read-only")
+          throw new ReadOnlyFilesRefusal(root.canonicalPath);
+        return patch(input, context);
+      }),
   });
 }

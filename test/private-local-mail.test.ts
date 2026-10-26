@@ -5,11 +5,15 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { BirdDog, type BirdDogMail } from "@fungi.computer/bird-dog";
+import { BirdDogError } from "@fungi.computer/bird-dog/effect";
 import { makeHost, type RuntimeHost } from "@fungi.computer/shiitake";
 import * as Effect from "effect/Effect";
 import { expect, it } from "vitest";
 
-import { createPrivateLocalMailRoom } from "../src/private-local-mail.js";
+import {
+  createPrivateLocalMailRoom,
+  hasPrivateLocalPendingMail,
+} from "../src/private-local-mail.js";
 import { createPrivateSqliteOwner } from "../src/private-sqlite-owner.js";
 
 const parent = {
@@ -22,6 +26,273 @@ const child = {
   agentId: "child-agent",
   sessionId: "main",
 } as const;
+
+it("clears a reply from the local outbox when the relay holds custody", async () => {
+  const root = await mkdtemp(join(tmpdir(), "fungi-local-mail-held-"));
+  const database = new DatabaseSync(join(root, "agent.sqlite"));
+  const deliveries: BirdDogMail[] = [];
+  const room = createPrivateLocalMailRoom(database, {
+    deliver: (mail) => {
+      deliveries.push(mail);
+      return Promise.resolve({
+        status: "held",
+        reason: "recipient_offline",
+        message: "waiting: recipient offline",
+      });
+    },
+    now: () => 100,
+  });
+  const queued = BirdDog.agentJob({
+    work: {
+      jobId: "job-local-held",
+      sessionId: child.sessionId,
+      commandFactId: "entry-local-held",
+    },
+    mail: {
+      key: "delegation-local-held",
+      to: child,
+      from: parent,
+      replyTo: [parent],
+      content: "Run the child task",
+      createdAt: 42,
+    },
+  });
+  try {
+    await Effect.runPromise(
+      room.fanOut({
+        job: { ...queued, state: "settled", outcome: "completed" },
+        content: "Child result",
+      }),
+    );
+    await Effect.runPromise(room.drainOutbox());
+
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]?.content).toBe("Child result");
+    expect(await hasPrivateLocalPendingMail(database)).toBe(false);
+  } finally {
+    database.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("replays sessionless acceptance and its notice after the Local owner reopens", async () => {
+  const root = await mkdtemp(join(tmpdir(), "fungi-local-atomic-acceptance-"));
+  const path = join(root, "agent.sqlite");
+  let database = new DatabaseSync(path);
+  const sent: BirdDogMail[] = [];
+  const options = {
+    deliver: (mail: BirdDogMail) => {
+      sent.push(mail);
+      return Promise.resolve({
+        status: "accepted" as const,
+        commandId: "sender-receipt",
+        sessionId: parent.sessionId,
+      });
+    },
+    now: () => 100,
+  };
+  const room = createPrivateLocalMailRoom(database, options);
+  const failingRoom = {
+    ...room,
+    postMail: () => Effect.fail(new BirdDogError("injected outbox failure")),
+  };
+  const runtime: RuntimeHost = {
+    bind: () =>
+      Promise.resolve({
+        commit: (mutation) => mutation(),
+        requestWake: () => Promise.resolve(),
+        close: () => Promise.resolve(),
+      }),
+  };
+  const faux = fauxModel([]);
+  const openHost = (storeDatabase: DatabaseSync, mailRoom: typeof room) =>
+    makeHost(
+      {
+        store: createPrivateSqliteOwner(storeDatabase),
+        extensions: { roster: [], grants: [] },
+        runtime,
+        instructions: {
+          load: () =>
+            Promise.resolve({ revision: "sessionless", text: "Local agent" }),
+        },
+        model: {
+          acquire: () =>
+            Promise.resolve({
+              model: faux.model,
+              retryable: () => false,
+              stream: faux.stream,
+              release: () => Promise.resolve(),
+            }),
+        },
+      },
+      mailRoom,
+    );
+  const mail: BirdDogMail = {
+    key: "sessionless-local-mail",
+    from: child,
+    to: { kind: "agent", agentId: parent.agentId },
+    replyTo: [child],
+    content: "Start work",
+    createdAt: 50,
+  };
+  let failedHost: Awaited<ReturnType<typeof openHost>> | undefined;
+  let host: Awaited<ReturnType<typeof openHost>> | undefined;
+
+  try {
+    failedHost = await openHost(database, failingRoom);
+    await expect(failedHost.acceptMail(mail)).rejects.toThrow();
+    expect(
+      database
+        .prepare(
+          "SELECT request_id FROM session_creation_receipts WHERE request_id = ?",
+        )
+        .get(mail.key),
+    ).toBeUndefined();
+    expect(
+      database
+        .prepare(
+          "SELECT request_id FROM session_command_admissions WHERE request_id = ?",
+        )
+        .get(mail.key),
+    ).toBeUndefined();
+    expect(
+      database
+        .prepare("SELECT key FROM local_birddog_outbox WHERE key = ?")
+        .get(`outbox:${mail.key}:accepted`),
+    ).toBeUndefined();
+    await failedHost.agent.close();
+    failedHost = undefined;
+
+    host = await openHost(database, room);
+    const receipt = await host.acceptMail(mail);
+    expect(await host.acceptMail(mail)).toEqual(receipt);
+    expect(receipt.status).toBe("accepted");
+    if (receipt.sessionId === undefined)
+      throw new Error("Sessionless mail acceptance returned no Session");
+    const sessionId = receipt.sessionId;
+    expect(
+      database
+        .prepare(
+          "SELECT request_id FROM session_creation_receipts WHERE request_id = ?",
+        )
+        .all(mail.key),
+    ).toEqual([{ request_id: mail.key }]);
+    expect(
+      database
+        .prepare(
+          "SELECT request_id FROM session_command_admissions WHERE request_id = ?",
+        )
+        .all(mail.key),
+    ).toEqual([{ request_id: mail.key }]);
+    expect(
+      database
+        .prepare("SELECT key FROM local_birddog_outbox WHERE key = ?")
+        .get(`outbox:${mail.key}:accepted`),
+    ).toEqual({ key: `outbox:${mail.key}:accepted` });
+    await host.agent.close();
+    host = undefined;
+
+    database.close();
+    database = new DatabaseSync(path);
+    const reopened = createPrivateLocalMailRoom(database, options);
+    if (reopened.postMail === undefined)
+      throw new Error("Reopened Local mail room cannot stage mail");
+    host = await openHost(database, reopened);
+    expect(await host.acceptMail(mail)).toEqual(receipt);
+    expect(
+      database
+        .prepare(
+          "SELECT request_id FROM session_creation_receipts WHERE request_id = ?",
+        )
+        .all(mail.key),
+    ).toEqual([{ request_id: mail.key }]);
+    expect(
+      database
+        .prepare(
+          "SELECT request_id FROM session_command_admissions WHERE request_id = ?",
+        )
+        .all(mail.key),
+    ).toEqual([{ request_id: mail.key }]);
+    expect(
+      database
+        .prepare("SELECT key FROM local_birddog_outbox WHERE key = ?")
+        .all(`outbox:${mail.key}:accepted`),
+    ).toEqual([{ key: `outbox:${mail.key}:accepted` }]);
+    await host.agent.close();
+    host = undefined;
+    await Effect.runPromise(reopened.drainOutbox());
+    await Effect.runPromise(reopened.drainOutbox());
+    expect(sent).toMatchObject([
+      {
+        key: `${mail.key}:accepted`,
+        from: {
+          agentId: parent.agentId,
+          sessionId,
+        },
+        to: {
+          agentId: child.agentId,
+          sessionId: child.sessionId,
+        },
+        reply: { outcome: "accepted", commandId: receipt.commandId },
+      },
+    ]);
+    expect(sent).toHaveLength(1);
+  } finally {
+    if (failedHost !== undefined) await failedHost.agent.close();
+    if (host !== undefined) await host.agent.close();
+    database.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("reopens and forwards a staged acceptance notice from the durable local outbox", async () => {
+  const root = await mkdtemp(join(tmpdir(), "fungi-local-accepted-post-"));
+  const path = join(root, "agent.sqlite");
+  const notice: BirdDogMail = {
+    key: "delegation:accepted",
+    to: parent,
+    from: child,
+    replyTo: [],
+    content: "Work accepted.",
+    createdAt: 100,
+    reply: {
+      outcome: "accepted",
+      commandId: "accepted-command",
+    },
+  };
+  const deliveries: BirdDogMail[] = [];
+  const options = {
+    deliver: (mail: BirdDogMail) => {
+      deliveries.push(mail);
+      return Promise.resolve({
+        status: "accepted" as const,
+        commandId: "receipt-command",
+      });
+    },
+    now: () => 100,
+  };
+  const firstDatabase = new DatabaseSync(path);
+  const first = createPrivateLocalMailRoom(firstDatabase, options);
+  if (first.postMail === undefined)
+    throw new Error("The local mail outbox cannot stage authored mail");
+  await Effect.runPromise(first.postMail(notice));
+  firstDatabase.close();
+
+  const reopenedDatabase = new DatabaseSync(path);
+  const reopened = createPrivateLocalMailRoom(reopenedDatabase, options);
+  try {
+    if (reopened.postMail === undefined)
+      throw new Error("The reopened local mail outbox cannot stage mail");
+    await Effect.runPromise(reopened.postMail(notice));
+    await Effect.runPromise(reopened.drainOutbox());
+    await Effect.runPromise(reopened.drainOutbox());
+    expect(deliveries).toEqual([notice]);
+    expect(await hasPrivateLocalPendingMail(reopenedDatabase)).toBe(false);
+  } finally {
+    reopenedDatabase.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 it("reopens a persisted retry and delivers it to the addressed recipient once", async () => {
   const root = await mkdtemp(join(tmpdir(), "fungi-local-mail-"));

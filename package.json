@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/truffle",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "private": false,
   "description": "Truffle: Fungi's local Agent runtime, bundled into the fungi command",
   "type": "module",
@@ -49,6 +49,10 @@
     "./extensions": {
       "types": "./dist/local-extensions.d.ts",
       "import": "./dist/local-extensions.js"
+    },
+    "./rules": {
+      "types": "./dist/private-local-exec-rules.d.ts",
+      "import": "./dist/private-local-exec-rules.js"
     }
   },
   "files": [
@@ -67,11 +71,11 @@
     "test:node": "../../node_modules/.bin/vitest run",
     "test:bun": "pnpm run test:mesh-link && pnpm run test:bun:batch && bun test ./test/private-workerd-deadline.bun.test.ts",
     "test:mesh-link": "bun test ./test/private-local-mesh-links.bun.test.ts",
-    "test:bun:batch": "bun test ./test/private-sqlite-approval-driver.bun.test.ts ./test/mcp-form-service.bun.test.ts ./test/private-local-service-discovery.bun.test.ts ./test/private-local-service-listener.bun.test.ts ./test/private-local-service-manager.bun.test.ts ./test/private-local-service-rebind.bun.test.ts ./test/private-local-service-stop.bun.test.ts ./test/private-local-service-ensure.bun.test.ts ./test/private-local-service-identity.bun.test.ts ./test/private-local-service-kill-resume.bun.test.ts ./test/private-local-service-idle-owners.bun.test.ts ./test/private-local-service-idle-delegation.bun.test.ts ./test/private-local-mail-retry.bun.test.ts ./test/private-local-service-log-native.bun.test.ts ./test/private-local-service-log.bun.test.ts ./test/private-local-sqlite-lifetime.bun.test.ts ./test/private-sqlite-driver.bun.test.ts ./test/private-local-reload.bun.test.ts ./test/private-local-auth-rpc.bun.test.ts ./test/private-workerd-forage.bun.test.ts ./test/local-extensions.bun.test.ts ./test/local-zookeeper-slot.bun.test.ts ./test/local-extension-skills.bun.test.ts ./test/private-local-sandbox-service.bun.test.ts",
+    "test:bun:batch": "bun test ./test/private-sqlite-approval-driver.bun.test.ts ./test/mcp-form-service.bun.test.ts ./test/private-local-service-discovery.bun.test.ts ./test/private-local-service-listener.bun.test.ts ./test/private-local-service-manager.bun.test.ts ./test/private-local-service-rebind.bun.test.ts ./test/private-local-service-stop.bun.test.ts ./test/private-local-service-ensure.bun.test.ts ./test/private-local-service-identity.bun.test.ts ./test/private-local-service-kill-resume.bun.test.ts ./test/private-local-service-idle-owners.bun.test.ts ./test/private-local-service-idle-delegation.bun.test.ts ./test/private-local-mail-retry.bun.test.ts ./test/private-local-service-log-native.bun.test.ts ./test/private-local-service-log.bun.test.ts ./test/private-local-sqlite-lifetime.bun.test.ts ./test/private-sqlite-driver.bun.test.ts ./test/private-local-reload.bun.test.ts ./test/private-local-auth-rpc.bun.test.ts ./test/private-workerd-forage.bun.test.ts ./test/local-extensions.bun.test.ts ./test/local-zookeeper-slot.bun.test.ts ./test/local-extension-skills.bun.test.ts ./test/private-local-sandbox-service.bun.test.ts ./test/private-local-native-service.bun.test.ts",
     "build:native": "fungi-apply-patch-build --out native/bin && node scripts/build-bwrap.mjs --out native/bin && node scripts/generate-native-digests.mjs",
     "test:patch": "node --test --test-timeout=30000 test/apply-patch.native.mjs",
     "test:sandbox:linux": "node --import tsx test/fixtures/local-sandbox-proof.mts",
-    "test:sandbox:macos": "scratch=$(mktemp -d /tmp/fungi-seatbelt.XXXXXX) && scratch=$(cd \"$scratch\" && pwd -P) && mkdir \"$scratch/home\" && HOME=\"$scratch/home\" node --import tsx scripts/seatbelt-mac-proof.mjs \"$scratch\"",
+    "test:sandbox:macos": "scratch=$(mktemp -d /tmp/fungi-seatbelt.XXXXXX) && trap 'rm -rf \"$scratch\"' EXIT && scratch=$(cd \"$scratch\" && pwd -P) && mkdir -m 700 \"$scratch/home\" \"$scratch/runtime\" && HOME=\"$scratch/home\" XDG_CONFIG_HOME=\"$scratch/home/.config\" XDG_CACHE_HOME=\"$scratch/home/.cache\" XDG_DATA_HOME=\"$scratch/home/.local/share\" XDG_RUNTIME_DIR=\"$scratch/runtime\" node --import tsx scripts/seatbelt-mac-proof.mjs \"$scratch\"",
     "format:check": "node ../../tooling/repository/scripts/format-package-check.mjs",
     "lint:anti-slop": "node ../../tooling/repository/scripts/lint-package-anti-slop.mjs",
     "test:unit": "node ../../tooling/repository/scripts/test-file-pool.mjs pnpm run test:node && pnpm run test:mesh-link && pnpm run test:bun:batch && pnpm run test:stop-all",
@@ -105,7 +109,9 @@
     "@fungi.computer/watchdog": "workspace:*",
     "@fungi.computer/whistle": "workspace:*",
     "@fungi.computer/zookeeper": "workspace:*",
+    "@jellybrick/dbus-next": "0.11.4",
     "@modelcontextprotocol/client": "2.0.0",
+    "@napi-rs/keyring": "2.1.2",
     "diff": "8.0.4",
     "effect": "4.0.2",
     "eventsource": "5.1.1",

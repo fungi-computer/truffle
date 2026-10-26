@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { z } from "zod";
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
+import { defineIdFamily } from "@fungi.computer/cairn";
 import type { ShiitakeSession } from "@fungi.computer/shiitake";
 
 import {
@@ -12,8 +13,14 @@ import {
   type OpenLocalServiceRuntime,
 } from "../src/private-local-service-owner.js";
 import type { PrivateLocalMailRouting } from "../src/private-local-delegation.js";
-import { hasApi } from "@earendil-works/pi-ai";
+import { createModels, hasApi } from "@earendil-works/pi-ai";
+import {
+  fauxAssistantMessage,
+  fauxProvider,
+} from "@earendil-works/pi-ai/providers/faux";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
+import { bindSessionExtension } from "@fungi.computer/shiitake/client";
+import { loopContract } from "@fungi.computer/shiitake-extensions/loop";
 import { createPrivateModels } from "../src/local-models.js";
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
 import { openPrivateLocalRuntimeHost } from "../src/private-local-runtime-host.js";
@@ -36,6 +43,11 @@ type Store = {
   closes: number;
   /** What this store's idle read answers; an Error makes the read fail. */
   idle: boolean | Error;
+  wakeAt: number | null;
+  /** Durable timer jobs consumed by the opener's reconciliation. */
+  scheduled: number[];
+  executed: number[];
+  nextOpen: PromiseWithResolvers<undefined> | undefined;
   mail: BirdDogMail[];
   live: boolean;
   /** When set, this store's reload preparation waits for it. */
@@ -71,6 +83,10 @@ async function project(count: number) {
         opens: 0,
         closes: 0,
         idle: true,
+        wakeAt: null,
+        scheduled: [],
+        executed: [],
+        nextOpen: undefined,
         mail: [],
         live: false,
         reloadGate: undefined,
@@ -88,6 +104,16 @@ async function project(count: number) {
     if (store.live) throw new Error(`Store opened twice: ${path}`);
     store.live = true;
     store.opens += 1;
+    store.nextOpen?.resolve(undefined);
+    store.nextOpen = undefined;
+    // The real host reconciles due durable work on open, not in the service timer.
+    while (
+      store.scheduled[0] !== undefined &&
+      store.scheduled[0] <= Date.now()
+    ) {
+      const due = store.scheduled.shift();
+      if (due !== undefined) store.executed.push(due);
+    }
     routing ??= options.mail;
     const runtime: LocalServiceRuntime = {
       databasePath: path,
@@ -122,7 +148,10 @@ async function project(count: number) {
       idle: () =>
         store.idle instanceof Error
           ? Promise.reject(store.idle)
-          : Promise.resolve(store.idle),
+          : Promise.resolve({
+              idle: store.idle,
+              wakeAt: store.scheduled[0] ?? store.wakeAt,
+            }),
       close: () => {
         store.live = false;
         store.closes += 1;
@@ -177,6 +206,389 @@ it("releases N distinct idle Agents after two idle sweeps and forgets them for r
   again.release();
   expect(stores.get(paths[0] ?? "")?.opens).toBe(2);
   await owners.close();
+});
+
+it("releases a future-wake Agent and reopens it when due", async () => {
+  const fixture = await project(2);
+  const [sender, recipient] = fixture.paths;
+  if (sender === undefined || recipient === undefined)
+    throw new Error("Missing stores");
+  const store = storeOf(fixture, recipient);
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  try {
+    vi.setSystemTime(1_000);
+    await selectAndLeave(fixture, [sender, recipient]);
+    store.wakeAt = 11_000;
+    await fixture.owners.sweepIdle();
+    await fixture.owners.sweepIdle();
+    expect(store.live).toBe(false);
+    expect(store.closes).toBe(1);
+    const mail: BirdDogMail = {
+      key: "wake-race",
+      to: { kind: "agent", agentId: "local_store_idle1", sessionId: "main" },
+      from: { kind: "agent", agentId: "local_store_idle0", sessionId: "main" },
+      replyTo: [],
+      content: "hello",
+      createdAt: 0,
+    };
+    await vi.advanceTimersByTimeAsync(10_000);
+    vi.useRealTimers();
+    await vi.waitFor(() => {
+      expect(store.opens).toBe(2);
+    });
+    await fixture.mailRouting().deliver(mail);
+    expect(store.opens).toBe(2);
+    expect(store.mail).toEqual([mail]);
+  } finally {
+    await fixture.owners.close();
+    vi.useRealTimers();
+  }
+});
+
+it("a due wake racing mail opens the released store only once", async () => {
+  const fixture = await project(2);
+  const [sender, recipient] = fixture.paths;
+  if (sender === undefined || recipient === undefined)
+    throw new Error("Missing stores");
+  const store = storeOf(fixture, recipient);
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  try {
+    vi.setSystemTime(1_000);
+    await selectAndLeave(fixture, [sender, recipient]);
+    store.wakeAt = 11_000;
+    await fixture.owners.sweepIdle();
+    await fixture.owners.sweepIdle();
+    const mail: BirdDogMail = {
+      key: "wake-race",
+      to: { kind: "agent", agentId: "local_store_idle1", sessionId: "main" },
+      from: { kind: "agent", agentId: "local_store_idle0", sessionId: "main" },
+      replyTo: [],
+      content: "hello",
+      createdAt: 0,
+    };
+    const due = vi.advanceTimersByTimeAsync(10_000);
+    const delivered = fixture.mailRouting().deliver(mail);
+    await Promise.all([due, delivered]);
+    expect(store.opens).toBe(2);
+    expect(store.mail).toEqual([mail]);
+  } finally {
+    await fixture.owners.close();
+    vi.useRealTimers();
+  }
+});
+
+it("restart arms released future wakes without opening all saved stores", async () => {
+  const fixture = await project(4);
+  const [first, ...rest] = fixture.paths;
+  if (first === undefined) throw new Error("Missing first store");
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  let restarted: ReturnType<typeof createLocalServiceOwners> | undefined;
+  try {
+    vi.setSystemTime(1_000);
+    await selectAndLeave(fixture);
+    for (const [index, path] of fixture.paths.entries())
+      storeOf(fixture, path).wakeAt = 2_000 + index * 1_000;
+    await fixture.owners.sweepIdle();
+    await fixture.owners.sweepIdle();
+    await fixture.owners.close();
+    expect(await fixture.listed()).toEqual(fixture.paths);
+    restarted = createLocalServiceOwners(fixture.open, fixture.service);
+    await restarted.restore();
+    expect([...fixture.stores.values()].map((store) => store.opens)).toEqual([
+      1, 1, 1, 1,
+    ]);
+    await vi.advanceTimersByTimeAsync(1_000);
+    vi.useRealTimers();
+    await vi.waitFor(() => {
+      expect(storeOf(fixture, first).opens).toBe(2);
+    });
+    expect(rest.map((path) => storeOf(fixture, path).opens)).toEqual([1, 1, 1]);
+    await restarted.restore();
+    expect(storeOf(fixture, first).opens).toBe(2);
+  } finally {
+    await restarted?.close();
+    await fixture.owners.close();
+    vi.useRealTimers();
+  }
+});
+
+it("shutdown before the first sweep saves an open Agent's future wake and executes it after restart", async () => {
+  const fixture = await project(1);
+  const [path] = fixture.paths;
+  if (path === undefined) throw new Error("Missing store");
+  const store = storeOf(fixture, path);
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  let restarted: ReturnType<typeof createLocalServiceOwners> | undefined;
+  try {
+    vi.setSystemTime(1_000);
+    await selectAndLeave(fixture);
+    store.scheduled.push(3_000);
+    await fixture.owners.close();
+    expect(await fixture.listed()).toEqual([path]);
+    restarted = createLocalServiceOwners(fixture.open, fixture.service);
+    await restarted.restore();
+    expect(store.opens).toBe(1);
+    expect(store.executed).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(store.executed).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    vi.useRealTimers();
+    await vi.waitFor(() => {
+      expect(store.executed).toEqual([3_000]);
+    });
+    expect(store.opens).toBe(2);
+  } finally {
+    await restarted?.close();
+    await fixture.owners.close();
+    vi.useRealTimers();
+  }
+});
+
+it("shutdown retains a future wake after a client reopens a sleeping Agent", async () => {
+  const fixture = await project(1);
+  const [path] = fixture.paths;
+  if (path === undefined) throw new Error("Missing store");
+  const store = storeOf(fixture, path);
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  let restarted: ReturnType<typeof createLocalServiceOwners> | undefined;
+  try {
+    vi.setSystemTime(1_000);
+    await selectAndLeave(fixture);
+    store.scheduled.push(3_000);
+    await fixture.owners.sweepIdle();
+    await fixture.owners.sweepIdle();
+    await selectAndLeave(fixture);
+    expect(store.opens).toBe(2);
+    await fixture.owners.close();
+    expect(await fixture.listed()).toEqual([path]);
+    restarted = createLocalServiceOwners(fixture.open, fixture.service);
+    await restarted.restore();
+    expect(store.opens).toBe(2);
+    await vi.advanceTimersByTimeAsync(2_000);
+    vi.useRealTimers();
+    await vi.waitFor(() => {
+      expect(store.executed).toEqual([3_000]);
+    });
+    expect(store.opens).toBe(3);
+  } finally {
+    await restarted?.close();
+    await fixture.owners.close();
+    vi.useRealTimers();
+  }
+});
+
+it("the earliest of two wakes executes first and the later wake survives another release", async () => {
+  const fixture = await project(1);
+  const [path] = fixture.paths;
+  if (path === undefined) throw new Error("Missing store");
+  const store = storeOf(fixture, path);
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+  let restarted: ReturnType<typeof createLocalServiceOwners> | undefined;
+  try {
+    vi.setSystemTime(1_000);
+    await selectAndLeave(fixture);
+    store.scheduled.push(3_000, 5_000);
+    await fixture.owners.close();
+    restarted = createLocalServiceOwners(fixture.open, fixture.service);
+    await restarted.restore();
+    store.nextOpen = Promise.withResolvers<undefined>();
+    const firstOpen = store.nextOpen.promise;
+    await vi.advanceTimersByTimeAsync(2_000);
+    await firstOpen;
+    expect(store.executed).toEqual([3_000]);
+    expect(store.scheduled).toEqual([5_000]);
+    const selected = await restarted.select({
+      invocationRoot: fixture.root,
+      databasePath: path,
+      sessionId: "main",
+    });
+    selected.release();
+    await restarted.sweepIdle();
+    await restarted.sweepIdle();
+    expect(store.live).toBe(false);
+    store.nextOpen = Promise.withResolvers<undefined>();
+    const secondOpen = store.nextOpen.promise;
+    await vi.advanceTimersByTimeAsync(1_999);
+    expect(store.executed).toEqual([3_000]);
+    await vi.advanceTimersByTimeAsync(1);
+    await secondOpen;
+    expect(store.executed).toEqual([3_000, 5_000]);
+    (
+      await restarted.select({
+        invocationRoot: fixture.root,
+        databasePath: path,
+        sessionId: "main",
+      })
+    ).release();
+    expect(store.opens).toBe(3);
+  } finally {
+    await restarted?.close();
+    await fixture.owners.close();
+    vi.useRealTimers();
+  }
+});
+
+it("restart immediately resumes an overdue wake and unfinished durable work", async () => {
+  const fixture = await project(2);
+  const [scheduled, busy] = fixture.paths;
+  if (scheduled === undefined || busy === undefined)
+    throw new Error("Missing stores");
+  await selectAndLeave(fixture);
+  storeOf(fixture, scheduled).wakeAt = Date.now() + 1_000;
+  storeOf(fixture, busy).idle = false;
+  await fixture.owners.sweepIdle();
+  await fixture.owners.sweepIdle();
+  await fixture.owners.close();
+  // Simulate a stopped service past the saved deadline without waiting.
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(Date.now() + 2_000);
+  const restarted = createLocalServiceOwners(fixture.open, fixture.service);
+  try {
+    await restarted.restore();
+    expect(storeOf(fixture, scheduled).opens).toBe(2);
+    expect(storeOf(fixture, busy).opens).toBe(2);
+  } finally {
+    await restarted.close();
+    vi.useRealTimers();
+  }
+});
+
+it("a real Local Agent releases a future Loop, survives restart, and runs one due turn", async () => {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "fungi-real-loop-sleep-")),
+  );
+  roots.push(root);
+  const service = join(root, "service");
+  const agentId = defineIdFamily({
+    family: "local-host",
+    version: 1,
+    kinds: { store: { prefix: "local_store" } },
+  }).store.generate();
+  const storeDirectory = join(root, ".fungi", "agents", agentId);
+  await mkdir(service);
+  await mkdir(storeDirectory, { recursive: true });
+  const databasePath = join(storeDirectory, "agent.sqlite");
+  writeFreshStore(databasePath, "loop");
+  vi.stubEnv("HOME", root);
+  vi.stubGlobal("fetch", () =>
+    Promise.reject(new Error("The Loop fixture cannot use the network")),
+  );
+  const start = Date.parse("2026-09-26T12:00:30Z");
+  const due = Date.parse("2026-09-26T13:00:00Z");
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(start);
+  const models = createModels();
+  const faux = fauxProvider({
+    provider: "faux-local",
+    models: [{ id: "offline", name: "Offline Local" }],
+  });
+  faux.setResponses([
+    fauxAssistantMessage("first turn"),
+    fauxAssistantMessage("due turn"),
+  ]);
+  models.setProvider(faux.provider);
+  let opens = 0;
+  let closes = 0;
+  let host: Awaited<ReturnType<typeof openPrivateLocalRuntimeHost>> | undefined;
+  const open: OpenLocalServiceRuntime = async (options) => {
+    const runtime = await openPrivateLocalRuntimeHost(
+      { ...options, providerId: "faux-local", modelId: "offline" },
+      models,
+    );
+    host = runtime;
+    opens += 1;
+    return {
+      ...runtime,
+      close: async () => {
+        await runtime.close();
+        closes += 1;
+      },
+    };
+  };
+  const owners = createLocalServiceOwners(open, service);
+  let restarted: ReturnType<typeof createLocalServiceOwners> | undefined;
+  try {
+    const selected = await owners.select({
+      invocationRoot: root,
+      databasePath,
+      sessionId: "main",
+    });
+    try {
+      const loop = bindSessionExtension(selected.session, loopContract);
+      const started = await loop.call("startFixedInterval", {
+        prompt: "Inspect the beds",
+        requestId: "sleeping-loop",
+        expression: "0 * * * *",
+        timeZone: "UTC",
+      });
+      expect(started.loop.nextDueAt).toBe(due);
+    } finally {
+      selected.release();
+    }
+    await vi.waitFor(() => {
+      expect(faux.state.callCount).toBe(1);
+    });
+    await vi.waitFor(async () => {
+      expect(await host?.idle()).toEqual({ idle: true, wakeAt: due });
+    });
+    await owners.sweepIdle();
+    await owners.sweepIdle();
+    expect(closes).toBe(1);
+    expect(opens).toBe(1);
+    await owners.close();
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(start);
+    restarted = createLocalServiceOwners(open, service);
+    await restarted.restore();
+    expect(opens).toBe(1);
+    expect(faux.state.callCount).toBe(1);
+    await vi.advanceTimersByTimeAsync(due - start);
+    await vi.waitFor(() => {
+      expect(faux.state.callCount).toBe(2);
+    });
+    await vi.waitFor(async () => {
+      expect(await host?.idle()).toEqual({
+        idle: true,
+        wakeAt: Date.parse("2026-09-26T14:00:00Z"),
+      });
+    });
+    expect(opens).toBe(2);
+    await restarted.sweepIdle();
+    await restarted.sweepIdle();
+    expect(closes).toBe(2);
+    // A later client selection must reopen the released Agent, not replay
+    // the already completed occurrence.
+    const again = await restarted.select({
+      invocationRoot: root,
+      databasePath,
+      sessionId: "main",
+    });
+    const snapshot = await again.session.read();
+    expect(snapshot.terminals.map(({ outcome }) => outcome)).toEqual([
+      "completed",
+      "completed",
+    ]);
+    expect(
+      bindSessionExtension(again.session, loopContract).view(snapshot),
+    ).toMatchObject({
+      value: {
+        loop: {
+          state: "active",
+          nextDueAt: Date.parse("2026-09-26T14:00:00Z"),
+          consecutiveFailures: 0,
+        },
+      },
+    });
+    again.release();
+    expect(opens).toBe(3);
+    expect(faux.state.callCount).toBe(2);
+  } finally {
+    await restarted?.close();
+    await owners.close();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+  }
 });
 
 it("keeps Agents with work open and listed, and restart reopens only those", async () => {
@@ -457,7 +869,7 @@ it("the real idle check reports a running and a queued Watchdog job as work", as
     models,
   );
   try {
-    expect(await host.idle()).toBe(true);
+    expect(await host.idle()).toEqual({ idle: true, wakeAt: null });
     for (const requestId of ["running", "queued"])
       await host.session.command({
         type: "prompt",
@@ -467,7 +879,7 @@ it("the real idle check reports a running and a queued Watchdog job as work", as
       });
     await requested.promise;
     // One job runs while the next waits in its Watchdog queue.
-    expect(await host.idle()).toBe(false);
+    expect(await host.idle()).toEqual({ idle: false, wakeAt: null });
   } finally {
     answer.resolve(undefined);
     await host.close();
