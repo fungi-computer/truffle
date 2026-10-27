@@ -43,12 +43,24 @@ it("Agent creation refuses a missing login and setModel uses only project-author
     if (directory?.create === undefined)
       throw new Error("Missing Agent creation");
     await expect(
-      directory.create({ requestId: "no-login", createdBy: creator }, signal),
+      directory.create(
+        {
+          requestId: "no-login",
+          createdBy: creator,
+          createdBySessionId: "creator-session",
+        },
+        signal,
+      ),
     ).rejects.toThrow(/\/login/u);
     auth.mockResolvedValue({ type: "oauth", source: "OpenAI login" });
     const astra = { providerId: "openai", modelId: "gpt-6-astra" };
     const created = await directory.create(
-      { requestId: "explicit", model: astra, createdBy: creator },
+      {
+        requestId: "explicit",
+        model: astra,
+        createdBy: creator,
+        createdBySessionId: "creator-session",
+      },
       signal,
     );
     if (directory.setModel === undefined) throw new Error("Missing setModel");
@@ -636,7 +648,13 @@ it("Agent creation stores its name and reports the requested model, thinking lev
       reasoning: "high" as const,
     };
     const created = await directory.create(
-      { requestId: "named", name: "scout", model: astra, createdBy: creator },
+      {
+        requestId: "named",
+        name: "scout",
+        model: astra,
+        createdBy: creator,
+        createdBySessionId: "creator-session",
+      },
       signal,
     );
     const working = await realpath(root);

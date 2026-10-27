@@ -165,6 +165,7 @@ it.runIf(process.platform === "linux").each([false, true])(
         {
           requestId: "child-ceiling",
           createdBy: makerId,
+          createdBySessionId: "maker-session",
           model: {
             providerId: "child-sandbox-proof",
             modelId: "child-model",

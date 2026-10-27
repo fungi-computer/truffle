@@ -194,20 +194,28 @@ export function createPrivateLocalDelegation(
     if (mail.to.agentId !== input.agentId && mesh === undefined)
       throw new Error("Local addressed mail recipient is not authorized");
     const agents = mesh ?? (await members(new AbortController().signal));
+    const sender = mail.from;
     const delegation =
       mail.replyTo.length === 0 ? fleet.authenticateReply(mail) : undefined;
-    const frozenUndeliverable =
-      delegation?.reply.outcome === "undeliverable" &&
-      delegation.reply.agentId === mail.from.agentId;
-    if (
-      !agents.some(({ agentId }) => agentId === mail.from.agentId) &&
-      !frozenUndeliverable
-    )
+    const authenticatedUndeliverable =
+      delegation?.reply.outcome === "undeliverable";
+    const senderIsMember =
+      sender.kind === "agent" &&
+      agents.some(({ agentId }) => agentId === sender.agentId);
+    if (!senderIsMember && !authenticatedUndeliverable) {
+      if (
+        sender.kind === "system" &&
+        mail.replyTo.length === 0 &&
+        mail.reply?.outcome !== "accepted"
+      )
+        throw new Error("Local reply does not match work this Agent sent");
       throw new Error("Local mail sender is outside this project");
+    }
     if (mail.replyTo.length > 0) {
       const [destination] = mail.replyTo;
       if (
         mail.replyTo.length !== 1 ||
+        mail.from.kind !== "agent" ||
         destination?.agentId !== mail.from.agentId ||
         destination.sessionId !== mail.from.sessionId
       )
@@ -225,7 +233,7 @@ export function createPrivateLocalDelegation(
     const replier = agents.find(
       ({ agentId }) => agentId === delegation.reply.agentId,
     );
-    if (replier === undefined && !frozenUndeliverable)
+    if (replier === undefined && !authenticatedUndeliverable)
       throw new Error("Local reply sender is outside this project");
     const meta = delegationReplyMeta(
       delegation,

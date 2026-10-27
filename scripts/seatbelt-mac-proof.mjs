@@ -368,9 +368,14 @@ assert.equal(
   "sandbox must not launch the app",
 );
 const wrapped = seatbeltCommand(
-  linuxSandboxProfile(policy, "workspace", temporaryDirectory, {
-    HOME: process.env.HOME,
-  }),
+  linuxSandboxProfile(
+    policy,
+    "workspace",
+    temporaryDirectory,
+    { HOME: process.env.HOME },
+    process.env.HOME,
+    "darwin",
+  ),
   ["/usr/bin/touch", join(folder, "failure-marker")],
 );
 wrapped.args[1] = "(invalid-profile";

@@ -115,11 +115,18 @@ async function ask(
       // redirect URL (OpenAI, Anthropic): the provider's own
       // message explains what to paste; this adds the SSH hint once, here,
       // instead of baking it into one provider's registry label.
-      const message = `${prompt.message} If you're connecting over SSH, paste the URL here instead of opening a browser.`;
+      const summary =
+        "Connecting over SSH? Paste the URL here instead of opening a browser.";
+      const { message } = prompt;
       return interaction.prompt(
         prompt.placeholder === undefined
-          ? { type: "text", message }
-          : { type: "text", message, placeholder: prompt.placeholder },
+          ? { type: "text", message, summary }
+          : {
+              type: "text",
+              message,
+              summary,
+              placeholder: prompt.placeholder,
+            },
         options,
       );
     }

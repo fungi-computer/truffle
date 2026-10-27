@@ -102,6 +102,32 @@ it("resolves two concurrent creates when the journal stat observes its unlink", 
   ).resolves.toEqual(stores[1]);
 });
 
+it("does not replay one Local create receipt into a sibling Session", async () => {
+  const root = await temporaryProject();
+  const parent = {
+    agentId: "local_store_parent",
+    sessionId: "parent-session",
+  };
+  const sibling = { ...parent, sessionId: "sibling-session" };
+  type ResolveForCreator = (
+    root: string,
+    requestId: string,
+    creator: Readonly<{ agentId: string; sessionId: string }>,
+  ) => ReturnType<typeof resolvePrivateLocalCreateStore>;
+  // SAFETY: The deliberate widening lets this regression test run against the
+  // pre-fix helper, whose two-argument type omitted creator identity. Runtime
+  // arguments stay ordinary strings, and the test asserts the refusal contract.
+  const resolveForCreator = resolvePrivateLocalCreateStore as ResolveForCreator;
+  const first = await resolveForCreator(root, "bound-create", parent);
+
+  await expect(
+    resolveForCreator(root, "bound-create", sibling),
+  ).rejects.toMatchObject({ reason: "request_conflict" });
+  await expect(
+    resolveForCreator(root, "bound-create", parent),
+  ).resolves.toEqual(first);
+});
+
 it.each(["receipt", "journal"])(
   "still refuses a planted hard link, symlink or directory at the %s path",
   async (kind) => {

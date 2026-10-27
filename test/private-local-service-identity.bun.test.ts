@@ -185,7 +185,7 @@ describe("fungi stop signals only the verified lease owner", () => {
     });
   }
 
-  it("refuses to signal on macOS, then stops the verified owner on Linux", async () => {
+  it("refuses uncorroborated service argv on macOS, then stops the verified owner on Linux", async () => {
     const owner = spawn([process.execPath, otherProtocolService, directory], {
       stdout: "inherit",
       stderr: "inherit",
@@ -243,4 +243,24 @@ describe("fungi stop signals only the verified lease owner", () => {
       await owner.exited;
     }
   }, 30_000);
+
+  for (const mode of ["identity", "stop"] as const) {
+    it(`corroborates a macOS service and recognizes its exit (${mode})`, async () => {
+      const client = spawn(
+        [
+          process.execPath,
+          join(import.meta.dir, "fixtures", "macos-service-exit.ts"),
+          directory,
+          mode,
+        ],
+        { env: { ...process.env, HOME: home }, stdout: "pipe", stderr: "pipe" },
+      );
+      const result = {
+        exitCode: await client.exited,
+        stdout: await new Response(client.stdout).text(),
+        stderr: await new Response(client.stderr).text(),
+      };
+      expect(result).toEqual({ exitCode: 0, stdout: "", stderr: "" });
+    }, 30_000);
+  }
 });

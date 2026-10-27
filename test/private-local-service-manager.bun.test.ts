@@ -125,7 +125,7 @@ describe("private Local service manager", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
-  it("names an older service whose service.json has no PID, and its own stop route, instead of a schema error", async () => {
+  it("names an older service whose service.json has no PID without suggesting an unverified stop route", async () => {
     const root = await mkdtemp(join(tmpdir(), "fungi-service-without-pid-"));
     const directory = await serviceDirectory(join(root, "service"));
     // The record an older service wrote before the PID was recorded.
@@ -143,11 +143,9 @@ describe("private Local service manager", () => {
       const named = (error: Error) =>
         error.name !== "ZodError" &&
         error.message.includes(`${serviceId} on port 43127`) &&
-        error.message.includes(
-          `curl -X POST ${baseUrl}/service/${serviceId}/stop`,
-        ) &&
+        !error.message.includes("curl") &&
         error.message.includes(`--internal-service ${directory}`) &&
-        error.message.includes(`delete ${join(directory, "service.json")}`);
+        error.message.includes(`move ${join(directory, "service.json")} aside`);
       await assert.rejects(manager.start(), named);
       await assert.rejects(manager.stop(), named);
     } finally {

@@ -3,9 +3,10 @@ import { createPrivateLocalServiceManager } from "../../src/private-local-servic
 
 const directory = process.argv[2];
 if (directory === undefined) throw new Error("fixture requires its directory");
-// Exercise the real stop path's platform refusal in an isolated client.
+// This fixture's argv lacks --internal-service <directory>, so macOS cannot
+// corroborate its lease identity even though its PID and lease row agree.
 Object.defineProperty(process, "platform", { value: "darwin" });
 await assert.rejects(
   createPrivateLocalServiceManager({ directory }).stop(),
-  /cannot verify.*sub-second precision on darwin.*refuses to signal/u,
+  /command line does not identify this service.*No process was signalled/u,
 );

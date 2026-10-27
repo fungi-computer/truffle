@@ -1,5 +1,5 @@
 import { setTimeout as delay } from "node:timers/promises";
-import { readProcessStart } from "./private-local-process-identity.js";
+import { identifyLocalServiceProcess } from "./private-local-process-identity.js";
 import {
   readServiceLeaseOwner,
   type ServiceLeaseOwner,
@@ -13,13 +13,16 @@ const terminationPollMs = 50;
  * Whether `service` is still the process running under its PID. A PID whose
  * start differs is refused. A separate read and signal still has a race window.
  */
-async function isServiceProcess(service: ServiceLeaseOwner): Promise<boolean> {
-  const current = await readProcessStart(service.pid);
-  if (current.kind === "unverifiable")
+async function isServiceProcess(
+  directory: string,
+  service: ServiceLeaseOwner,
+): Promise<boolean> {
+  const current = await identifyLocalServiceProcess({ ...service, directory });
+  if (current.kind === "other" && process.platform !== "linux")
     throw new Error(
-      `Fungi cannot verify the service process ${String(service.pid)} with sub-second precision on ${process.platform}, so it refuses to signal it. Close that service manually, then reopen Fungi.`,
+      `Cannot safely stop Fungi service pid ${String(service.pid)} in ${directory}: its command line does not identify this service. No process was signalled.`,
     );
-  return current.kind === "running" && current.start === service.startedAt;
+  return current.kind === "ours";
 }
 
 /** Signal `pid`; false when it has already exited. */
@@ -48,16 +51,20 @@ async function signalIfStillRunning(
   const owner = await readServiceLeaseOwner(directory);
   if (owner?.pid !== service.pid || owner.startedAt !== service.startedAt)
     return false;
-  return (await isServiceProcess(owner)) && signalService(owner.pid, signal);
+  return (
+    (await isServiceProcess(directory, owner)) &&
+    signalService(owner.pid, signal)
+  );
 }
 
 async function exitedWithin(
+  directory: string,
   service: ServiceLeaseOwner,
   ms: number,
 ): Promise<boolean> {
   const deadline = Date.now() + ms;
   for (;;) {
-    if (!(await isServiceProcess(service))) return true;
+    if (!(await isServiceProcess(directory, service))) return true;
     if (Date.now() >= deadline) return false;
     await delay(terminationPollMs);
   }
@@ -80,10 +87,12 @@ export async function terminatePrivateLocalService(
     );
   if (!(await signalIfStillRunning(directory, service, "SIGTERM")))
     return "stopped";
-  if (await exitedWithin(service, terminationGraceMs)) return "stopped";
+  if (await exitedWithin(directory, service, terminationGraceMs))
+    return "stopped";
   if (!(await signalIfStillRunning(directory, service, "SIGKILL")))
     return "stopped";
-  if (await exitedWithin(service, terminationGraceMs)) return "killed";
+  if (await exitedWithin(directory, service, terminationGraceMs))
+    return "killed";
   throw new Error(
     `Local service process ${String(service.pid)} is still running after SIGKILL`,
   );

@@ -210,7 +210,7 @@ export async function readServiceRegistration(
   const lifecycle = serviceLifecycleSchema.safeParse(json);
   if (!lifecycle.success) {
     // A service from before the PID was recorded cannot be signalled; name it
-    // and its own stop route instead of treating it as unidentified.
+    // rather than treating it as an unidentified, safely replaceable record.
     const older = serviceRecordSchema
       .pick({ serviceId: true, baseUrl: true })
       .safeParse(json);
@@ -230,12 +230,8 @@ class LocalServiceRecordWithoutPid extends Error {
     directory: string,
     service: Readonly<{ serviceId: string; baseUrl: string }>,
   ) {
-    const stopUrl = new URL(
-      `/service/${service.serviceId}/stop`,
-      service.baseUrl,
-    );
     super(
-      `An older Fungi service (${service.serviceId} on port ${new URL(service.baseUrl).port}) is registered in ${recordPath(directory)}, and this fungi cannot stop it. Stop it with \`curl -X POST ${stopUrl.href}\`; if it keeps running, end the process whose command line contains \`--internal-service ${directory}\`. If it is no longer running, delete ${recordPath(directory)}. Then retry; saved Sessions are kept.`,
+      `An older Fungi service (${service.serviceId} on port ${new URL(service.baseUrl).port}) is registered in ${recordPath(directory)} without a process identity. Fungi cannot safely signal it. End the process whose command line contains \`--internal-service ${directory}\`. If it is no longer running, move ${recordPath(directory)} aside. Then retry; saved Sessions are kept.`,
     );
   }
 }

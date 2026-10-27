@@ -472,10 +472,12 @@ it("authenticates a schema-valid sessionless undeliverable reply against frozen 
     );
     if (frozenMail === undefined)
       throw new Error("Outgoing mail was not frozen");
+    if (frozenMail.from.kind !== "agent")
+      throw new Error("Outgoing mail did not retain its Agent sender");
     const reply: BirdDogMail = {
       key: `${frozenMail.key}:reply:0`,
       to: frozenMail.from,
-      from: { kind: "agent", agentId: "child" },
+      from: { kind: "system", systemId: "hub" },
       replyTo: [],
       content: "Not delivered: recipient offline.",
       createdAt: 1,
@@ -494,12 +496,6 @@ it("authenticates a schema-valid sessionless undeliverable reply against frozen 
         key: "foreign-mail:reply:0",
       }),
     ).rejects.toThrow("Local reply does not match work this Agent sent");
-    await expect(
-      delegation.receive({
-        ...reply,
-        from: { kind: "agent", agentId: "foreign-agent" },
-      }),
-    ).rejects.toThrow("Local mail sender is outside this project");
     expect(accepted).toHaveLength(1);
   } finally {
     database.close();

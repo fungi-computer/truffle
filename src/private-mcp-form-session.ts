@@ -22,10 +22,14 @@ export type LocalApprovalReview = {
   command: string;
   cwd: string;
   justification: string;
+  form: "direct" | "shell";
+  kind: "exec" | "extension-install";
+  argv?: string[];
   prefix?: readonly string[];
   warning?: string;
   alwaysAllowCoverage?: string;
   alwaysAllowUnavailableReason?: string;
+  risk?: { summary: string; detail: string };
 };
 
 type Pending = {
@@ -87,16 +91,20 @@ export function createMcpFormSession() {
                   entry.alwaysAllow === undefined
                 )
                   return { kind: "refused", reason: "not-pending" };
+                if (input.denialNote !== undefined && input.decision !== "deny")
+                  return { kind: "refused", reason: "not-pending" };
                 if (input.decision === "always-allow")
                   entry.alwaysAllow?.("prefix");
-                const result = await entry.approvals.answer({
+                const answer = {
                   recordId: entry.approval.record.recordId,
-                  decision:
-                    input.decision === "always-allow"
-                      ? "approve"
-                      : input.decision,
+                  decision: input.decision === "deny" ? "deny" : "approve",
                   expectedRevision: input.expectedRevision,
-                });
+                } satisfies Parameters<Approvals["answer"]>[0];
+                const result = await entry.approvals.answer(
+                  input.denialNote === undefined
+                    ? answer
+                    : { ...answer, denialNote: input.denialNote },
+                );
                 return result;
               } finally {
                 entry.alwaysAllow?.(false);

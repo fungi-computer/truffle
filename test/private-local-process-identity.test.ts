@@ -1,15 +1,75 @@
 import fs from "node:fs/promises";
+import { spawn, type ChildProcess } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { readProcessStart } from "../src/private-local-process-identity.js";
+import {
+  identifyLocalServiceProcess,
+  readProcessStart,
+} from "../src/private-local-process-identity.js";
 import { terminatePrivateLocalService } from "../src/private-local-service-termination.js";
 
 const service = { pid: 12345, startedAt: "linux:42" };
 // proc(5): field 3 through field 21 precede starttime (field 22).
 const runningStat = `12345 (fixture service) ${Array<string>(19).fill("0").join(" ")} 42`;
+
+describe.skipIf(process.platform === "win32")(
+  "macOS service argv corroboration",
+  () => {
+    const children: ChildProcess[] = [];
+    afterEach(() => {
+      Object.defineProperty(process, "platform", {
+        configurable: true,
+        value: actualPlatform,
+      });
+      for (const child of children.splice(0)) child.kill("SIGKILL");
+    });
+    const actualPlatform = process.platform;
+
+    it("identifies only a process started for this service directory", async () => {
+      const directory = await fs.mkdtemp(join(tmpdir(), "fungi-argv-"));
+      try {
+        const child = spawn(
+          process.execPath,
+          [
+            "-e",
+            "setInterval(() => {}, 10_000)",
+            "--",
+            "--internal-service",
+            directory,
+          ],
+          { stdio: "ignore" },
+        );
+        children.push(child);
+        await new Promise<void>((resolve, reject) => {
+          child.once("spawn", resolve);
+          child.once("error", reject);
+        });
+        if (child.pid === undefined)
+          throw new Error("spawned service has no pid");
+        Object.defineProperty(process, "platform", {
+          configurable: true,
+          value: "darwin",
+        });
+        const claim = { pid: child.pid, startedAt: "unverifiable", directory };
+        await expect(identifyLocalServiceProcess(claim)).resolves.toEqual({
+          kind: "ours",
+          evidence: "command-line",
+        });
+        await expect(
+          identifyLocalServiceProcess({
+            ...claim,
+            directory: `${directory}-foreign`,
+          }),
+        ).resolves.toEqual({ kind: "other" });
+      } finally {
+        await fs.rm(directory, { recursive: true, force: true });
+      }
+    });
+  },
+);
 
 describe.skipIf(process.platform !== "linux")(
   "Linux process disappearance",

@@ -5,6 +5,7 @@ import {
 import * as Schema from "effect/Schema";
 import {
   ApprovalAnswerInputSchema,
+  ApprovalDenialNoteSchema,
   ApprovalRefusalSchema,
   ApprovalViewSchema,
 } from "@fungi.computer/approvals";
@@ -52,10 +53,16 @@ const McpFormPendingSchema = Schema.Struct({
       command: Schema.String,
       cwd: Schema.String,
       justification: Schema.String,
+      form: Schema.Literals(["direct", "shell"]),
+      kind: Schema.Literals(["exec", "extension-install"]),
+      argv: Schema.optionalKey(Schema.Array(Schema.String)),
       prefix: Schema.optionalKey(Schema.Array(Schema.String)),
       warning: Schema.optionalKey(Schema.String),
       alwaysAllowCoverage: Schema.optionalKey(Schema.String),
       alwaysAllowUnavailableReason: Schema.optionalKey(Schema.String),
+      risk: Schema.optionalKey(
+        Schema.Struct({ summary: Schema.String, detail: Schema.String }),
+      ),
     }),
   ),
 });
@@ -70,6 +77,7 @@ export const mcpFormApprovalContract = {
         id: Schema.String,
         decision: Schema.Literals(["approve", "deny", "always-allow"]),
         expectedRevision: ApprovalAnswerInputSchema.fields.expectedRevision,
+        denialNote: Schema.optionalKey(ApprovalDenialNoteSchema),
       }),
       output: answerResult,
     },

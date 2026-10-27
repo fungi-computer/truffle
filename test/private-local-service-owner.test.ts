@@ -281,7 +281,11 @@ describe("persistent Local service owners", () => {
       const signal = new AbortController().signal;
       await expect(
         activeDirectory.create(
-          { requestId: "invalid-owner", createdBy: "local_store_creator" },
+          {
+            requestId: "invalid-owner",
+            createdBy: "local_store_creator",
+            createdBySessionId: "creator-session",
+          },
           signal,
         ),
       ).rejects.toThrow("Local model configuration is invalid");
@@ -714,15 +718,46 @@ describe("persistent Local service owners", () => {
 
       const [first, concurrentRetry] = await Promise.all([
         directory.create(
-          { requestId: "request-one", createdBy: creator },
+          {
+            requestId: "request-one",
+            createdBy: creator,
+            createdBySessionId: "parent-session",
+          },
           signal,
         ),
         directory.create(
-          { requestId: "request-one", createdBy: creator },
+          {
+            requestId: "request-one",
+            createdBy: creator,
+            createdBySessionId: "parent-session",
+          },
           signal,
         ),
       ]);
       expect(first).toEqual(concurrentRetry);
+      await expect(
+        directory.create(
+          {
+            requestId: "request-one",
+            createdBy: creator,
+            createdBySessionId: "sibling-session",
+          },
+          signal,
+        ),
+      ).rejects.toMatchObject({
+        name: "AgentCreateRefused",
+        reason: "request_conflict",
+      });
+      await expect(
+        directory.create(
+          {
+            requestId: "request-one",
+            createdBy: creator,
+            createdBySessionId: "parent-session",
+          },
+          signal,
+        ),
+      ).resolves.toEqual(first);
       expect(first.agentId).toBe(
         (await resolvePrivateLocalCreateStore(root, "request-one")).agentId,
       );
@@ -740,14 +775,22 @@ describe("persistent Local service owners", () => {
       await opened.release();
       await expect(
         restartedDirectory.create(
-          { requestId: "request-one", createdBy: creator },
+          {
+            requestId: "request-one",
+            createdBy: creator,
+            createdBySessionId: "parent-session",
+          },
           signal,
         ),
       ).resolves.toEqual(first);
       expect(openedPaths).toHaveLength(4);
       await expect(
         restartedDirectory.create(
-          { requestId: "request-two", createdBy: creator },
+          {
+            requestId: "request-two",
+            createdBy: creator,
+            createdBySessionId: "parent-session",
+          },
           signal,
         ),
       ).resolves.not.toEqual(first);
@@ -1140,7 +1183,11 @@ describe("an Agent creating an Agent", () => {
     }
     try {
       await local.directory.create(
-        { requestId: "read-only-child", createdBy: creator },
+        {
+          requestId: "read-only-child",
+          createdBy: creator,
+          createdBySessionId: "parent-session",
+        },
         new AbortController().signal,
       );
       expect(
@@ -1213,6 +1260,7 @@ describe("an Agent creating an Agent", () => {
           {
             requestId: "too-much",
             createdBy: creator,
+            createdBySessionId: "parent-session",
             extensions: ["counter"],
           },
           new AbortController().signal,
@@ -1226,6 +1274,7 @@ describe("an Agent creating an Agent", () => {
           {
             requestId: "too-much",
             createdBy: creator,
+            createdBySessionId: "parent-session",
             extensions: ["counter"],
           },
           new AbortController().signal,
@@ -1252,6 +1301,7 @@ describe("an Agent creating an Agent", () => {
           {
             requestId: "partial",
             createdBy: creator,
+            createdBySessionId: "parent-session",
             extensions: ["held", "lacking"],
           },
           new AbortController().signal,
@@ -1268,7 +1318,12 @@ describe("an Agent creating an Agent", () => {
     const local = await project({ [creator]: ["counter", "notes"] });
     try {
       const made = await local.directory.create(
-        { requestId: "pass-down", createdBy: creator, extensions: ["counter"] },
+        {
+          requestId: "pass-down",
+          createdBy: creator,
+          createdBySessionId: "parent-session",
+          extensions: ["counter"],
+        },
         new AbortController().signal,
       );
       const childStore = dirname(
@@ -1296,7 +1351,11 @@ describe("an Agent creating an Agent", () => {
     const local = await project({});
     try {
       await local.directory.create(
-        { requestId: "floor", createdBy: creator },
+        {
+          requestId: "floor",
+          createdBy: creator,
+          createdBySessionId: "parent-session",
+        },
         new AbortController().signal,
       );
       expect(local.enabled).toEqual([]);
@@ -1311,7 +1370,11 @@ describe("an Agent creating an Agent", () => {
     try {
       await expect(
         local.directory.create(
-          { requestId: "orphan", createdBy: "local_store_stranger" },
+          {
+            requestId: "orphan",
+            createdBy: "local_store_stranger",
+            createdBySessionId: "stranger-session",
+          },
           new AbortController().signal,
         ),
       ).rejects.toMatchObject({ reason: "no_creator" });

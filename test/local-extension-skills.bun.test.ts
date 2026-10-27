@@ -267,45 +267,6 @@ test("Opting into an extension's skills is not holding its tools: a skills-only 
   await owner.remove("toolbox");
 });
 
-test("An install record from before the skills field says which file to reinstall from", async () => {
-  const old = await mkdtemp(join(scratch, "old-home-"));
-  const directory = join(old, ".fungi", "extensions");
-  await mkdir(directory, { recursive: true });
-  const path = join(directory, "installed.json");
-  await writeFile(
-    path,
-    JSON.stringify({
-      extensions: {
-        old: {
-          current: "r1",
-          revisions: {
-            r1: {
-              name: "old",
-              version: "1.0.0",
-              source: "x",
-              resolution: "x",
-              commit: null,
-              directory: "x",
-              capabilities: [],
-              terminals: [],
-              host: null,
-              client: null,
-            },
-          },
-        },
-      },
-    }),
-  );
-  const refusal = await localExtensions({ home: old })
-    .list()
-    .catch((cause: unknown) => cause);
-  expect(refusal).toBeInstanceOf(LocalExtensionError);
-  expect(refusal instanceof Error && refusal.message).toContain(path);
-  expect(refusal instanceof Error && refusal.message).toContain(
-    `${path} is from an earlier extension format; delete it and run \`fungi extension add\` again`,
-  );
-});
-
 test("An activations record from before the skills field says to delete it and re-enable", async () => {
   const old = await mkdtemp(join(scratch, "old-activations-"));
   const directory = join(old, ".fungi", "extensions");

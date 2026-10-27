@@ -16,7 +16,22 @@ import { createLocalUiAttachment } from "../src/private-local-ui-attachment.js";
 import { localExecRules } from "../src/private-local-exec-rules.js";
 import { mcpFormApprovalContract } from "../src/private-mcp-form-contract.js";
 
-it("approve once leaves the project rule store empty; an explicit always-allow still writes its prefix", async () => {
+it("rejects omitted and unknown answer decisions at the Session command boundary", () => {
+  const decode = Schema.decodeUnknownSync(
+    mcpFormApprovalContract.commands.answer.input,
+  );
+  for (const decision of [undefined, "always", "Always allow"]) {
+    expect(() =>
+      decode({ id: "pending-1", expectedRevision: 1, decision }),
+    ).toThrow();
+  }
+  expect(
+    decode({ id: "pending-1", expectedRevision: 1, decision: "approve" })
+      .decision,
+  ).toBe("approve");
+});
+
+it("the selected Session presents the real record and only a live host-bound UI can answer its revision, applying once", async () => {
   const root = await mkdtemp(join(tmpdir(), "mcp-ledger-session-"));
   const database = new DatabaseSync(":memory:");
   const local = await createPrivateLocalTools(root);
@@ -105,6 +120,9 @@ it("approve once leaves the project rule store empty; an explicit always-allow s
       command: "notes write",
       cwd: root,
       justification: "Write blocked",
+      form: "direct",
+      kind: "exec",
+      argv: ["notes", "write"],
       prefix: ["notes", "write"],
       alwaysAllowCoverage: "Direct argv notes write in this project",
     },
@@ -166,7 +184,7 @@ it("approve once leaves the project rule store empty; an explicit always-allow s
     expect(
       await session
         .extension(mcpFormApprovalContract.id)
-        .call("answer", { ...answer, decision: "always-allow" }),
+        .call("answer", { ...answer, decision: "approve" }),
     ).toEqual({ kind: "refused", reason: "not-eligible" });
     expect(ledger.get(submitted.recordId)?.state).toBe("pending");
     actor = eligibleActor;
@@ -188,64 +206,90 @@ it("approve once leaves the project rule store empty; an explicit always-allow s
     ).toEqual({ kind: "refused", reason: "not-pending" });
     expect(await readFile(join(root, "effects.txt"), "utf8")).toBe("saved\n");
 
-    const second = await ledger.submit(
-      {
-        requester: {
-          principalId: "fixture-agent",
-          agentId: "fixture-agent",
-          sessionId,
-          displayName: "Fixture Agent",
+    const submitAgain = async (key: string) => {
+      const next = await ledger.submit(
+        {
+          requester: {
+            principalId: "fixture-agent",
+            agentId: "fixture-agent",
+            sessionId,
+            displayName: "Fixture Agent",
+          },
+          module: "fixture-notes",
+          operation: "write",
+          access: "write",
+          reversibility: "reversible",
+          authorityFence: "fixture-grant:1",
+          idempotencyKey: key,
+          inputJson: '{"text":"saved again"}',
         },
-        module: "fixture-notes",
-        operation: "write",
-        access: "write",
-        reversibility: "reversible",
-        authorityFence: "fixture-grant:1",
-        idempotencyKey: "fixture-turn:1/tool:2/operation:0",
-        inputJson: '{"text":"saved again"}',
-      },
-      effect,
-    );
-    if (second.kind !== "pending_approval")
-      throw new Error("Fixture did not stage its second approval");
-    const secondPresented = await local.presentApproval(
-      sessionId,
-      second,
-      capability,
-      {
-        command: "notes read",
-        cwd: root,
-        justification: "Read blocked",
-        prefix: ["notes", "read"],
-      },
-      (selected) => {
-        ruleIntent = selected === "prefix";
-      },
-    );
-    if (secondPresented.kind !== "presented")
-      throw new Error("Local host did not present its second ledger record");
-    const secondSlot = (await raw.read()).extensions[
-      mcpFormApprovalContract.id
-    ];
-    if (secondSlot?.status !== "running")
-      throw new Error("Local approval projection unavailable");
-    const secondProjection = Schema.decodeUnknownSync(
-      mcpFormApprovalContract.projection.schema,
-    )(secondSlot.value);
-    const secondForm = secondProjection.pending[0];
-    if (secondForm === undefined)
-      throw new Error("Missing second projected approval");
+        effect,
+      );
+      if (next.kind !== "pending_approval")
+        throw new Error("Fixture did not stage another approval");
+      const presented = await local.presentApproval(
+        sessionId,
+        next,
+        capability,
+        {
+          form: "direct",
+          kind: "exec",
+          command: "notes write",
+          cwd: root,
+          justification: "Write blocked",
+          ...(key.endsWith("tool:3/operation:0")
+            ? {
+                alwaysAllowUnavailableReason:
+                  "This request has no reusable rule.",
+              }
+            : { prefix: ["notes", "write"] }),
+        },
+        (selected) => {
+          ruleIntent = selected === "prefix";
+        },
+      );
+      if (presented.kind !== "presented")
+        throw new Error("Local host did not present the approval");
+      const slot = (await raw.read()).extensions[mcpFormApprovalContract.id];
+      if (slot?.status !== "running")
+        throw new Error("Local approval projection unavailable");
+      const form = Schema.decodeUnknownSync(
+        mcpFormApprovalContract.projection.schema,
+      )(slot.value).pending[0];
+      if (!form) throw new Error("Missing projected approval");
+      return { next, form };
+    };
+    const second = await submitAgain("fixture-turn:1/tool:2/operation:0");
     expect(
       await session.extension(mcpFormApprovalContract.id).call("answer", {
-        id: secondForm.id,
+        id: second.form.id,
         decision: "always-allow",
-        expectedRevision: secondForm.approval.record.revision,
+        expectedRevision: second.form.approval.record.revision,
       }),
     ).toMatchObject({
       kind: "answered",
-      view: { record: { recordId: second.recordId, state: "applied" } },
+      view: { record: { recordId: second.next.recordId, state: "applied" } },
     });
     expect(rules.list()).toEqual([["notes", "write"]]);
+    expect(order).toEqual(["dispatch", "rule", "dispatch"]);
+
+    const third = await submitAgain("fixture-turn:1/tool:3/operation:0");
+    expect(third.form.review?.alwaysAllowUnavailableReason).toBe(
+      "This request has no reusable rule.",
+    );
+    expect(
+      await session.extension(mcpFormApprovalContract.id).call("answer", {
+        id: third.form.id,
+        decision: "deny",
+        expectedRevision: third.form.approval.record.revision,
+        denialNote: "Use the sandbox instead",
+      }),
+    ).toMatchObject({
+      kind: "answered",
+      view: {
+        record: { state: "denied", denialNote: "Use the sandbox instead" },
+      },
+    });
     expect(order).toEqual(["dispatch", "rule", "dispatch"]);
   } finally {
     await watch?.close();
@@ -255,15 +299,4 @@ it("approve once leaves the project rule store empty; an explicit always-allow s
     database.close();
     await rm(root, { recursive: true, force: true });
   }
-});
-
-it("the Local form answer schema rejects an omitted or unknown decision", () => {
-  const decodeAnswer = Schema.decodeUnknownSync(
-    mcpFormApprovalContract.commands.answer.input,
-  );
-  const valid = { id: "form-1", expectedRevision: 1 };
-  expect(() => decodeAnswer(valid)).toThrow();
-  expect(() =>
-    decodeAnswer({ ...valid, decision: "approve-everything" }),
-  ).toThrow();
 });

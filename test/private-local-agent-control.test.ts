@@ -47,8 +47,10 @@ import * as Stream from "effect/Stream";
 import { afterEach, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { patchOutputSchema } from "@fungi.computer/knapsack";
+import { directSandbox } from "@fungi.computer/mycelium/testing";
 
 import type { LocalAgentControlDirectory } from "../src/private-local-agent-control.js";
+import { createPrivateLocalAgentControl } from "../src/private-local-agent-control.js";
 import {
   createLocalServiceOwners,
   type OpenLocalServiceRuntime,
@@ -81,6 +83,84 @@ async function temporaryDirectory() {
   temporaryDirectories.push(directory);
   return directory;
 }
+
+it("binds Local Agent creation to the exact Session that invokes it", async () => {
+  const requests: unknown[] = [];
+  const directory: LocalAgentControlDirectory = {
+    list: () => Promise.resolve([]),
+    create: (request) => {
+      requests.push(request);
+      return Promise.resolve({
+        agentId: "local_store_child",
+        name: "Child",
+        workingDirectory: "/project",
+      });
+    },
+    open: () => Promise.reject(new Error("unused")),
+    archive: () => Promise.resolve(),
+    unarchive: () => Promise.resolve(),
+  };
+  // SAFETY: This test exercises the Session-to-directory delegation path only;
+  // no persistence operation is made through this intentionally minimal stub.
+  const storage: Parameters<
+    typeof createPrivateLocalAgentControl
+  >[0]["storage"] = {
+    sql: {
+      exec: () => ({ toArray: () => [] }),
+    },
+    transactionSync: (operation) => operation(),
+  };
+  const source = createPrivateLocalAgentControl({
+    agentId: "local_store_parent",
+    directory,
+    storage,
+  }).control;
+
+  async function createInSession(sessionId: string) {
+    const runtime = await Mycelium.make({
+      sources: [source],
+      sandbox: directSandbox(async ({ agents }) => {
+        if (agents?.create === undefined)
+          throw new Error("Agent create tool is unavailable");
+        await agents.create({ requestId: "same-request" });
+        return null;
+      }),
+      session: { sessionId },
+    });
+    const lease = await runtime.acquire();
+    try {
+      const prepared = await Effect.runPromise(
+        lease.executeTool.prepare({
+          type: "toolCall",
+          id: `create-${sessionId}`,
+          name: "execute",
+          arguments: {
+            code: 'return await agents.create({requestId:"same-request"})',
+          },
+        }),
+      );
+      await Effect.runPromise(Stream.runCollect(prepared.execute()));
+    } finally {
+      await lease.release();
+      await runtime.close();
+    }
+  }
+
+  await createInSession("parent-session");
+  await createInSession("sibling-session");
+  expect(requests).toEqual([
+    {
+      requestId: "same-request",
+      createdBy: "local_store_parent",
+      createdBySessionId: "parent-session",
+    },
+    {
+      requestId: "same-request",
+      createdBy: "local_store_parent",
+      createdBySessionId: "sibling-session",
+    },
+  ]);
+});
 
 /**
  * Own the optional-package tree: a partial install by default, or the
@@ -936,7 +1016,14 @@ function createdBy(
   return {
     ...directory,
     create: (request, signal) =>
-      directory.create({ ...request, createdBy: creator }, signal),
+      directory.create(
+        {
+          ...request,
+          createdBy: creator,
+          createdBySessionId: "creator-session",
+        },
+        signal,
+      ),
     archive: ({ agentId }, signal) =>
       directory.archive(
         { agentId, by: { kind: "agent", agentId: creator } },

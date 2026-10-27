@@ -154,6 +154,46 @@ export async function listPrivateLocalAgentStores(
   return [...paths];
 }
 
+/** Entry-preserving survey: a symlink is archived as a link, not its target. */
+export async function probePrivateLocalAgentStoreEntries(
+  home: string,
+  maximum = 512,
+): Promise<
+  readonly Readonly<{ agentId: string; entry: string; databasePath: string }>[]
+> {
+  const directory = join(home, ".fungi", "agents");
+  let entries;
+  try {
+    entries = await readdir(directory, { withFileTypes: true });
+  } catch (cause) {
+    if (cause instanceof Error && "code" in cause && cause.code === "ENOENT")
+      return [];
+    throw cause;
+  }
+  const stores = entries.filter(
+    (entry) => entry.isDirectory() || entry.isSymbolicLink(),
+  );
+  if (stores.length > maximum)
+    throw new Error(
+      `Fungi cannot survey ${String(stores.length)} Agent stores (maximum ${String(maximum)})`,
+    );
+  const candidates: { agentId: string; entry: string; databasePath: string }[] =
+    [];
+  for (const store of stores) {
+    const entry = join(directory, store.name);
+    const databasePath = join(entry, "agent.sqlite");
+    try {
+      if ((await stat(databasePath)).isFile())
+        candidates.push({ agentId: store.name, entry, databasePath });
+    } catch (cause) {
+      if (cause instanceof Error && "code" in cause && cause.code === "ENOENT")
+        continue;
+      throw cause;
+    }
+  }
+  return candidates;
+}
+
 const storedProfileSchema = z.strictObject({
   name: z.string().nullable(),
   createdBy: z.string().nullable(),

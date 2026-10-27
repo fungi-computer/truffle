@@ -4,6 +4,7 @@ import {
   constants,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   realpath,
   rename,
@@ -23,13 +24,23 @@ import {
 } from "@fungi.computer/shiitake/extensions";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
-import lockfile from "proper-lockfile";
 import writeFileAtomic from "write-file-atomic";
 import { z } from "zod";
 import {
   describeExtensionSkills,
   type ExtensionSkillFolder,
 } from "./local-skill-source.js";
+import {
+  activationsSchema,
+  capabilities,
+} from "./private-local-extension-records.js";
+import {
+  acquireExtensionOwnerLock,
+  extensionArchiveNoticesAreDeferred,
+  extensionArchiveNameSchema,
+  takePendingExtensionArchiveNoticesUnderOwnerLock,
+  writeExtensionArchiveNotice,
+} from "./private-local-extension-archive-notice.js";
 
 /**
  * Installed Local extensions. One owner holds the package bytes under
@@ -45,19 +56,6 @@ import {
  * are not covered.
  */
 
-const capabilities = [
-  "state",
-  "attention",
-  "settled",
-  "send",
-  "timers",
-  "commands",
-  "projection",
-  "run_tools",
-  "files",
-  "prompt",
-  "compaction_handoff",
-] as const satisfies readonly ExtensionCapabilityV0[];
 const decodeExtensionId = Schema.decodeUnknownSync(ExtensionId);
 const identifier = z.string().regex(/^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$/u);
 const revisionPattern = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u;
@@ -121,19 +119,18 @@ const installedSchema = z.strictObject({
     }),
   ),
 });
-const activationsSchema = z.strictObject({
-  projects: z.record(z.string(), z.record(z.string(), z.string())),
-  agents: z.record(
+const extensionNameNoticeSchema = z.object({
+  extensions: z.record(
     z.string(),
-    z.record(
-      z.string(),
-      z.strictObject({
-        revision: z.string(),
-        capabilities: z.array(z.enum(capabilities)),
-        /** The opt-in to the revision's skills folder; separate from tools. */
-        skills: z.boolean(),
-      }),
-    ),
+    z.object({
+      current: z.string(),
+      revisions: z.record(
+        z.string(),
+        z.object({
+          name: z.unknown().optional(),
+        }),
+      ),
+    }),
   ),
 });
 const lockSchema = z.looseObject({
@@ -314,13 +311,106 @@ export function localExtensions(options: LocalExtensionsOptions) {
       );
     return parsed.data;
   }
-  const readInstalled = () =>
-    readJson(
-      installedPath,
-      installedSchema,
-      { extensions: {} },
-      "delete it and run `fungi extension add` again",
+  function extensionNamesForNotice(text: string): readonly string[] {
+    let value: unknown;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      return [];
+    }
+    const parsed = extensionNameNoticeSchema.safeParse(value);
+    if (!parsed.success) return [];
+    return [
+      ...new Set(
+        Object.entries(parsed.data.extensions).flatMap(([id, extension]) => {
+          if (!Object.hasOwn(extension.revisions, extension.current)) return [];
+          const revision = extension.revisions[extension.current];
+          if (revision === undefined) return [];
+          const revisionName = extensionArchiveNameSchema.safeParse(
+            revision.name,
+          );
+          const idName = extensionArchiveNameSchema.safeParse(id);
+          const name = revisionName.success ? revisionName : idName;
+          return name.success ? [name.data] : [];
+        }),
+      ),
+    ];
+  }
+  async function archiveInstalled(text: string): Promise<Installed> {
+    const names = extensionNamesForNotice(text);
+    const archiveRoot = join(resolve(options.home), ".fungi", "archive");
+    await mkdir(archiveRoot, { recursive: true, mode: 0o700 });
+    for (let suffix = 1; suffix <= 9; suffix += 1) {
+      const slug = "unversioned";
+      const directory = join(archiveRoot, slug, "extensions");
+      const filename =
+        suffix === 1 ? "installed.json" : `installed-${suffix.toString()}.json`;
+      const destination = join(directory, filename);
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      const reservation = await open(destination, "wx", 0o600).catch(
+        (cause: unknown) => {
+          if (
+            cause instanceof Error &&
+            "code" in cause &&
+            cause.code === "EEXIST"
+          )
+            return undefined;
+          throw cause;
+        },
+      );
+      if (reservation === undefined) continue;
+      try {
+        await rename(installedPath, destination);
+      } catch (cause) {
+        if (absent(cause)) return { extensions: {} };
+        throw new LocalExtensionError(
+          "install",
+          `Could not archive ${installedPath} at ${destination}`,
+          { cause },
+        );
+      } finally {
+        await reservation.close();
+      }
+      await writeExtensionArchiveNotice(options.home, slug, filename, names);
+      if (!extensionArchiveNoticesAreDeferred(options.home)) {
+        const pending = await takePendingExtensionArchiveNoticesUnderOwnerLock(
+          options.home,
+        );
+        for (const message of pending) process.stderr.write(`${message}\n`);
+      }
+      return { extensions: {} };
+    }
+    throw new LocalExtensionError(
+      "install",
+      `Could not archive ${installedPath}: every unversioned archive destination already exists`,
     );
+  }
+  async function readInstalled(underOwnerLock = false): Promise<Installed> {
+    let text: string;
+    try {
+      text = await readFile(installedPath, "utf8");
+    } catch (cause) {
+      if (absent(cause)) return { extensions: {} };
+      throw cause;
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      value = undefined;
+    }
+    const parsed = installedSchema.safeParse(value);
+    if (parsed.success) return parsed.data;
+    if (!underOwnerLock) {
+      const release = await acquireExtensionOwnerLock(root);
+      try {
+        return await readInstalled(true);
+      } finally {
+        await release();
+      }
+    }
+    return archiveInstalled(text);
+  }
   const readActivations = () =>
     readJson(
       activationsPath,
@@ -333,16 +423,9 @@ export function localExtensions(options: LocalExtensionsOptions) {
   async function update<T>(
     change: (installed: Installed, activations: Activations) => T,
   ): Promise<T> {
-    await mkdir(root, { recursive: true, mode: 0o700 });
-    const release = await lockfile.lock(root, {
-      realpath: false,
-      lockfilePath: join(root, ".owner.lock"),
-      stale: 30_000,
-      update: 10_000,
-      retries: { retries: 20, factor: 1.2, minTimeout: 25, maxTimeout: 100 },
-    });
+    const release = await acquireExtensionOwnerLock(root);
     try {
-      const installed = await readInstalled();
+      const installed = await readInstalled(true);
       const activations = await readActivations();
       const result = change(installed, activations);
       const options = { encoding: "utf8", fsync: true, mode: 0o600 } as const;

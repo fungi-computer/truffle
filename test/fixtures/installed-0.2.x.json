@@ -1,0 +1,21 @@
+{
+  "extensions": {
+    "counter": {
+      "current": "1.0.0",
+      "revisions": {
+        "1.0.0": {
+          "name": "@fungi.computer/counter",
+          "version": "1.0.0",
+          "source": "./tools/counter",
+          "resolution": "file:tools/counter",
+          "commit": null,
+          "directory": "/home/example/.fungi/extensions/packages/counter/1.0.0",
+          "capabilities": ["run_tools"],
+          "terminals": [],
+          "host": null,
+          "client": null
+        }
+      }
+    }
+  }
+}

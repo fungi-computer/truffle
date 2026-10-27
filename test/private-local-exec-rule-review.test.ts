@@ -250,13 +250,54 @@ it.each(["commit", "push", "merge", "diff"])(
       { configuredRemotes: new Set() },
     );
     expect(review.prefix).toEqual(["git", subcommand]);
-    expect(review.warning).toContain("run code as you");
-    expect(review.warning).toContain("create missing hook files");
-    expect(review.warning).toContain("configured fsmonitor path");
+    expect(review.command).toBe(`git ${subcommand}`);
+    expect(review.argv).toEqual(["git", subcommand]);
+    expect(review.risk?.summary).toContain("run code as you");
+    expect(review.risk?.summary).toContain("this Agent can add hooks");
+    expect(review.risk?.detail).toContain("configured fsmonitor program");
     if (subcommand === "push")
-      expect(review.warning).toContain("delete remote branches");
+      expect(review.risk?.summary).toContain("delete any branch");
   },
 );
+
+it("quotes spaced direct arguments but never manufactures argv or risk for shell form", () => {
+  const direct = localExecEscapeReview(
+    {
+      executable: "git",
+      args: ["add", "a b"],
+      escape: { justification: "Needs Git" },
+    },
+    "/project",
+  );
+  expect(direct.command).toBe("git add 'a b'");
+  expect(direct.argv).toEqual(["git", "add", "a b"]);
+  expect(direct.form).toBe("direct");
+  const shell = localExecEscapeReview(
+    {
+      command: "git add *.js",
+      escape: { justification: "Needs Git" },
+    },
+    "/project",
+  );
+  expect(shell.command).toBe("git add *.js");
+  expect(shell.argv).toBeUndefined();
+  expect(shell.risk).toBeUndefined();
+  expect(shell.prefix).toBeUndefined();
+  expect(shell.form).toBe("shell");
+});
+
+it("keeps extension installs plain, without a project rule", () => {
+  const review = localExecEscapeReview(
+    {
+      executable: "fungi",
+      args: ["extension", "add", "./tools/linter"],
+      escape: { justification: "Needs install" },
+    },
+    "/project",
+  );
+  expect(review.kind).toBe("extension-install");
+  expect(review.prefix).toBeUndefined();
+});
 
 it("the Git option profile needs no suppression cast", async () => {
   const source = await readFile(

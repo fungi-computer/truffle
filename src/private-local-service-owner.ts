@@ -44,6 +44,7 @@ import {
   LocalExtensionError,
   type LocalExtensions,
 } from "./local-extensions.js";
+import { deferExtensionArchiveNotices } from "./private-local-extension-archive-notice.js";
 import type {
   LocalAgentControlAgent,
   LocalAgentControlDirectory,
@@ -224,8 +225,12 @@ export function createLocalServiceOwners(
     Parameters<typeof openPrivateLocalRuntimeHost>[0]["onExecApprovalDecision"]
   > = () => undefined,
 ) {
+  deferExtensionArchiveNotices(configRoot.home);
   const extensions =
-    suppliedExtensions ?? localExtensions({ home: configRoot.home });
+    suppliedExtensions ??
+    localExtensions({
+      home: configRoot.home,
+    });
   const recoveryPath =
     recoveryDirectory === undefined
       ? undefined
@@ -362,9 +367,10 @@ export function createLocalServiceOwners(
         )
           return "refused";
         if (
-          mail.from.sessionId === undefined &&
+          mail.from.kind === "system" &&
           !(
-            mail.replyTo.length === 0 && mail.reply?.outcome === "undeliverable"
+            mail.reply?.outcome === "undeliverable" &&
+            mail.reply.reason === "recipient_offline"
           )
         )
           return "refused";
@@ -439,7 +445,9 @@ export function createLocalServiceOwners(
       for (const project of projects)
         selections.set(project, await readProjectFungiMcpSelection(project));
       const candidate: Configuration = {
-        load: await localExtensions({ home: configRoot.home }).captureAgent(),
+        load: await localExtensions({
+          home: configRoot.home,
+        }).captureAgent(),
         mcp: selections,
         clientPath: path,
       };
@@ -1141,11 +1149,13 @@ export function createLocalServiceOwners(
     const control = directory(invocationRoot);
     return {
       deliver: async (mail) => {
+        const senderAgentId =
+          mail.from.kind === "agent" ? mail.from.agentId : undefined;
         const remote = [...meshDirectories.values()].find(
           ({ record }) =>
             record.invocationRoot === invocationRoot &&
             record.bindings.some(
-              (binding) => binding.agentId === mail.from.agentId,
+              (binding) => binding.agentId === senderAgentId,
             ),
         );
         if (remote !== undefined) {
@@ -1394,11 +1404,19 @@ export function createLocalServiceOwners(
         });
       },
       create: async (
-        { requestId, name, model, extensions: requested = [], createdBy },
+        {
+          requestId,
+          name,
+          model,
+          extensions: requested = [],
+          createdBy,
+          createdBySessionId,
+        },
         signal,
       ) => {
         ensureRunning();
         signal.throwIfAborted();
+        z.string().min(1).max(256).parse(createdBySessionId);
         // An Agent creating an Agent cannot give it more than it holds. Refuse
         // before anything exists; never trim the request.
         const creatorDatabase = (await targets(signal)).get(createdBy);
@@ -1420,9 +1438,11 @@ export function createLocalServiceOwners(
           throw error;
         }
         const key = `create:${JSON.stringify([invocationRoot, requestId])}`;
+        const creator = { agentId: createdBy, sessionId: createdBySessionId };
         const createStore = await resolvePrivateLocalCreateStore(
           invocationRoot,
           requestId,
+          creator,
         );
         signal.throwIfAborted();
         ensureRunning();
@@ -1446,6 +1466,7 @@ export function createLocalServiceOwners(
               createRequestId: requestId,
               name,
               createdBy,
+              createdBySessionId,
               mode: creatorProfile.mode,
               folder: creatorProfile.folder,
               agentControl: directory(invocationRoot),

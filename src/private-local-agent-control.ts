@@ -13,6 +13,8 @@ export type LocalCreateRequest = Parameters<
   Readonly<{
     /** The Agent creating, resolved by the creator's own host, never by the caller. */
     createdBy: string;
+    /** The creating Session, captured by the Local Agent-control host. */
+    createdBySessionId: string;
   }>;
 
 /**
@@ -88,7 +90,14 @@ export function createPrivateLocalAgentControl(
             "no_creator",
             "creation requires an invoking Session",
           );
-        return create({ ...request, createdBy: input.agentId }, signal);
+        return create(
+          {
+            ...request,
+            createdBy: input.agentId,
+            createdBySessionId: parentSessionId,
+          },
+          signal,
+        );
       },
     };
   }

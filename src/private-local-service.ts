@@ -7,6 +7,7 @@ import {
 } from "./private-local-containment.js";
 export { LocalSandboxUnavailable } from "./private-local-containment.js";
 import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
+import { takePendingExtensionArchiveNotices } from "./private-local-extension-archive-notice.js";
 import { stopAllResultSchema } from "./private-local-stop-all.js";
 export type { StopAllResult } from "./private-local-stop-all.js";
 import {
@@ -231,6 +232,14 @@ export function createPrivateLocalServiceManager(
         )
       : parsePrivateLocalExecPath(options.executionPath);
   const expectedVersion = privateLocalServiceVersion();
+  async function reportPendingExtensionArchiveNotices() {
+    try {
+      const notices = await takePendingExtensionArchiveNotices(root.home);
+      for (const notice of notices) process.stderr.write(`${notice}\n`);
+    } catch (cause) {
+      logEvent("extension.archive-notice", cause);
+    }
+  }
   /**
    * Set once this client has reached a service. Only a starting client
    * replaces a service speaking another protocol. Same-protocol build changes
@@ -521,6 +530,7 @@ export function createPrivateLocalServiceManager(
       service,
       request.signal,
     );
+    await reportPendingExtensionArchiveNotices();
     const firstBase = routeBase(service, selected);
     /**
      * Where this connection's client currently talks. A restarted service

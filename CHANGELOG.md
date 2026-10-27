@@ -1,5 +1,61 @@
 # @fungi.computer/truffle
 
+## 0.4.0
+
+### Minor Changes
+
+- Changes since 0.3.1:
+
+  - fix(upgrade): preserve prior identity and tolerate refused home reads
+  - fix(local): bind create receipts to creator session
+  - feat(release): derive upgrade news from checked changelog
+  - fix(local): accept semver prereleases in version markers
+  - feat(local): stop verified old service before upgrading home
+  - feat(local): archive only reader-refused home artifacts
+  - feat(local): identify prior installation and write version marker
+  - fix(local): corroborate macOS service identity before signalling
+  - fix(approvals): bound confirmation and refuse invalid noted approvals
+  - fix(goal): bound delegated waiting to unsettled child work
+  - fix(goal): fence later turns by goal revision
+  - fix(local): keep archived extension notices names-only
+  - feat(tui): migrate the model, sign-in, resume, fork and Home pickers to the
+    shared modal
+  - feat(approvals): lead follow-up turns with human denial reason
+  - fix(local): redact credentials in extension archive notices
+  - fix(local): keep archive notice handoff internal
+  - feat(approval): carry bounded denial feedback and optional rule coverage
+  - fix(local): hand detached archive notices to foreground
+  - fix(cli): clarify provider-specific sign-in guidance
+  - fix(local): archive legacy extension registries
+  - feat(approval): make one-time approval the safe default
+  - fix(truffle): reuse safe git commit grants
+  - fix(tui): approve MCP escapes once by default
+  - fix(cli): prioritize BYOK in missing-model guidance
+  - fix(mesh): admit authenticated frozen offline replies
+  - fix(mesh): admit Hub offline dispositions
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.4.0
+  - @fungi.computer/approvals@0.2.0
+  - @fungi.computer/bird-dog@0.2.1
+  - @fungi.computer/knapsack@0.3.1
+  - @fungi.computer/shiitake-extensions@0.3.0
+  - @fungi.computer/shiitake@0.5.0
+  - @fungi.computer/veil@0.2.1
+  - @fungi.computer/whistle@0.2.0
+  - @fungi.computer/nacre@0.0.3
+  - @fungi.computer/graft@0.1.3
+  - @fungi.computer/zookeeper@0.0.4
+
 ## 0.3.1
 
 ### Patch Changes
