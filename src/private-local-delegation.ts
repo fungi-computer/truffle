@@ -1,4 +1,5 @@
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
+import * as Effect from "effect/Effect";
 import type {
   Accepted,
   CancelResult,
@@ -61,6 +62,25 @@ export function createPrivateLocalDelegation(
       meta?: BirdDogMail["meta"],
       reply?: VerifiedAgentReply,
     ) => Promise<Accepted>;
+    /**
+     * What happens to items a child left waiting on this Agent when the work
+     * that was told about them ends. Without it a host leaves them to expire.
+     */
+    unattended?: Readonly<{
+      /** Exact settled facts of one command of this Agent's own Sessions. */
+      readSettlement: (
+        sessionId: string,
+        commandId: string,
+      ) => Promise<CommandSettlement | undefined>;
+      /**
+       * Pass one child item on to a person, as this Agent's Session that was
+       * told about it. A child that already moved on answers that and nothing changes.
+       */
+      escalate: (
+        item: Readonly<{ agentId: string; sessionId: string; itemId: string }>,
+        receiverSessionId: string,
+      ) => Promise<void>;
+    }>;
   }>,
 ) {
   const fleet = createFleetDelegation({
@@ -92,7 +112,80 @@ export function createPrivateLocalDelegation(
     return agents;
   }
 
-  /** Send with one caller-owned identity; follow-up replies return here. */
+  /**
+   * Items a child left waiting on this Agent, by the reply command that told
+   * it. When the work that carried the reply ends, whatever the Agent neither
+   * answered nor escalated goes to a person, so no waiting item is silent.
+   */
+  const unattended = new Map<
+    string,
+    Readonly<{
+      sessionId: string;
+      child: Readonly<{ agentId: string; sessionId: string }>;
+      items: readonly string[];
+    }>
+  >();
+  let poll: ReturnType<typeof setInterval> | undefined;
+
+  /** Escalate the items of every reply whose carrying work has settled. */
+  async function settleUnattended(): Promise<void> {
+    const handling = input.unattended;
+    if (handling === undefined) return;
+    for (const [commandId, entry] of unattended) {
+      const settlement = await handling
+        .readSettlement(entry.sessionId, commandId)
+        .catch((cause: unknown) => {
+          // Not settled as far as anyone can tell; try again on the next poll.
+          Effect.runFork(Effect.logWarning("delegation.settlement", cause));
+          return undefined;
+        });
+      if (settlement === undefined) continue;
+      unattended.delete(commandId);
+      for (const itemId of entry.items)
+        await handling
+          .escalate({ ...entry.child, itemId }, entry.sessionId)
+          .catch((cause: unknown) => {
+            Effect.runFork(Effect.logWarning("delegation.escalate", cause));
+          });
+    }
+    if (unattended.size === 0 && poll !== undefined) {
+      clearInterval(poll);
+      poll = undefined;
+    }
+  }
+
+  function watchUnattended(
+    accepted: Accepted,
+    receiverSessionId: string | undefined,
+    reply: VerifiedAgentReply,
+  ): void {
+    if (
+      input.unattended === undefined ||
+      reply.outcome === "undeliverable" ||
+      reply.waitingOnYou === undefined
+    )
+      return;
+    if (receiverSessionId === undefined) return;
+    unattended.set(accepted.commandId, {
+      sessionId: receiverSessionId,
+      child: { agentId: reply.agentId, sessionId: reply.sessionId },
+      items: reply.waitingOnYou.map(({ itemId }) => itemId),
+    });
+    poll ??= setInterval(() => {
+      void settleUnattended();
+    }, 1_000);
+    poll.unref();
+  }
+
+  /** Escalate what is owed now and stop watching; the Agent is closing. */
+  async function close(): Promise<void> {
+    await settleUnattended();
+    unattended.clear();
+    if (poll !== undefined) clearInterval(poll);
+    poll = undefined;
+  }
+
+  /** Send with one caller-owned identity; follow-up and steer replies return here. */
   async function send(
     task: AgentDelegationInput,
     sourceSessionId: string,
@@ -109,19 +202,10 @@ export function createPrivateLocalDelegation(
       requestId: task.requestId,
     });
     signal.throwIfAborted();
-    if (task.delivery === "steer") {
-      const opened = await input.directory.open(task.agentId, signal);
-      try {
-        return await opened.agent.session(task.sessionId).send(task.text, {
-          requestId,
-          delivery: "steer",
-        });
-      } finally {
-        await opened.release();
-      }
-    }
+    // A person reads this name where work waits on its sender.
+    const sender = agents.find(({ agentId }) => agentId === input.agentId);
     const meta = delegationSendMeta(
-      { id: input.agentId, name: input.agentId },
+      { id: input.agentId, name: sender?.name ?? input.agentId },
       invocation.meta,
     );
     // The caller's request key owns replay, not the current model program's bytes.
@@ -141,6 +225,7 @@ export function createPrivateLocalDelegation(
       {
         agentId: task.agentId,
         sessionId: task.sessionId,
+        delivery: task.delivery,
         text: task.text,
         requestId,
       },
@@ -239,8 +324,14 @@ export function createPrivateLocalDelegation(
       delegation,
       replier?.name ?? delegation.reply.agentId,
     );
-    return input.accept({ ...mail, meta }, meta, delegation.reply);
+    const accepted = await input.accept(
+      { ...mail, meta },
+      meta,
+      delegation.reply,
+    );
+    watchUnattended(accepted, mail.to.sessionId, delegation.reply);
+    return accepted;
   }
 
-  return { send, recall, receive, outstanding: fleet.outstanding };
+  return { send, recall, receive, close, outstanding: fleet.outstanding };
 }

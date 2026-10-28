@@ -128,6 +128,69 @@ it("does not replay one Local create receipt into a sibling Session", async () =
   ).resolves.toEqual(first);
 });
 
+it("refuses an unbound legacy create receipt without adopting its Agent", async () => {
+  const root = await temporaryProject();
+  const original = await resolvePrivateLocalCreateStore(root, "legacy-create");
+  const receiptPath = join(
+    root,
+    ".fungi",
+    "agents",
+    "local-agent-create-receipts.sqlite",
+  );
+  const database = new DatabaseSync(receiptPath);
+  try {
+    database.exec(`
+      DROP TABLE local_agent_create_receipts;
+      CREATE TABLE local_agent_create_receipts (
+        request_id TEXT PRIMARY KEY NOT NULL,
+        agent_id TEXT NOT NULL UNIQUE,
+        name TEXT
+      ) WITHOUT ROWID;
+    `);
+    database
+      .prepare(
+        "INSERT INTO local_agent_create_receipts (request_id, agent_id, name) VALUES (?, ?, ?)",
+      )
+      .run("legacy-create", original.agentId, null);
+  } finally {
+    database.close();
+  }
+
+  await expect(
+    resolvePrivateLocalCreateStore(root, "legacy-create", {
+      agentId: "local_store_creator",
+      sessionId: "creator-session",
+    }),
+  ).rejects.toMatchObject({
+    name: "AgentCreateRefused",
+    reason: "request_conflict",
+    message: "the Local Agent create receipt is unbound; use a fresh requestId",
+  });
+
+  const reopened = new DatabaseSync(receiptPath);
+  try {
+    expect(
+      reopened
+        .prepare(
+          "SELECT request_id, agent_id, name FROM local_agent_create_receipts WHERE request_id = ?",
+        )
+        .get("legacy-create"),
+    ).toEqual({
+      request_id: "legacy-create",
+      agent_id: original.agentId,
+      name: null,
+    });
+  } finally {
+    reopened.close();
+  }
+
+  const fresh = await resolvePrivateLocalCreateStore(root, "fresh-create", {
+    agentId: "local_store_creator",
+    sessionId: "creator-session",
+  });
+  expect(fresh.agentId).not.toBe(original.agentId);
+});
+
 it.each(["receipt", "journal"])(
   "still refuses a planted hard link, symlink or directory at the %s path",
   async (kind) => {

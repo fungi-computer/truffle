@@ -71,6 +71,11 @@ const manifestSchema = z.strictObject({
         id: identifier.max(64),
         name: z.string().trim().min(1).max(64),
         description: z.string().max(200).default(""),
+        /** A shell key that opens this program beside the focused pane. */
+        binding: z
+          .string()
+          .regex(/^<leader>[a-z]$/u)
+          .optional(),
         /** Package-relative executable and its arguments. */
         command: z
           .array(z.string().min(1).max(1_024))
@@ -95,6 +100,7 @@ const terminalRecord = z.strictObject({
   id: z.string(),
   name: z.string(),
   description: z.string(),
+  binding: z.string().optional(),
   command: z.array(z.string()),
 });
 const revisionRecord = z.strictObject({
@@ -244,6 +250,8 @@ export type LocalExtensionTerminal = Readonly<{
   terminalId: string;
   name: string;
   description: string;
+  /** A shell key that opens this program beside the focused pane. */
+  binding?: string;
   /** Absolute executable followed by its arguments. */
   command: readonly string[];
   cwd: string;
@@ -913,8 +921,8 @@ export function localExtensions(options: LocalExtensionsOptions) {
         }
         if (record.client !== null) clients.push(record.client);
         const runtime = await runtimeDirectory(project, id);
-        for (const terminal of record.terminals)
-          terminals.push({
+        for (const terminal of record.terminals) {
+          const launcher = {
             extensionId: id,
             terminalId: terminal.id,
             name: terminal.name,
@@ -929,7 +937,13 @@ export function localExtensions(options: LocalExtensionsOptions) {
               FUNGI_PROJECT_ROOT: project,
               FUNGI_EXTENSION_RUNTIME_DIR: runtime,
             },
-          });
+          };
+          terminals.push(
+            terminal.binding === undefined
+              ? launcher
+              : { ...launcher, binding: terminal.binding },
+          );
+        }
       }
       return { clients, terminals, diagnostics };
     },

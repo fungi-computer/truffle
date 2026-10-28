@@ -46,7 +46,7 @@ export type LocalArchiveRequest = Readonly<{
  */
 export type LocalAgentControlDirectory = Omit<
   AgentControlDirectory,
-  "create" | "list" | "archive" | "unarchive"
+  "create" | "list" | "archive" | "unarchive" | "answer" | "escalate"
 > &
   Readonly<{
     list: (
@@ -57,6 +57,18 @@ export type LocalAgentControlDirectory = Omit<
       input: LocalCreateRequest,
       signal: AbortSignal,
     ) => Promise<AgentControlAgent>;
+    answer: (
+      input: Parameters<NonNullable<AgentControlDirectory["answer"]>>[0],
+      senderAgentId: string,
+      senderSessionId: string,
+      signal: AbortSignal,
+    ) => ReturnType<NonNullable<AgentControlDirectory["answer"]>>;
+    escalate: (
+      input: Parameters<NonNullable<AgentControlDirectory["escalate"]>>[0],
+      senderAgentId: string,
+      senderSessionId: string,
+      signal: AbortSignal,
+    ) => ReturnType<NonNullable<AgentControlDirectory["escalate"]>>;
     archive: (input: LocalArchiveRequest, signal: AbortSignal) => Promise<void>;
     unarchive: (
       input: LocalArchiveRequest,
@@ -78,7 +90,7 @@ export function createPrivateLocalAgentControl(
 ) {
   const conversations = createConversationAgents(input.storage);
   function bound(parentSessionId: string | undefined): AgentControlDirectory {
-    const { create, archive, unarchive } = input.directory;
+    const { create, archive, unarchive, answer, escalate } = input.directory;
     const by: LocalArchiver = { kind: "agent", agentId: input.agentId };
     return {
       ...input.directory,
@@ -99,6 +111,18 @@ export function createPrivateLocalAgentControl(
           signal,
         );
       },
+      answer: (request, sourceSessionId, signal) =>
+        parentSessionId === undefined
+          ? Promise.resolve({ status: "refused", reason: "no_provenance" })
+          : sourceSessionId !== parentSessionId
+            ? Promise.resolve({ status: "refused", reason: "not_sender" })
+            : answer(request, input.agentId, parentSessionId, signal),
+      escalate: (request, sourceSessionId, signal) =>
+        parentSessionId === undefined
+          ? Promise.resolve({ status: "refused", reason: "no_provenance" })
+          : sourceSessionId !== parentSessionId
+            ? Promise.resolve({ status: "refused", reason: "not_sender" })
+            : escalate(request, input.agentId, parentSessionId, signal),
     };
   }
   const control: CapabilitySource = conversations.control(bound);

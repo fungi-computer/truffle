@@ -38,7 +38,10 @@ import {
   AgentCreateRefused,
   AgentArchiveRefused,
   type AgentControlAgent,
+  type AgentControlAnswerOutput,
+  type AgentControlEscalateOutput,
 } from "@fungi.computer/shiitake/agent-control";
+import type { Json } from "@fungi.computer/shiitake/extensions";
 import {
   localExtensions,
   LocalExtensionError,
@@ -56,6 +59,7 @@ import { z } from "zod";
 import * as Schema from "effect/Schema";
 import { selectionSchema } from "./private-local-service-discovery.js";
 import { createShiitakeHttpRoutes } from "@fungi.computer/shiitake/http";
+import { questionContract } from "@fungi.computer/shiitake-extensions/question";
 import {
   listPrivateLocalAgentStores,
   LocalStoreSchemaError,
@@ -88,7 +92,10 @@ import {
   machineAgentRequestSchema,
   machineDirectorySchema,
 } from "@fungi.computer/seam/machine-link-protocol";
-import { commandSettlementSchema } from "@fungi.computer/shiitake/fleet";
+import {
+  commandSettlementSchema,
+  settlementReadableBy,
+} from "@fungi.computer/shiitake/fleet";
 import { BirdDogMailSchema } from "@fungi.computer/bird-dog/effect";
 
 export type LocalServiceRuntime = Pick<
@@ -343,7 +350,7 @@ export function createLocalServiceOwners(
           const facts = await admitted(owner, () =>
             owner.readSettlement(operation.sessionId, operation.commandId),
           );
-          if (facts !== undefined && facts.acceptedSender !== actorAgentId)
+          if (facts !== undefined && !settlementReadableBy(facts, actorAgentId))
             return "refused";
           return {
             status: "accepted",
@@ -1280,6 +1287,99 @@ export function createLocalServiceOwners(
       throw new Error("Agent is outside this Local project");
     }
     /**
+     * Run one sender-authenticated command on a child's question owner. Which
+     * Agent the item waits on is decided by the child's own store; this door
+     * only states who is calling.
+     */
+    async function callQuestionAsSender<Output>(
+      target: Readonly<{ agentId: string; sessionId: string }>,
+      senderAgentId: string,
+      senderSessionId: string,
+      command: "answerAgent" | "escalateAgent",
+      commandInput: Json,
+      output: Schema.Decoder<Output>,
+      signal: AbortSignal,
+    ): Promise<Output> {
+      ensureRunning();
+      signal.throwIfAborted();
+      const databasePath = (await targets(signal, "all")).get(target.agentId);
+      if (databasePath === undefined)
+        return outsideOrArchived(target.agentId, signal);
+      const { owner, release } = await admittedOwner(target.agentId, signal);
+      try {
+        return await admitted(owner, async () =>
+          Schema.decodeUnknownSync(output)(
+            await owner
+              .getSession(target.sessionId)
+              .extension("botanical-session-question")
+              .call(command, commandInput, {
+                agentId: senderAgentId,
+                sessionId: senderSessionId,
+              }),
+          ),
+        );
+      } finally {
+        release();
+      }
+    }
+    async function answerAsSender(
+      input: Parameters<NonNullable<LocalAgentControlDirectory["answer"]>>[0],
+      senderAgentId: string,
+      senderSessionId: string,
+      signal: AbortSignal,
+    ): Promise<AgentControlAnswerOutput> {
+      const decoded = await callQuestionAsSender(
+        input,
+        senderAgentId,
+        senderSessionId,
+        "answerAgent",
+        {
+          askId: input.askId,
+          requestId: input.requestId,
+          answers: input.answers,
+        },
+        questionContract.commands.answerAgent.output,
+        signal,
+      );
+      const { result } = decoded;
+      if (result.result === "accepted")
+        return result.commandId === undefined
+          ? { status: "answered", via: result.via }
+          : {
+              status: "answered",
+              via: result.via,
+              commandId: result.commandId,
+            };
+      if (result.result === "closed")
+        return { status: "closed", reason: result.status };
+      if (result.result === "refused")
+        return { status: "refused", reason: result.reason };
+      return { status: "not_found" };
+    }
+    async function escalateAsSender(
+      input: Parameters<NonNullable<LocalAgentControlDirectory["escalate"]>>[0],
+      senderAgentId: string,
+      senderSessionId: string,
+      signal: AbortSignal,
+    ): Promise<AgentControlEscalateOutput> {
+      const decoded = await callQuestionAsSender(
+        input,
+        senderAgentId,
+        senderSessionId,
+        "escalateAgent",
+        { askId: input.itemId },
+        questionContract.commands.escalateAgent.output,
+        signal,
+      );
+      if (decoded.result === "escalated")
+        return { status: "escalated", to: decoded.to };
+      if (decoded.result === "closed")
+        return { status: "closed", reason: decoded.status };
+      if (decoded.result === "refused")
+        return { status: "refused", reason: decoded.reason };
+      return { status: "not_found" };
+    }
+    /**
      * The first command still queued or running on any of an Agent's Sessions,
      * so an archive can name it rather than cancel it.
      */
@@ -1370,6 +1470,8 @@ export function createLocalServiceOwners(
     }
     return {
       owner: admittedOwner,
+      answer: answerAsSender,
+      escalate: escalateAsSender,
       archive: (request, signal) => setArchived(request, true, signal),
       unarchive: (request, signal) => setArchived(request, false, signal),
       list: async (signal, options) => {

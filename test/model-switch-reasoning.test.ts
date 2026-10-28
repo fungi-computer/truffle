@@ -511,22 +511,20 @@ it.each([
 it.each([
   {
     raw: "synthetic-private-provider-detail",
-    message:
-      "openai model request failed without a provider rejection. Retry the request.",
+    message: "OpenAI model request failed; try again.",
     retry: false,
     overflow: false,
   },
   {
     raw: "429 rate limit synthetic-private-provider-detail",
-    message:
-      "openai model request failed without a provider rejection. Retry the request.",
+    message: "OpenAI model request failed; try again.",
     retry: false,
     overflow: false,
   },
   {
     raw: "request exceeds the context window synthetic-private-provider-detail",
     message:
-      "openai request exceeds the context window. Compact the Session or choose another model.",
+      "OpenAI request exceeds the context window; compact the Session or choose another model.",
     retry: false,
     overflow: true,
   },
@@ -616,7 +614,7 @@ it("retains the provider's partial content and usage on error", async () => {
     ).result();
     expect(result.content).toEqual(partial.content);
     expect(result.usage.output).toBe(73);
-    expect(result.errorMessage).toMatch(/failed without a provider rejection/u);
+    expect(result.errorMessage).toBe("OpenAI model request failed; try again.");
   } finally {
     await acquired.release();
   }

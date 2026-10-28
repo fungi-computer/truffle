@@ -113,7 +113,7 @@ export type PrivateLocalServiceConnection = Readonly<{
 /** `unavailable`: service.json names no service that answers. */
 export type PrivateLocalServiceRebind =
   | Readonly<{ kind: "rebound"; service: PrivateLocalServiceStatus }>
-  | Readonly<{ kind: "unavailable" }>;
+  | Readonly<{ kind: "unavailable"; alive: boolean }>;
 
 export type PrivateLocalSessionChoice = Readonly<{
   databasePath: string;

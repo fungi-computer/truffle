@@ -12,6 +12,42 @@ import {
 } from "../src/private-provider-rejection.js";
 import { openAIAccessToken } from "./openai-fixtures.js";
 
+it.each([
+  ["anthropic", "Claude"],
+  ["openai", "ChatGPT"],
+])(
+  "names the %s subscription and local reset time without cross-provider instructions",
+  (provider, subscription) => {
+    expect(
+      modelFailureMessage(provider, {
+        rejection: {
+          code: "usage-limit-reached",
+          resetAt: new Date(2026, 9, 27, 16, 0).getTime(),
+        },
+      }),
+    ).toBe(
+      `${provider === "anthropic" ? "Anthropic" : "OpenAI"} usage limit reached on your ${subscription} subscription; resets at 16:00.`,
+    );
+  },
+);
+
+it.each([
+  [
+    { code: "rate-limit", retryAfterMs: 12000 },
+    "Anthropic rate limit reached; try again shortly.",
+  ],
+  [{ code: "overloaded" }, "Anthropic is overloaded; try again shortly."],
+  [
+    { code: "usage-limit-reached" },
+    "Anthropic usage limit reached on your Claude subscription.",
+  ],
+] satisfies [ProviderRejection, string][])(
+  "presents typed %j in one plain sentence",
+  (rejection, expected) => {
+    expect(modelFailureMessage("anthropic", { rejection })).toBe(expected);
+  },
+);
+
 it("does not infer a provider retry class from assistant error prose", () => {
   expect(
     modelFailureMessage("openai", {
@@ -20,9 +56,7 @@ it("does not infer a provider retry class from assistant error prose", () => {
         errorMessage: "503 service unavailable; retry this request",
       }),
     }),
-  ).toBe(
-    "openai model request failed without a provider rejection. Retry the request.",
-  );
+  ).toBe("OpenAI model request failed; try again.");
 });
 
 it("uses typed transport evidence even when Pi did not produce an assistant message", () => {
@@ -30,7 +64,7 @@ it("uses typed transport evidence even when Pi did not produce an assistant mess
     modelFailureMessage("openai", {
       rejection: { code: "provider_unavailable" },
     }),
-  ).toBe("openai service unavailable. Try again shortly.");
+  ).toBe("OpenAI is unavailable; try again shortly.");
 });
 
 const retryCases: {
@@ -122,7 +156,7 @@ it.each([401, 403])(
       rejection: observer.rejection(),
     });
     expect(message).toBe(
-      `openai rejected the model request (provider_rejected, HTTP ${String(status)}). Check /login or choose another model with /model.`,
+      `OpenAI rejected the request (HTTP ${String(status)}); check your sign-in or choose another model.`,
     );
     expect(message.includes("fixture-provider-body")).toBe(false);
   },

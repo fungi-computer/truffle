@@ -89,7 +89,7 @@ it.each([400, 401, 403])(
       message: bodyMarker,
     });
     expect(diagnostic).toBe(
-      `openai rejected the model request (provider_rejected, HTTP ${String(status)}). Check /login or choose another model with /model.`,
+      `OpenAI rejected the request (HTTP ${String(status)}); check your sign-in or choose another model.`,
     );
     expect(providerError).toContain(bodyMarker);
   },
@@ -101,19 +101,19 @@ it("a Sign in with ChatGPT usage limit reaches the turn as the typed usage-limit
     message: bodyMarker,
   });
   expect(diagnostic).toBe(
-    "openai usage limit reached (usage-limit-reached). Check ChatGPT Settings > Usage, then try again later.",
+    "OpenAI usage limit reached on your ChatGPT subscription.",
   );
   expect(providerError).toContain(bodyMarker);
   // A usage limit resets after hours: the turn must fail once, not retry.
   expect(isRetryableAssistantError(result)).toBe(false);
 });
 
-it("a throttling 429 stays the retryable service-unavailable reason", async () => {
+it("a throttling 429 reports the rate limit separately from service availability", async () => {
   const { providerError, diagnostic } = await turnFailure(429, {
     code: "rate_limit_exceeded",
     message: "Rate limit reached for requests",
   });
-  expect(diagnostic).toBe("openai service unavailable. Try again shortly.");
+  expect(diagnostic).toBe("OpenAI rate limit reached; try again shortly.");
   expect(providerError).toContain("Rate limit reached for requests");
 });
 
@@ -123,7 +123,7 @@ it("any other 429 stays provider_rejected HTTP 429", async () => {
     message: bodyMarker,
   });
   expect(diagnostic).toBe(
-    "openai rejected the model request (provider_rejected, HTTP 429). Check /login or choose another model with /model.",
+    "OpenAI rejected the request (HTTP 429); check your sign-in or choose another model.",
   );
   expect(providerError).toContain(bodyMarker);
 });

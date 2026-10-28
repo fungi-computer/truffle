@@ -37,6 +37,20 @@ const bunSqlite = Object.hasOwn(process.versions, "bun")
   : undefined;
 
 /**
+ * How long a reader waits out a live runtime's commit. Stores use a rollback
+ * journal, so a commit briefly locks readers out; a reader that gives up at
+ * once would read a busy store as an unreadable one.
+ */
+const readBusyTimeoutMs = 250;
+
+/**
+ * How long a store's writer waits out a reader's shared lock before its
+ * commit fails. Status reads and the Board read a live store; a reader holds
+ * its lock for one statement, so this bounds a rare wait, never a hang.
+ */
+export const storeWriteBusyTimeoutMs = 2_000;
+
+/**
  * A listing owns this database until its existing finally close. Bun's
  * node:sqlite prepare/close leaves native statements alive until GC. Native
  * close(true) on the native Bun driver explicitly finalizes every statement
@@ -44,8 +58,9 @@ const bunSqlite = Object.hasOwn(process.versions, "bun")
  */
 export function openPrivateReadOnlySqliteDatabase(
   path: string,
+  timeout = readBusyTimeoutMs,
 ): PrivateSqliteDatabase {
-  return openPrivateSqliteDatabase(path, true, 0);
+  return openPrivateSqliteDatabase(path, true, timeout);
 }
 
 /** Writable connections own their statements through deterministic close. */

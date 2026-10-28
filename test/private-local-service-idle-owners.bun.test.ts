@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 
+import { capturePrivateLocalExecPath } from "../src/private-local-exec-path.js";
 import {
   readServiceRecord,
   selectedSchema,
@@ -52,6 +53,10 @@ async function measure(pid: number, project: string) {
 it.skipIf(process.platform !== "linux")(
   "a real service releases N distinct idle Agents, keeps fds and retained objects bounded, and a restart reopens none",
   async () => {
+    const clientPath = capturePrivateLocalExecPath(
+      process.env.PATH ?? "",
+      process.cwd(),
+    );
     const home = await mkdtemp(join(tmpdir(), "fungi-idle-owners-"));
     const directory = await serviceDirectory(join(home, ".fungi", "service"));
     const project = join(home, "project");
@@ -118,7 +123,7 @@ it.skipIf(process.platform !== "linux")(
           body: JSON.stringify({
             invocationRoot: project,
             databasePath,
-            clientPath: process.env.PATH,
+            clientPath,
           }),
         });
         expect(response.status).toBe(200);

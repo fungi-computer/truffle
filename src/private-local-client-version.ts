@@ -6,7 +6,9 @@ import { promisify } from "node:util";
 import { z } from "zod";
 
 const execute = promisify(execFile);
-const queryOptions = { timeout: 2_000, maxBuffer: 4_096 };
+// A compiled launcher cold-starts a Bun process; 2s sat at twice its quiet-box
+// time and killed the query on a loaded box.
+const queryOptions = { timeout: 10_000, maxBuffer: 4_096 };
 const buildId = z.string().regex(/^[a-f0-9]{64}$/u);
 
 function installedLauncherOnPath(): Promise<string | undefined> {

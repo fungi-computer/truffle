@@ -1296,6 +1296,7 @@ describe("command-time sandbox policy", () => {
         full.close();
       }
     },
+    120_000,
   );
 
   it.runIf(process.platform === "linux")(

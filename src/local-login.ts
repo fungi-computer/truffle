@@ -8,6 +8,7 @@ import type {
   WhistleInteraction,
   WhistleNotice,
 } from "@fungi.computer/whistle";
+import { interactionTitleLimit } from "@fungi.computer/whistle/wire";
 
 import type { PrivateLocalServiceManager } from "./private-local-service.js";
 
@@ -87,6 +88,32 @@ function notice(event: AuthEvent): WhistleNotice {
   }
 }
 
+/**
+ * Pi's prompt text is provider wording, not a modal title: Whistle titles are
+ * at most `interactionTitleLimit` characters, and Pi 1.3's Anthropic paste
+ * prompt is longer. A message that fits stays the title; a longer one keeps
+ * every word as the summary under Fungi's fixed title for that prompt kind,
+ * so a provider sentence can never make the dialog refuse to open.
+ */
+function modalText(
+  message: string,
+  fallbackTitle: string,
+  hint?: string,
+): Readonly<{ message: string; summary?: string }> {
+  const fits = message.trim() !== "" && message.length <= interactionTitleLimit;
+  const lines = [
+    ...(fits ? [] : [message]),
+    ...(hint === undefined ? [] : [hint]),
+  ];
+  const title = fits ? message : fallbackTitle;
+  return lines.length === 0
+    ? { message: title }
+    : { message: title, summary: lines.join(" ") };
+}
+
+const placeholderOf = (placeholder: string | undefined) =>
+  placeholder === undefined ? {} : { placeholder };
+
 async function ask(
   interaction: WhistleInteraction,
   prompt: AuthPrompt,
@@ -97,7 +124,7 @@ async function ask(
       return interaction.prompt(
         {
           type: "choice",
-          message: prompt.message,
+          ...modalText(prompt.message, "Choose a sign-in option"),
           options: prompt.options.map((option) =>
             option.description === undefined
               ? { value: option.id, label: option.label }
@@ -110,41 +137,35 @@ async function ask(
         },
         options,
       );
-    case "manual_code": {
+    case "manual_code":
       // Generic across every provider that falls back to a pasted code or
       // redirect URL (OpenAI, Anthropic): the provider's own
       // message explains what to paste; this adds the SSH hint once, here,
       // instead of baking it into one provider's registry label.
-      const summary =
-        "Connecting over SSH? Paste the URL here instead of opening a browser.";
-      const { message } = prompt;
       return interaction.prompt(
-        prompt.placeholder === undefined
-          ? { type: "text", message, summary }
-          : {
-              type: "text",
-              message,
-              summary,
-              placeholder: prompt.placeholder,
-            },
+        {
+          type: "text",
+          ...modalText(
+            prompt.message,
+            "Paste the sign-in code or redirect URL",
+            "Connecting over SSH? Paste the URL here instead of opening a browser.",
+          ),
+          ...placeholderOf(prompt.placeholder),
+        },
         options,
       );
-    }
     case "secret":
     case "text":
       return interaction.prompt(
-        prompt.placeholder === undefined
-          ? {
-              type: "text",
-              message: prompt.message,
-              secret: prompt.type === "secret",
-            }
-          : {
-              type: "text",
-              message: prompt.message,
-              placeholder: prompt.placeholder,
-              secret: prompt.type === "secret",
-            },
+        {
+          type: "text",
+          ...modalText(
+            prompt.message,
+            prompt.type === "secret" ? "Enter your key" : "Enter a value",
+          ),
+          ...placeholderOf(prompt.placeholder),
+          secret: prompt.type === "secret",
+        },
         options,
       );
   }

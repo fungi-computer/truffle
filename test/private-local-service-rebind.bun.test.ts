@@ -35,6 +35,37 @@ async function withProject(
 }
 
 describe("a Local service connection across a service restart", () => {
+  it("names a stalled status probe busy while the SQLite lease still owns a living process", async () => {
+    await withProject(async (project, manager, directory) => {
+      const connection = await manager.connect({ invocationRoot: project });
+      const registration = await readServiceRegistration(directory);
+      if (registration?.kind !== "current")
+        throw new Error("Fixture service registration missing");
+      const proxy = serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch: () => new Response(null, { status: 503 }),
+      });
+      try {
+        await writeFile(
+          join(directory, "service.json"),
+          JSON.stringify({ ...registration.record, baseUrl: proxy.url.origin }),
+        );
+        expect(await connection.rebind()).toEqual({
+          kind: "unavailable",
+          alive: true,
+        });
+      } finally {
+        await writeFile(
+          join(directory, "service.json"),
+          JSON.stringify(registration.record),
+        );
+        await proxy.stop(true);
+        await connection.close();
+      }
+    });
+  }, 40_000);
+
   it("times out a hung selection after a healthy probe and permits the next attempt", async () => {
     await withProject(async (project, manager, directory) => {
       const connection = await manager.connect({ invocationRoot: project });
@@ -127,7 +158,10 @@ describe("a Local service connection across a service restart", () => {
       const connection = await manager.connect({ invocationRoot: project });
       await manager.stop();
 
-      expect(await connection.rebind()).toEqual({ kind: "unavailable" });
+      expect(await connection.rebind()).toEqual({
+        kind: "unavailable",
+        alive: false,
+      });
       expect(await manager.status()).toBeUndefined();
       await connection.close();
     });

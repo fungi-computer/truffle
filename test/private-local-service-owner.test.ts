@@ -14,6 +14,10 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { ShiitakeAgent, ShiitakeSession } from "@fungi.computer/shiitake";
+import type {
+  ExtensionCommandCallerV0,
+  Json,
+} from "@fungi.computer/shiitake/extensions";
 
 import type { LocalAgentControlDirectory } from "../src/private-local-agent-control.js";
 
@@ -93,6 +97,157 @@ describe("persistent Local service owners", () => {
     } finally {
       await owners.close();
       await rm(root, { recursive: true });
+    }
+  });
+
+  it("hands the invoking Agent Session to the child's question owner as the authenticated caller and returns its typed result", async () => {
+    const root = await realpath(
+      await mkdtemp(join(tmpdir(), "fungi-parent-answer-auth")),
+    );
+    const parentAgentId = "local_store_parent";
+    const childAgentId = "local_store_child";
+    const parentPath = join(
+      root,
+      ".fungi",
+      "agents",
+      parentAgentId,
+      "agent.sqlite",
+    );
+    const childPath = join(
+      root,
+      ".fungi",
+      "agents",
+      childAgentId,
+      "agent.sqlite",
+    );
+    await Promise.all(
+      [parentPath, childPath].map((path) =>
+        mkdir(dirname(path), { recursive: true }),
+      ),
+    );
+    writeFreshStore(parentPath, "Parent");
+    writeFreshStore(childPath, "Child", parentAgentId);
+    const calls: unknown[] = [];
+    let directory: LocalAgentControlDirectory | undefined;
+    const owners = createLocalServiceOwners((options) => {
+      directory ??= options.agentControl;
+      const databasePath = options.databasePath ?? parentPath;
+      const agentId = basename(dirname(databasePath));
+      return Promise.resolve({
+        databasePath,
+        agentId,
+        name: agentId,
+        listSessions: () => Promise.resolve({ sessions: [], next: undefined }),
+        createSession: () => Promise.resolve("unused"),
+        deleteSession: () => Promise.resolve(false),
+        extensions: unusedExtensions,
+        effectiveModel: fixtureEffectiveModel,
+        ...fixtureModelControls,
+        ...fixtureMailControls,
+        getSession: (sessionId: string) => {
+          const unusedSessionOperation = (): never => {
+            throw new Error("This answer-routing fixture operation is unused");
+          };
+          const session: ShiitakeSession = {
+            address: `session:${sessionId}`,
+            command: unusedSessionOperation,
+            withdraw: unusedSessionOperation,
+            abort: unusedSessionOperation,
+            send: unusedSessionOperation,
+            cancel: unusedSessionOperation,
+            latestPending: unusedSessionOperation,
+            extension: () => ({
+              call: (
+                command: string,
+                input: Json,
+                caller: ExtensionCommandCallerV0 | undefined,
+              ) => {
+                calls.push({ sessionId, command, input, caller });
+                return Promise.resolve(
+                  command === "escalateAgent"
+                    ? { result: "escalated", to: "person" }
+                    : {
+                        result: {
+                          result: "accepted",
+                          via: "follow_up",
+                          commandId: "follow-up-1",
+                        },
+                        answeredBy: { kind: "agent", agentId: parentAgentId },
+                      },
+                );
+              },
+            }),
+            modelPreference: {
+              read: unusedSessionOperation,
+              set: unusedSessionOperation,
+            },
+            read: unusedSessionOperation,
+            readSettlement: unusedSessionOperation,
+            subscribe: unusedSessionOperation,
+            watch: unusedSessionOperation,
+          };
+          return session;
+        },
+        bindSessionPath: () => true,
+        close: () => Promise.resolve(),
+      });
+    });
+    const signal = new AbortController().signal;
+    try {
+      await owners.select({
+        invocationRoot: root,
+        databasePath: parentPath,
+        sessionId: "sender-session",
+      });
+      if (directory === undefined) throw new Error("Local directory missing");
+      const input = {
+        agentId: childAgentId,
+        sessionId: "child-session",
+        askId: "ask-1",
+        requestId: "answer-1",
+        answers: { storage: { selected: ["SQLite"] } },
+      };
+      await expect(
+        directory.answer(input, parentAgentId, "sender-session", signal),
+      ).resolves.toEqual({
+        status: "answered",
+        via: "follow_up",
+        commandId: "follow-up-1",
+      });
+      await expect(
+        directory.escalate(
+          {
+            agentId: childAgentId,
+            sessionId: "child-session",
+            itemId: "ask-1",
+          },
+          parentAgentId,
+          "sender-session",
+          signal,
+        ),
+      ).resolves.toEqual({ status: "escalated", to: "person" });
+      const caller = { agentId: parentAgentId, sessionId: "sender-session" };
+      expect(calls).toEqual([
+        {
+          sessionId: "child-session",
+          command: "answerAgent",
+          input: {
+            askId: "ask-1",
+            requestId: "answer-1",
+            answers: { storage: { selected: ["SQLite"] } },
+          },
+          caller,
+        },
+        {
+          sessionId: "child-session",
+          command: "escalateAgent",
+          input: { askId: "ask-1" },
+          caller,
+        },
+      ]);
+    } finally {
+      await owners.close();
+      await rm(root, { recursive: true, force: true });
     }
   });
 
@@ -662,6 +817,18 @@ describe("persistent Local service owners", () => {
     writeFreshStore(creatorDatabasePath, null);
     const creator = "local_store_creator";
     const openedPaths: string[] = [];
+    const enabledExtensionCalls: string[] = [];
+    const extensionOwner = {
+      assertHeldByAgent: () => Promise.resolve(),
+      enableAgent: (storeDirectory: string, id: string) => {
+        enabledExtensionCalls.push(`${storeDirectory}:${id}`);
+        return Promise.resolve({
+          revision: "test",
+          capabilities: [],
+          skills: false,
+        });
+      },
+    };
     let directory: LocalAgentControlDirectory | undefined;
     const requireDirectory = (): LocalAgentControlDirectory => {
       const current = directory;
@@ -705,7 +872,11 @@ describe("persistent Local service owners", () => {
       };
     };
     const signal = new AbortController().signal;
-    const owners = createLocalServiceOwners(openRuntime);
+    const owners = createLocalServiceOwners(
+      openRuntime,
+      undefined,
+      extensionOwner,
+    );
     let restarted: ReturnType<typeof createLocalServiceOwners> | undefined;
     try {
       await owners.select({
@@ -722,6 +893,7 @@ describe("persistent Local service owners", () => {
             requestId: "request-one",
             createdBy: creator,
             createdBySessionId: "parent-session",
+            extensions: ["counter"],
           },
           signal,
         ),
@@ -730,17 +902,20 @@ describe("persistent Local service owners", () => {
             requestId: "request-one",
             createdBy: creator,
             createdBySessionId: "parent-session",
+            extensions: ["counter"],
           },
           signal,
         ),
       ]);
       expect(first).toEqual(concurrentRetry);
+      expect(enabledExtensionCalls).toHaveLength(2);
       await expect(
         directory.create(
           {
             requestId: "request-one",
             createdBy: creator,
             createdBySessionId: "sibling-session",
+            extensions: ["counter"],
           },
           signal,
         ),
@@ -748,12 +923,14 @@ describe("persistent Local service owners", () => {
         name: "AgentCreateRefused",
         reason: "request_conflict",
       });
+      expect(enabledExtensionCalls).toHaveLength(2);
       await expect(
         directory.create(
           {
             requestId: "request-one",
             createdBy: creator,
             createdBySessionId: "parent-session",
+            extensions: ["counter"],
           },
           signal,
         ),
@@ -764,7 +941,11 @@ describe("persistent Local service owners", () => {
       await owners.close();
 
       directory = undefined;
-      restarted = createLocalServiceOwners(openRuntime);
+      restarted = createLocalServiceOwners(
+        openRuntime,
+        undefined,
+        extensionOwner,
+      );
       await restarted.select({
         invocationRoot: root,
         databasePath: creatorDatabasePath,
@@ -779,6 +960,7 @@ describe("persistent Local service owners", () => {
             requestId: "request-one",
             createdBy: creator,
             createdBySessionId: "parent-session",
+            extensions: ["counter"],
           },
           signal,
         ),

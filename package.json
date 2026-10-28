@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/truffle",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": false,
   "description": "Truffle: Fungi's local Agent runtime, bundled into the fungi command",
   "type": "module",
@@ -57,6 +57,14 @@
     "./rules": {
       "types": "./dist/private-local-exec-rules.d.ts",
       "import": "./dist/private-local-exec-rules.js"
+    },
+    "./board-agents": {
+      "types": "./dist/local-board-agents.d.ts",
+      "import": "./dist/local-board-agents.js"
+    },
+    "./board-shipping": {
+      "types": "./dist/local-board-shipping.d.ts",
+      "import": "./dist/local-board-shipping.js"
     }
   },
   "files": [
@@ -70,6 +78,7 @@
     "build": "if [ ! -f src/private-local-native-digests.js ]; then pnpm run build:native; fi && node scripts/generate-native-digests.mjs --verify && pnpm run clean && tsc -p tsconfig.build.json && cp src/private-local-native-digests.js dist/private-local-native-digests.js && node scripts/copy-seatbelt.mjs && esbuild src/internal/private-workerd-sandbox-worker.mjs --outfile=dist/internal/private-workerd-sandbox-worker.mjs --bundle --format=esm --platform=neutral --conditions=workerd,browser --target=es2024 --external:cloudflare:workers --metafile=dist/internal/sandbox-metafile.json --log-level=warning && esbuild src/internal/local-image-fit-worker.mjs --outfile=dist/internal/local-image-fit-worker.mjs --bundle --format=esm --platform=node --target=es2024 --metafile=dist/internal/image-fit-metafile.json --log-level=warning",
     "clean": "node --input-type=module --eval \"import { rm } from 'node:fs/promises'; await rm('dist', { recursive: true, force: true });\"",
     "test": "pnpm run test:node && pnpm run test:merge && pnpm run test:stop-all",
+    "soak:memory": "bun scripts/service-memory-soak.mjs",
     "test:stop-all": "bun test ./test/private-local-stop-all.bun.test.ts",
     "test:full": "pnpm run test && pnpm run test:bun",
     "test:node": "../../node_modules/.bin/vitest run",

@@ -11,6 +11,8 @@ import { runPrivateLocalService } from "../src/private-local-service-listener.js
 import { runLocalAuthCli, type LocalAuthModels } from "../src/auth-cli.js";
 import { createPrivateModels } from "../src/local-models.js";
 import { createPrivateLocalServiceManager } from "../src/private-local-service.js";
+import { authInteractionFor } from "../src/local-login.js";
+import { createWhistleInteractionHost } from "@fungi.computer/whistle/interaction";
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
 import { capturePrivateLocalConfigRoot } from "../src/private-local-config-root.js";
 import {
@@ -454,8 +456,11 @@ test("an embedded Pi token-error prefix remains unknown and does not expose its 
   assert.ok(outcome?.completed === false);
   const cause = outcome.cause;
   assert.ok(cause instanceof Error && "failure" in cause);
-  assert.deepEqual(cause.failure, { category: "unknown" });
-  assert.equal(cause.message, "Local authentication failed");
+  assert.deepEqual(cause.failure, { category: "unknown", errorName: "Error" });
+  assert.equal(
+    cause.message,
+    "Local authentication failed (unknown: Error). Nothing was saved.",
+  );
   assert.equal(
     JSON.stringify({
       failure: cause.failure,
@@ -463,5 +468,86 @@ test("an embedded Pi token-error prefix remains unknown and does not expose its 
       stack: cause.stack,
     }).includes(marker),
     false,
+  );
+});
+
+test("Pi's Anthropic browser sign-in opens the paste dialog through the service, and a blank paste is a typed failure", async () => {
+  // Regression (spore 0.4.0): Pi 1.3's 86-character paste prompt broke the
+  // Whistle 60-character title contract, the dialog refused it, and the
+  // person saw only "Local authentication failed" with nowhere to paste.
+  const credentials = await mkdtemp(join(tmpdir(), "fungi-anthropic-auth-"));
+  const host = createWhistleInteractionHost({ title: "Sign in" });
+  const session = host.begin();
+  const asked: string[] = [];
+  const unsubscribe = host.subscribe(() => {
+    const pending = host.snapshot().prompt;
+    if (pending === undefined || asked.length > pending.sequence) return;
+    asked.push(pending.request.message);
+    const request = pending.request;
+    queueMicrotask(() => {
+      host.answer(
+        pending.sequence,
+        request.type === "choice" ? (request.options[0]?.value ?? "") : "",
+      );
+    });
+  });
+  try {
+    await withService(
+      (args, options) =>
+        runLocalAuthCli(args, {
+          ...options,
+          credentialPath: join(credentials, "credentials.json"),
+        }),
+      async (manager) => {
+        await assert.rejects(
+          manager.auth(
+            { command: "login", provider: "anthropic", authType: "oauth" },
+            authInteractionFor(session.interaction),
+          ),
+          (cause: unknown) =>
+            cause instanceof Error &&
+            "failure" in cause &&
+            JSON.stringify(cause.failure) ===
+              JSON.stringify({ category: "missing-authorization-code" }) &&
+            cause.message ===
+              "No authorization code was found in what was pasted. Paste the code or the full redirect URL.",
+        );
+      },
+    );
+  } finally {
+    unsubscribe();
+    await rm(credentials, { recursive: true, force: true });
+  }
+  assert.equal(asked.length, 2);
+  assert.equal(asked[1], "Paste the sign-in code or redirect URL");
+  assert.ok(host.snapshot().handoff?.url.startsWith("https://claude.ai/"));
+});
+
+test("a provider question the person's dialog cannot show is a typed prompt failure", async () => {
+  await withService(
+    async (_args, options) => {
+      const interaction = options?.interaction;
+      assert.ok(interaction);
+      await interaction.prompt({ type: "text", message: "Fixture question" });
+      return { kind: "completed" as const };
+    },
+    async (manager) => {
+      await assert.rejects(
+        manager.auth(
+          { command: "login", provider: "synthetic" },
+          {
+            prompt: () =>
+              Promise.reject(new Error("fixture-presenter-secret-marker")),
+            notify: () => undefined,
+          },
+        ),
+        (cause: unknown) =>
+          cause instanceof Error &&
+          "failure" in cause &&
+          JSON.stringify(cause.failure) ===
+            JSON.stringify({ category: "prompt-failed" }) &&
+          !cause.message.includes("fixture-presenter-secret-marker"),
+      );
+    },
   );
 });

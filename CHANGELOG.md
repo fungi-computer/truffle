@@ -1,5 +1,56 @@
 # @fungi.computer/truffle
 
+## 0.5.0
+
+### Minor Changes
+
+- Changes since 0.4.0:
+
+  - fix(local): answer unchanged Agent profiles from memory
+  - fix(local): reopen the Anthropic paste dialog and say why auth fails
+  - fix(mule): share typed retry decisions across model consumers
+  - fix(local): carry the cause when a settlement read fails
+  - fix(tui,truffle): the Board never breaks a live store or calls a stopped one
+    working
+  - feat(tui,truffle): the Board ships as a program extension, read from stores
+  - fix(local): give gate-load headroom to the build-id query and the Git
+    containment proof
+  - feat(shiitake): route a child's waiting items to the Agent that sent the
+    work
+  - fix(delegation): report a delegated Session once it rests, never another
+    sender's mail
+  - fix(delegation): every idle Session reports to whoever sent it work
+  - fix(mule): retain actual Anthropic stream overloads and API reset timing
+  - fix(shiitake): keep usage limits out of repeated-model-failure summaries
+  - fix(mule): carry provider retry timing through the owned jittered schedule
+  - feat(shiitake): support Local parent answers to child Asks
+  - fix(truffle): explain provider limits in plain provider-correct wording
+  - fix(mule): classify bounded provider limit and overload facts
+  - fix(tui): checkpoint bounded live client recovery
+  - fix(local): refuse unbound legacy create receipts
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.5.0
+  - @fungi.computer/bird-dog@0.3.0
+  - @fungi.computer/knapsack@0.4.0
+  - @fungi.computer/lantern@0.3.1
+  - @fungi.computer/nacre@0.1.0
+  - @fungi.computer/shiitake-extensions@0.4.0
+  - @fungi.computer/shiitake@0.6.0
+  - @fungi.computer/whistle@0.3.0
+  - @fungi.computer/graft@0.1.4
+  - @fungi.computer/mycelium@0.2.3
+  - @fungi.computer/zookeeper@0.0.5
+
 ## 0.4.0
 
 ### Minor Changes

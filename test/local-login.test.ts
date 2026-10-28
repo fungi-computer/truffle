@@ -133,6 +133,24 @@ describe("Pi auth through a Whistle interaction", () => {
     });
   });
 
+  it("keeps a provider prompt longer than a dialog title as its summary", () => {
+    const host = createWhistleInteractionHost({ title: "Sign in" });
+    const auth = authInteractionFor(host.begin().interaction);
+    const message =
+      "Complete login in your browser, or paste the authorization code / redirect URL here:";
+    void auth.prompt({
+      type: "manual_code",
+      message,
+      placeholder: "http://localhost:53692/callback",
+    });
+    expect(host.snapshot().prompt?.request).toEqual({
+      type: "text",
+      message: "Paste the sign-in code or redirect URL",
+      summary: `${message} Connecting over SSH? Paste the URL here instead of opening a browser.`,
+      placeholder: "http://localhost:53692/callback",
+    });
+  });
+
   it("withdraws a manual-code prompt when Pi's callback wins", async () => {
     const host = createWhistleInteractionHost({ title: "Sign in" });
     const auth = authInteractionFor(host.begin().interaction);

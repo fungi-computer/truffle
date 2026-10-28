@@ -21,6 +21,7 @@ it.each([
   { status: 401, code: "invalid_request", retryable: false },
   { status: 429, code: "insufficient_quota", retryable: false },
   { status: 429, code: "rate_limit_exceeded", retryable: true },
+  { status: 200, code: "overloaded_error", retryable: true },
   {
     status: 200,
     code: "subscription_sharing_usage_limit_exceeded",
@@ -53,13 +54,19 @@ it.each([
           throw new Error("Expected the Local request-local fetch");
         await options.fetch("https://provider.invalid/model");
         // This is the SDK's parsed-event port, not a second SSE decoder.
-        if (status === 200)
+        if (status === 200 && code !== "overloaded_error")
           await options.onProviderStreamEvent?.(parsedFailure, faux.models[0]);
         return fauxAssistantMessage("", {
           stopReason: "error",
-          errorMessage: retryable
-            ? "401 permanently rejected"
-            : "503 retry now",
+          errorMessage:
+            code === "overloaded_error"
+              ? JSON.stringify({
+                  type: "error",
+                  error: { type: code, message: "Overloaded" },
+                })
+              : retryable
+                ? "401 permanently rejected"
+                : "503 retry now",
         });
       };
       faux.setResponses([reply, reply, reply, reply]);
@@ -69,7 +76,10 @@ it.each([
         fetch: Object.assign(() => {
           requests += 1;
           return Promise.resolve(
-            Response.json({ error: { code } }, { status }),
+            Response.json(
+              { error: { code } },
+              { status, headers: { "retry-after": "12" } },
+            ),
           );
         }, globalThis.fetch),
         onProviderStreamEvent: (data) => {
@@ -99,9 +109,27 @@ it.each([
         expect(terminal).toBe(first);
         expect(lease.retryable(first)).toBe(retryable);
         expect(lease.retryable(globalThis.structuredClone(first))).toBe(false);
-        if (status === 200) {
+        expect(lease.retryAfterMs?.(first)).toBe(
+          code === "rate_limit_exceeded" ? 12000 : undefined,
+        );
+        expect(
+          lease.retryAfterMs?.(globalThis.structuredClone(first)),
+        ).toBeUndefined();
+        expect(
+          lease.rejection?.(globalThis.structuredClone(first)),
+        ).toBeUndefined();
+        if (code === "overloaded_error") {
+          expect(parsedEvents).toEqual([]);
+          expect(first.errorMessage).toBe(
+            "faux-typed is overloaded; try again shortly.",
+          );
+          expect(lease.rejection?.(first)).toEqual({ code: "overloaded" });
+        } else if (status === 200) {
           expect(parsedEvents).toEqual([parsedFailure]);
-          expect(first.errorMessage).toContain("usage-limit-reached");
+          expect(first.errorMessage).toBe("faux-typed usage limit reached.");
+          expect(lease.rejection?.(first)).toEqual({
+            code: "usage-limit-reached",
+          });
         }
         requests = 0;
         const outcome = await mule.run({

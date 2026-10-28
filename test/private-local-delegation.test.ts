@@ -232,11 +232,13 @@ it.each(["completed", "failed", "cancelled"] as const)(
       expect(author?.name).toMatch(/^[a-z]+-[a-z]+$/u);
       // The delegated send the child received names the parent as an Agent.
       const [sentLine] = userLines(await local.child.session.read());
-      expect(messageAuthor(sentLine?.meta)).toEqual({
+      const sentBy = messageAuthor(sentLine?.meta);
+      expect({ id: sentBy?.id, kind: sentBy?.kind }).toEqual({
         id: ids.parent,
-        name: ids.parent,
         kind: "agent",
       });
+      // A person reads this name where work waits on its sender.
+      expect(sentBy?.name).toMatch(/^[a-z]+-[a-z]+$/u);
       const childTerminal = (await local.child.session.read()).terminals.at(-1);
       expect(facts).toMatchObject({
         agentId: ids.child,
@@ -256,15 +258,14 @@ it.each(["completed", "failed", "cancelled"] as const)(
         ).toMatchObject({
           // The turn keeps the safe reason; the provider's own text is a
           // separate retained fact for the failed-turn bubble and its details.
-          errorMessage:
-            "faux-child model request failed without a provider rejection. Retry the request.",
+          errorMessage: "faux-child model request failed; try again.",
           providerError:
             "provider_error: 401 Authorization: Bearer sk-live-0123456789abcdefABCDEF\nretry later",
         });
         expect(facts?.diagnostic).toBe(childTerminal?.diagnostic);
         // A provider failure without rejection evidence must not blame login.
         expect(facts?.diagnostic).toMatch(
-          /^faux-child model request failed without a provider rejection/u,
+          /^faux-child model request failed; try again\.$/u,
         );
         expect(facts?.diagnostic).not.toMatch(/sk-live|\n/u);
         expect(facts?.diagnostic?.length).toBeLessThanOrEqual(200);
@@ -275,8 +276,8 @@ it.each(["completed", "failed", "cancelled"] as const)(
         outcome === "cancelled"
           ? "Work cancelled."
           : outcome === "failed"
-            ? // This provider failed before it produced any reply text.
-              "The delegated work ended failed without reply text."
+            ? // The reply carries the same safe diagnostic as the terminal.
+              "The delegated work ended failed: faux-child model request failed; try again."
             : "Child result",
       );
       expect(JSON.stringify(parentContexts[2])).toContain(
@@ -748,3 +749,204 @@ it("a created child sends followUp and steer back to its creator from delegated 
     await local.owners.close();
   }
 }, 60_000);
+
+const branchQuestion = {
+  id: "branch",
+  header: "Branch",
+  question: "Which branch should I use?",
+  options: [
+    { label: "main", description: "The trunk." },
+    { label: "dev", description: "The integration branch." },
+  ],
+};
+
+const askBranch = (contexts: Context[]): FauxResponseStep => {
+  return (context) => {
+    contexts.push(structuredClone(context));
+    return fauxAssistantMessage(
+      fauxToolCall("execute", {
+        code: `async () => question.ask({ questions: [${JSON.stringify(branchQuestion)}], mode: "wait" })`,
+      }),
+      { stopReason: "toolUse" },
+    );
+  };
+};
+
+/** The item named in the verified reply's waiting_on_you fact. */
+function waitingItem(context: Context): string {
+  const text = JSON.stringify(context.messages.at(-1)?.content);
+  const itemId = /itemId&quot;:&quot;([^&]+)&quot;/u.exec(text)?.[1];
+  if (itemId === undefined) throw new Error(`No waiting item in ${text}`);
+  return itemId;
+}
+
+it("a child's question reaches its parent in the parent's own turn, and the parent's answer continues the child", async () => {
+  const parentContexts: Context[] = [];
+  const childContexts: Context[] = [];
+  const answer: FauxResponseStep = (context) => {
+    parentContexts.push(structuredClone(context));
+    return fauxAssistantMessage(
+      fauxToolCall("execute", {
+        code: `async () => agents.answer({ agentId: ${JSON.stringify(ids.child)}, sessionId: "main", askId: ${JSON.stringify(waitingItem(context))}, requestId: "answer-branch", answers: { branch: { selected: ["main"] } } })`,
+      }),
+      { stopReason: "toolUse" },
+    );
+  };
+  const local = await project(
+    [
+      delegate(parentContexts),
+      capture(parentContexts, "Delegated; waiting"),
+      answer,
+      capture(parentContexts, "Answered Scout"),
+    ],
+    [
+      askBranch(childContexts),
+      capture(childContexts, "Asked about the branch"),
+      capture(childContexts, "Echo: main"),
+    ],
+  );
+  try {
+    await local.parent.session.send("Delegate this", {
+      requestId: "parent-prompt",
+    });
+    await until(
+      () => local.parent.session.read(),
+      (snapshot) =>
+        snapshot.messages.some(
+          ({ value }) =>
+            value.role === "assistant" &&
+            JSON.stringify(value).includes("Answered Scout"),
+        ),
+      "the parent's answering turn",
+    );
+    const answered = await until(
+      () => local.child.session.read(),
+      (snapshot) =>
+        snapshot.messages.some(
+          ({ value }) =>
+            value.role === "assistant" &&
+            JSON.stringify(value).includes("Echo: main"),
+        ),
+      "the child's continued turn",
+    );
+    // The child's ask waited on its sender and never needed a person.
+    const asked = (await local.child.session.read()).attention;
+    expect(asked).toEqual([]);
+    expect(
+      userLines(answered).some(({ value }) =>
+        JSON.stringify(value).includes(
+          `Answer from Agent ${ids.parent} to ask`,
+        ),
+      ),
+    ).toBe(true);
+    // The parent was told in its own turn, by the host's verified fact.
+    expect(JSON.stringify(parentContexts[2]?.messages.at(-1))).toContain(
+      "waiting_on_you",
+    );
+  } finally {
+    await local.owners.close();
+  }
+}, 90_000);
+
+/** A parent turn that calls one agents tool against the child's waiting item. */
+const actOnItem = (
+  contexts: Context[],
+  operation: "escalate" | "answer",
+): FauxResponseStep => {
+  return (context) => {
+    contexts.push(structuredClone(context));
+    const item = waitingItem(context);
+    const call =
+      operation === "escalate"
+        ? `agents.escalate({ agentId: ${JSON.stringify(ids.child)}, sessionId: "main", itemId: ${JSON.stringify(item)} })`
+        : `agents.answer({ agentId: ${JSON.stringify(ids.child)}, sessionId: "main", askId: ${JSON.stringify(item)}, requestId: "answer-branch", answers: { branch: { selected: ["main"] } } })`;
+    return fauxAssistantMessage(
+      fauxToolCall("execute", { code: `async () => ${call}` }),
+      { stopReason: "toolUse" },
+    );
+  };
+};
+
+const childAttention = async (local: Awaited<ReturnType<typeof project>>) =>
+  (await local.child.session.read()).attention;
+
+it("a parent that escalates hands the child's question to a person, who sees it with the question", async () => {
+  const parentContexts: Context[] = [];
+  const childContexts: Context[] = [];
+  const local = await project(
+    [
+      delegate(parentContexts),
+      capture(parentContexts, "Delegated; waiting"),
+      actOnItem(parentContexts, "escalate"),
+      capture(parentContexts, "Escalated to Levi"),
+    ],
+    [
+      askBranch(childContexts),
+      capture(childContexts, "Asked about the branch"),
+    ],
+  );
+  try {
+    await local.parent.session.send("Delegate this", {
+      requestId: "parent-prompt",
+    });
+    await until(
+      () => local.parent.session.read(),
+      (snapshot) =>
+        snapshot.messages.some(
+          ({ value }) =>
+            value.role === "assistant" &&
+            JSON.stringify(value).includes("Escalated to Levi"),
+        ),
+      "the parent's escalating turn",
+    );
+    const [item] = await childAttention(local);
+    expect(item).toMatchObject({ kind: "question", summary: "Branch" });
+    expect(item).not.toHaveProperty("waitingOn");
+    expect(item).not.toHaveProperty("inbox");
+    expect(JSON.stringify(parentContexts.at(-1))).toContain(
+      '\\"status\\":\\"escalated\\"',
+    );
+  } finally {
+    await local.owners.close();
+  }
+}, 90_000);
+
+it("a parent that neither answers nor escalates has the item escalated for it when its turn ends", async () => {
+  const parentContexts: Context[] = [];
+  const childContexts: Context[] = [];
+  const local = await project(
+    [
+      delegate(parentContexts),
+      capture(parentContexts, "Delegated; waiting"),
+      capture(parentContexts, "Ignored the question"),
+    ],
+    [
+      askBranch(childContexts),
+      capture(childContexts, "Asked about the branch"),
+    ],
+  );
+  try {
+    await local.parent.session.send("Delegate this", {
+      requestId: "parent-prompt",
+    });
+    await until(
+      () => local.parent.session.read(),
+      (snapshot) =>
+        snapshot.messages.some(
+          ({ value }) =>
+            value.role === "assistant" &&
+            JSON.stringify(value).includes("Ignored the question"),
+        ),
+      "the parent's ignoring turn",
+    );
+    const [item] = await until(
+      () => childAttention(local),
+      (attention) => attention[0]?.waitingOn === undefined,
+      "the automatic escalation",
+    );
+    expect(item).toMatchObject({ kind: "question", summary: "Branch" });
+    expect(item).not.toHaveProperty("inbox");
+  } finally {
+    await local.owners.close();
+  }
+}, 90_000);

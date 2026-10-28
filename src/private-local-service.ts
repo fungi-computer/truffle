@@ -661,7 +661,14 @@ export function createPrivateLocalServiceManager(
         // Read service.json again, and never start a service: whoever
         // stopped it decides when it returns.
         const ready = await status();
-        if (ready === undefined) return { kind: "unavailable" };
+        if (ready === undefined)
+          return {
+            kind: "unavailable",
+            // The discovery owner's process-lifetime lease distinguishes an
+            // overloaded listener from a stopped service without guessing
+            // from the failed HTTP probe or an error message.
+            alive: await serviceOwnerIsLive(selectedDirectory),
+          };
         accept(ready);
         const again = await postSelection(
           "select",

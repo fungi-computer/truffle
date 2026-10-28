@@ -96,6 +96,10 @@ it("binds Local Agent creation to the exact Session that invokes it", async () =
         workingDirectory: "/project",
       });
     },
+    answer: () =>
+      Promise.resolve({ status: "unavailable", reason: "unsupported" }),
+    escalate: () =>
+      Promise.resolve({ status: "unavailable", reason: "unsupported" }),
     open: () => Promise.reject(new Error("unused")),
     archive: () => Promise.resolve(),
     unarchive: () => Promise.resolve(),
@@ -158,6 +162,105 @@ it("binds Local Agent creation to the exact Session that invokes it", async () =
       requestId: "same-request",
       createdBy: "local_store_parent",
       createdBySessionId: "sibling-session",
+    },
+  ]);
+});
+
+it("binds Local answers and escalations to the Agent and exact Session that invoke them", async () => {
+  const calls: unknown[] = [];
+  const directory: LocalAgentControlDirectory = {
+    list: () => Promise.resolve([]),
+    create: () => Promise.resolve({ agentId: "child", name: "Child" }),
+    answer: (request, senderAgentId, senderSessionId) => {
+      calls.push({ answer: request, senderAgentId, senderSessionId });
+      return Promise.resolve({
+        status: "answered",
+        via: "follow_up",
+        commandId: "follow-up-1",
+      });
+    },
+    escalate: (request, senderAgentId, senderSessionId) => {
+      calls.push({ escalate: request, senderAgentId, senderSessionId });
+      return Promise.resolve({ status: "escalated", to: "person" });
+    },
+    open: () => Promise.reject(new Error("unused")),
+    archive: () => Promise.resolve(),
+    unarchive: () => Promise.resolve(),
+  };
+  const storage: Parameters<
+    typeof createPrivateLocalAgentControl
+  >[0]["storage"] = {
+    sql: { exec: () => ({ toArray: () => [] }) },
+    transactionSync: (operation) => operation(),
+  };
+  const source = createPrivateLocalAgentControl({
+    agentId: "local_store_parent",
+    directory,
+    storage,
+  }).control;
+  async function actFrom(sessionId: string) {
+    const runtime = await Mycelium.make({
+      sources: [source],
+      sandbox: directSandbox(async ({ agents }) => {
+        if (agents?.answer === undefined || agents.escalate === undefined)
+          throw new Error("Agent answer tools are unavailable");
+        return {
+          answered: await agents.answer({
+            agentId: "child",
+            sessionId: "child-session",
+            askId: "ask-1",
+            requestId: `answer-${sessionId}`,
+            answers: { storage: { selected: ["SQLite"] } },
+          }),
+          escalated: await agents.escalate({
+            agentId: "child",
+            sessionId: "child-session",
+            itemId: "ask-2",
+          }),
+        };
+      }),
+      session: { sessionId },
+    });
+    const lease = await runtime.acquire();
+    try {
+      const prepared = await Effect.runPromise(
+        lease.executeTool.prepare({
+          type: "toolCall",
+          id: `act-${sessionId}`,
+          name: "execute",
+          arguments: {
+            code: `return { answered: await agents.answer({agentId:"child",sessionId:"child-session",askId:"ask-1",requestId:"answer-${sessionId}",answers:{storage:{selected:["SQLite"]}}}), escalated: await agents.escalate({agentId:"child",sessionId:"child-session",itemId:"ask-2"}) }`,
+          },
+        }),
+      );
+      return await Effect.runPromise(Stream.runCollect(prepared.execute()));
+    } finally {
+      await lease.release();
+      await runtime.close();
+    }
+  }
+
+  await actFrom("sender-session");
+  expect(calls).toEqual([
+    {
+      answer: {
+        agentId: "child",
+        sessionId: "child-session",
+        askId: "ask-1",
+        requestId: "answer-sender-session",
+        answers: { storage: { selected: ["SQLite"] } },
+      },
+      senderAgentId: "local_store_parent",
+      senderSessionId: "sender-session",
+    },
+    {
+      escalate: {
+        agentId: "child",
+        sessionId: "child-session",
+        itemId: "ask-2",
+      },
+      senderAgentId: "local_store_parent",
+      senderSessionId: "sender-session",
     },
   ]);
 });
@@ -383,6 +486,7 @@ it("refuses an existing child whose stored mode exceeds the requested creator ce
       ...fixture.options,
       createRequestId: "child-ceiling-reopen",
       createdBy,
+      createdBySessionId: "creator-session",
       mode: "full-access",
     },
     fixture.models,
@@ -1015,6 +1119,10 @@ function createdBy(
 ): AgentControlDirectory {
   return {
     ...directory,
+    answer: (request, sourceSessionId, signal) =>
+      directory.answer(request, creator, sourceSessionId, signal),
+    escalate: (request, sourceSessionId, signal) =>
+      directory.escalate(request, creator, sourceSessionId, signal),
     create: (request, signal) =>
       directory.create(
         {

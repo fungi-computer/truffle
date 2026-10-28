@@ -103,6 +103,25 @@ const eventSchema = z.discriminatedUnion("type", [
 ]);
 const answerSchema = z.string().max(localAuthInputLimit);
 
+const errorNameSchema = z.string().regex(/^[A-Za-z][A-Za-z0-9_]{0,63}$/u);
+/** A class name only: anything else (or a non-Error) is named generically. */
+function errorNameOf(cause: unknown): string {
+  if (!(cause instanceof Error)) return "NonError";
+  const name = errorNameSchema.safeParse(cause.name);
+  return name.success ? name.data : "Error";
+}
+
+/**
+ * The person's own dialog could not show or answer a provider question (for
+ * example the prompt failed the renderer's contract). Fixed text, no cause.
+ */
+class LocalAuthPromptFailed extends Error {
+  constructor() {
+    super("Authentication prompt failed");
+    this.name = "LocalAuthPromptFailed";
+  }
+}
+
 /**
  * The closed set of failures that cross the service. Provider errors can
  * contain credential material, so no free text, cause or provider message
@@ -121,7 +140,13 @@ const localAuthFailureSchema = z.discriminatedUnion("category", [
   }),
   z.strictObject({ category: z.literal("cancelled") }),
   z.strictObject({ category: z.literal("no-key-entered") }),
-  z.strictObject({ category: z.literal("unknown") }),
+  z.strictObject({ category: z.literal("prompt-failed") }),
+  z.strictObject({ category: z.literal("missing-authorization-code") }),
+  z.strictObject({
+    category: z.literal("unknown"),
+    /** The thrown value's class name only, e.g. `TypeError`; never its message. */
+    errorName: errorNameSchema,
+  }),
 ]);
 type LocalAuthFailureCategory = z.output<typeof localAuthFailureSchema>;
 /** What one auth RPC operation returns: a result or a typed failure. */
@@ -137,6 +162,7 @@ const wireResultSchema = z.union([
 /** Pi 1.3.0's fixed error prefixes; never retain a provider body suffix. */
 const callbackPortInUse = /^Port \d+ is in use\b/u;
 const oauthStateMismatch = "OAuth state mismatch";
+const missingAuthorizationCode = "Missing authorization code";
 const openAITokenRequestFailed =
   /^OpenAI OAuth token request failed \(([1-5]\d{2})\)/u;
 
@@ -165,7 +191,14 @@ function classifyFailure(
     return { category: "callback-port-in-use" };
   if (cause instanceof Error && cause.message === oauthStateMismatch)
     return { category: "oauth-state-mismatch" };
-  return { category: "unknown" };
+  if (cause instanceof LocalAuthPromptFailed)
+    return { category: "prompt-failed" };
+  if (cause instanceof Error && cause.message === missingAuthorizationCode)
+    return { category: "missing-authorization-code" };
+  return {
+    category: "unknown",
+    errorName: errorNameOf(cause),
+  };
 }
 
 /** Fixed wording per category; the dialog shows exactly this. */
@@ -200,8 +233,12 @@ function failureText(failure: LocalAuthFailureCategory): string {
       return "Authentication cancelled";
     case "no-key-entered":
       return new LocalAuthRefusal().message;
+    case "prompt-failed":
+      return "The sign-in dialog could not show the provider's question (prompt-failed). Nothing was saved.";
+    case "missing-authorization-code":
+      return "No authorization code was found in what was pasted. Paste the code or the full redirect URL.";
     case "unknown":
-      return "Local authentication failed";
+      return `Local authentication failed (unknown: ${failure.errorName}). Nothing was saved.`;
   }
 }
 
@@ -413,7 +450,16 @@ export class PrivateLocalAuthTarget
             promptSignal.addEventListener("abort", cancel, { once: true });
             try {
               if (promptSignal.aborted) cancel();
-              return answerSchema.parse(await pending.result());
+              const answer = await pending.result().then(
+                (value) => ({ value }),
+                (cause: unknown) => ({ cause }),
+              );
+              if ("cause" in answer) {
+                promptSignal.throwIfAborted();
+                // The presenter's error text is not trusted to be secret-free.
+                throw new LocalAuthPromptFailed();
+              }
+              return answerSchema.parse(answer.value);
             } finally {
               promptSignal.removeEventListener("abort", cancel);
               pending[Symbol.dispose]();

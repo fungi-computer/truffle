@@ -1,3 +1,4 @@
+import { statSync } from "node:fs";
 import { readdir, realpath, stat } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import * as Effect from "effect/Effect";
@@ -218,12 +219,52 @@ export class LocalStoreSchemaError extends Error {
   }
 }
 
+export type PrivateLocalAgentProfile = ReturnType<typeof openAgentProfile>;
+
+/** Profiles held at once; directory listings touch every store each call. */
+const cachedProfiles = 1_024;
+const profiles = new Map<
+  string,
+  Readonly<{ version: string; profile: PrivateLocalAgentProfile }>
+>();
+
+/** Every committed write moves the store file (or its WAL); none rewrites it in place unseen. */
+function storeVersion(path: string) {
+  const version = (file: string) => {
+    const metadata = statSync(file, { bigint: true, throwIfNoEntry: false });
+    return metadata === undefined
+      ? "-"
+      : `${String(metadata.dev)}:${String(metadata.ino)}:${String(metadata.size)}:${String(metadata.mtimeNs)}:${String(metadata.ctimeNs)}`;
+  };
+  return `${version(path)}/${version(`${path}-wal`)}`;
+}
+
 /**
  * One Agent store's chosen display name, default model, whether it is
  * archived and the Agent that created it (absent when a human made it), read
- * without opening a host.
+ * without opening a host. Directory listings and the sub-agents footer read
+ * every store's profile on each call; an unchanged store file answers from
+ * memory instead of reopening SQLite (each Bun open/close also leaks native
+ * memory).
  */
-export function readPrivateLocalAgentProfile(path: string) {
+export function readPrivateLocalAgentProfile(
+  path: string,
+): PrivateLocalAgentProfile {
+  const version = storeVersion(path);
+  const cached = profiles.get(path);
+  if (cached?.version === version) return cached.profile;
+  const profile = openAgentProfile(path);
+  // The version is taken before the read, so a write racing it misses next time.
+  profiles.delete(path);
+  profiles.set(path, { version, profile });
+  if (profiles.size > cachedProfiles) {
+    const oldest = profiles.keys().next().value;
+    if (oldest !== undefined) profiles.delete(oldest);
+  }
+  return profile;
+}
+
+function openAgentProfile(path: string) {
   const database = openPrivateReadOnlySqliteDatabase(path);
   try {
     const columns = database
@@ -257,15 +298,15 @@ export function readPrivateLocalAgentProfile(path: string) {
       folder: identity?.folder,
       model: readAgentDefaultModelJson(database),
     });
-    return {
+    return Object.freeze({
       name: stored.name ?? undefined,
       createdBy: stored.createdBy,
       archived: stored.archived === 1,
       mode: stored.mode,
-      writableFolders: stored.writableFolders,
+      writableFolders: Object.freeze(stored.writableFolders),
       folder: stored.folder,
       model: parseModelPreferenceJson(stored.model),
-    };
+    });
   } finally {
     database.close();
   }

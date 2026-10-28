@@ -174,8 +174,7 @@ it("keeps the Local door's reason on the first terminal before cleanup, settleme
     failureAllowed.resolve(undefined);
     await releaseStarted.promise;
     const first = await waiting;
-    const reason =
-      "faux-safe model request failed without a provider rejection. Retry the request.";
+    const reason = "faux-safe model request failed; try again.";
     expect(first).toMatchObject({ outcome: "failed", diagnostic: reason });
     expect((await session.read()).terminals).toEqual([first]);
     expect(

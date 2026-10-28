@@ -7,6 +7,7 @@ import {
   type AgentControlDirectory,
 } from "@fungi.computer/shiitake/agent-control";
 import { DatabaseSync } from "node:sqlite";
+import { FungiMessageMetaSchema } from "@fungi.computer/agar/agents";
 import { expect, it } from "vitest";
 import { memoryHost, fauxModelSource } from "@fungi.computer/shiitake/testing";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
@@ -114,7 +115,15 @@ it.each<{
             throw new Error("Local follow-up mail must name its Session");
           const accepted = await agent
             .session(mail.to.sessionId)
-            .send(mail.content, { requestId: mail.key, delivery: "followUp" });
+            .send(mail.content, {
+              requestId: mail.key,
+              // A steer travels as mail like a follow-up; its meta names it.
+              delivery:
+                FungiMessageMetaSchema.safeParse(mail.meta).data?.delegation
+                  ?.steer === true
+                  ? "steer"
+                  : "followUp",
+            });
           if (state === "lost-response" && deliveries === 1)
             throw new Error("Delivery response was lost after admission");
           return accepted;
@@ -171,7 +180,7 @@ it.each<{
       }
       expect(pending[0]).toMatchObject({ text: task.text, delivery });
       expect(pending[0]?.requestId).not.toBe(task.requestId);
-      expect(deliveries).toBe(delivery === "followUp" ? 1 : 0);
+      expect(deliveries).toBe(1);
       const request = {
         agentId: task.agentId,
         sessionId: task.sessionId,

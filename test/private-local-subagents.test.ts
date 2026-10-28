@@ -27,6 +27,10 @@ function fixture(
     list: (_signal, options) =>
       Promise.resolve(options?.archived === true ? archived : listed),
     create,
+    answer: () =>
+      Promise.resolve({ status: "unavailable", reason: "unsupported" }),
+    escalate: () =>
+      Promise.resolve({ status: "unavailable", reason: "unsupported" }),
     send,
     archive,
     unarchive,

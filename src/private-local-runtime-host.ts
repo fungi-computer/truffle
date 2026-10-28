@@ -5,6 +5,7 @@ import {
   observeProviderStatus,
   normalizeModel,
   decodeProviderData,
+  type ProviderRejection,
 } from "@fungi.computer/mule";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import type { SimpleStreamOptions as PiOptions } from "@earendil-works/pi-ai";
@@ -167,6 +168,7 @@ import {
 import {
   createPrivateSqliteOwner,
   openPrivateWritableSqliteDatabase,
+  storeWriteBusyTimeoutMs,
   type PrivateSqliteDatabase,
 } from "./private-sqlite-owner.js";
 import {
@@ -589,6 +591,38 @@ async function assertPrivateLocalReceiptFile(
   }
 }
 
+function ensureReceiptTable(database: PrivateSqliteDatabase) {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS ${localCreateReceiptTable} (
+      request_id TEXT PRIMARY KEY NOT NULL,
+      agent_id TEXT NOT NULL UNIQUE,
+      name TEXT,
+      created_by_agent_id TEXT,
+      created_by_session_id TEXT
+    ) WITHOUT ROWID
+  `);
+  const receiptColumns = database
+    .prepare(`PRAGMA table_info(${localCreateReceiptTable})`)
+    .all()
+    .map((column) => column.name);
+  if (!receiptColumns.includes("created_by_agent_id"))
+    database.exec(
+      `ALTER TABLE ${localCreateReceiptTable} ADD COLUMN created_by_agent_id TEXT`,
+    );
+  if (!receiptColumns.includes("created_by_session_id"))
+    database.exec(
+      `ALTER TABLE ${localCreateReceiptTable} ADD COLUMN created_by_session_id TEXT`,
+    );
+}
+
+function readReceiptRow(database: PrivateSqliteDatabase, requestId: string) {
+  return database
+    .prepare(
+      `SELECT agent_id, created_by_agent_id, created_by_session_id FROM ${localCreateReceiptTable} WHERE request_id = ?`,
+    )
+    .get(requestId);
+}
+
 /** Resolve an Agent create request through its durable Local receipt. */
 export async function resolvePrivateLocalCreateStore(
   root: string,
@@ -621,33 +655,18 @@ export async function resolvePrivateLocalCreateStore(
   try {
     database.exec(`PRAGMA busy_timeout = ${String(receiptBusyTimeoutMs)}`);
     database.exec("BEGIN IMMEDIATE");
-    database.exec(`
-      CREATE TABLE IF NOT EXISTS ${localCreateReceiptTable} (
-        request_id TEXT PRIMARY KEY NOT NULL,
-        agent_id TEXT NOT NULL UNIQUE,
-        name TEXT,
-        created_by_agent_id TEXT,
-        created_by_session_id TEXT
-      ) WITHOUT ROWID
-    `);
-    const receiptColumns = database
-      .prepare(`PRAGMA table_info(${localCreateReceiptTable})`)
-      .all()
-      .map((column) => column.name);
-    if (!receiptColumns.includes("created_by_agent_id"))
-      database.exec(
-        `ALTER TABLE ${localCreateReceiptTable} ADD COLUMN created_by_agent_id TEXT`,
-      );
-    if (!receiptColumns.includes("created_by_session_id"))
-      database.exec(
-        `ALTER TABLE ${localCreateReceiptTable} ADD COLUMN created_by_session_id TEXT`,
-      );
-    const existing = database
-      .prepare(
-        `SELECT agent_id, created_by_agent_id, created_by_session_id FROM ${localCreateReceiptTable} WHERE request_id = ?`,
-      )
-      .get(requestId);
+    ensureReceiptTable(database);
+    const existing = readReceiptRow(database, requestId);
     if (existing !== undefined) {
+      if (
+        creatorAgentId !== undefined &&
+        (existing.created_by_agent_id === null ||
+          existing.created_by_agent_id === undefined)
+      )
+        throw new AgentCreateRefused(
+          "request_conflict",
+          "the Local Agent create receipt is unbound; use a fresh requestId",
+        );
       if (
         creatorAgentId !== undefined &&
         (existing.created_by_agent_id !== creatorAgentId ||
@@ -1138,6 +1157,7 @@ export function createPrivateLocalModelSource(
             message: AssistantMessage;
             reason: string;
             retryable: boolean;
+            rejection?: ProviderRejection;
             providerError?: string;
           }
         | undefined;
@@ -1149,6 +1169,15 @@ export function createPrivateLocalModelSource(
             message.stopReason === "error" &&
             modelFailure?.message === message &&
             modelFailure.retryable,
+          retryAfterMs: (message: AssistantMessage) =>
+            modelFailure?.message === message &&
+            modelFailure.rejection?.code === "rate-limit"
+              ? modelFailure.rejection.retryAfterMs
+              : undefined,
+          rejection: (message: AssistantMessage) =>
+            modelFailure?.message === message
+              ? modelFailure.rejection
+              : undefined,
           failureReason: (message: AssistantMessage) =>
             modelFailure?.message === message ? modelFailure.reason : undefined,
           providerError: (message: AssistantMessage) =>
@@ -1177,7 +1206,7 @@ export function createPrivateLocalModelSource(
               const evidence = {
                 refusal: turn.refusal(),
                 upstream: upstream ?? partial,
-                rejection: provider.rejection(),
+                rejection: provider.rejection(upstream),
               };
               const message =
                 cause === undefined
@@ -1215,6 +1244,8 @@ export function createPrivateLocalModelSource(
                   reason: message,
                   retryable: modelFailureRetryable(evidence),
                 };
+                if (evidence.rejection !== undefined)
+                  modelFailure.rejection = evidence.rejection;
                 if (upstream?.errorMessage !== undefined)
                   modelFailure.providerError = upstream.errorMessage;
               }
@@ -1760,7 +1791,10 @@ export async function openPrivateLocalRuntimeHost(
         JSON.stringify(["fungi-local", paths.databasePath, initialSessionId]),
       )
       .digest("hex");
-    database = openPrivateWritableSqliteDatabase(paths.databasePath, 0);
+    database = openPrivateWritableSqliteDatabase(
+      paths.databasePath,
+      storeWriteBusyTimeoutMs,
+    );
     database.exec("PRAGMA foreign_keys = ON");
     const agentId = ensureLocalAgentId({
       database,
@@ -1870,6 +1904,22 @@ export async function openPrivateLocalRuntimeHost(
                   new Error("Local mail ingress is unavailable"),
                 );
               return acceptMail(mail, meta, reply);
+            },
+            unattended: {
+              readSettlement: (sessionId, commandId) =>
+                readSettlement === undefined
+                  ? Promise.reject(
+                      new Error("Local settlement reads are unavailable"),
+                    )
+                  : readSettlement(sessionId, commandId),
+              escalate: async (item, receiverSessionId) => {
+                await input.agentControl?.escalate(
+                  item,
+                  agentId,
+                  receiverSessionId,
+                  new AbortController().signal,
+                );
+              },
             },
           });
     let projectDirectory: LocalAgentControlDirectory | undefined;
@@ -2395,15 +2445,17 @@ export async function openPrivateLocalRuntimeHost(
         };
       },
       close: () => {
-        closing ??= closePrivateLocalResources({
-          agent,
-          processes,
-          sandbox,
-          runtime,
-          database,
-          lease,
-          providerCacheKey,
-        });
+        closing ??= (delegation?.close() ?? Promise.resolve()).then(() =>
+          closePrivateLocalResources({
+            agent,
+            processes,
+            sandbox,
+            runtime,
+            database,
+            lease,
+            providerCacheKey,
+          }),
+        );
         return closing;
       },
     });
