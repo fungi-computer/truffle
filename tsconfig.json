@@ -10,5 +10,5 @@
     "types": ["node", "vitest/globals"],
     "customConditions": ["bun"]
   },
-  "include": ["src", "test", "vitest.config.ts"]
+  "include": ["src", "test", "vitest.config.ts", "vitest.native.config.ts"]
 }

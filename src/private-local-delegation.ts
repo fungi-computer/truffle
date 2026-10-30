@@ -20,6 +20,8 @@ import {
   delegationProvenance,
   delegationReplyMeta,
   delegationSendMeta,
+  isOneWayAncestorNotice,
+  type AgentDelegationTask,
 } from "@fungi.computer/shiitake/fleet";
 
 /** How long one Local delegation grant stays valid while it is admitted. */
@@ -214,6 +216,15 @@ export function createPrivateLocalDelegation(
       sessionId: sourceSessionId,
     });
     signal.throwIfAborted();
+    let delegation: AgentDelegationTask = {
+      agentId: task.agentId,
+      sessionId: task.sessionId,
+      delivery: task.delivery,
+      text: task.text,
+      requestId,
+    };
+    if (task.delivery === "followUp" && task.goal !== undefined)
+      delegation = { ...delegation, goal: task.goal };
     return fleet.start(
       {
         agents: agents.map(({ agentId }) => agentId),
@@ -222,13 +233,7 @@ export function createPrivateLocalDelegation(
         provenance,
         meta,
       },
-      {
-        agentId: task.agentId,
-        sessionId: task.sessionId,
-        delivery: task.delivery,
-        text: task.text,
-        requestId,
-      },
+      delegation,
     );
   }
 
@@ -270,9 +275,8 @@ export function createPrivateLocalDelegation(
   }
 
   /**
-   * Admit one mail addressed to this Agent. New work must name its sender as
-   * its only reply destination; a reply-less mail is admitted only as an
-   * authenticated reply. Everything else is refused.
+   * Admit delegated work, one-way ancestor notices and authenticated replies.
+   * Other reply-less mail is refused.
    */
   async function receive(mail: BirdDogMail): Promise<Accepted> {
     const mesh = await input.meshAdmission?.(mail.to.agentId);
@@ -307,6 +311,7 @@ export function createPrivateLocalDelegation(
         throw new Error("Local delegated work must reply to its sender");
       return input.accept(mail, mail.meta);
     }
+    if (isOneWayAncestorNotice(mail)) return input.accept(mail, mail.meta);
     if (mail.reply?.outcome === "accepted") {
       const receipt = fleet.recordAcceptedNotice(mail);
       if (receipt === undefined)

@@ -30,7 +30,7 @@ export { sandboxStatusSchema } from "./private-local-sandbox.js";
  * The client-service wire contract. Bump it with any change an older client
  * cannot read; a running client then asks its window to restart.
  */
-export const privateLocalServiceProtocol = 4;
+export const privateLocalServiceProtocol = 5;
 
 /** This build's identity: the packed CLI's content hash, or `source` for a source run. */
 export function privateLocalServiceVersion(): string {

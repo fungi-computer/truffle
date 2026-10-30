@@ -299,6 +299,72 @@ it("keeps extension installs plain, without a project rule", () => {
   expect(review.prefix).toBeUndefined();
 });
 
+it.each([
+  {
+    executable: "/opt/fungi/bin/fungi",
+    args: ["extension", "add", "./ext", "--no-skills"],
+  },
+  {
+    executable: "fungi",
+    args: ["-C", "/project", "extension", "add", "./ext", "--no-skills"],
+  },
+  {
+    command:
+      "fungi -C /project extension add ./ext --no-skills && fungi reload",
+  },
+  {
+    command:
+      "fungi extension add ./ext --no-skills && fungi extension enable agent authored-tools && fungi reload",
+  },
+  {
+    command: "'/opt/fungi/bin/fungi' extension 'add' './ext' && fungi reload",
+  },
+])(
+  "discloses a literal CLI extension install in %j without enabling a reusable rule",
+  (request) => {
+    const review = localExecEscapeReview(
+      {
+        ...request,
+        escape: { justification: "Install the authored extension" },
+      },
+      "/project",
+    );
+    expect(review.kind).toBe("extension-install");
+    expect(review.prefix).toBeUndefined();
+    expect(review.alwaysAllowUnavailableReason).toContain("fresh approval");
+    if ("command" in request) {
+      expect(review.form).toBe("shell");
+      expect(review.argv).toBeUndefined();
+    }
+  },
+);
+
+it("a directory-scoped Fungi grant discloses that installs still ask", () => {
+  const review = localExecEscapeReview(
+    {
+      executable: "fungi",
+      args: ["-C", "/project", "sessions", "status", "--last", "--json"],
+      escape: { justification: "Inspect this project" },
+    },
+    "/project",
+  );
+  expect(review.prefix).toEqual(["fungi", "-C"]);
+  expect(review.alwaysAllowCoverage).toContain("extension installs");
+  expect(review.risk?.summary).toContain("Extension installs still ask");
+});
+
+it("keeps undecodable shell text a once-only generic review", () => {
+  const review = localExecEscapeReview(
+    { command: "printf '", escape: { justification: "Shell command" } },
+    "/project",
+  );
+  expect(review.kind).toBe("exec");
+  expect(review.form).toBe("shell");
+  expect(review.argv).toBeUndefined();
+  expect(review.prefix).toBeUndefined();
+  expect(review.alwaysAllowUnavailableReason).toContain("Shell");
+});
+
 it("the Git option profile needs no suppression cast", async () => {
   const source = await readFile(
     new URL("../src/private-local-exec-rules.ts", import.meta.url),

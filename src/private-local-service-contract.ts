@@ -14,6 +14,7 @@ import type { ServiceDiagnosticsStatus } from "./private-local-service-log.js";
 import type { LocalSandboxStatus } from "./private-local-sandbox.js";
 import type { LocalPermissionMode } from "./private-local-permission-mode.js";
 import type { LocalUiAttachmentLifetime } from "./private-local-ui-attachment.js";
+import type { PrivateLocalScheduleCapability } from "./private-local-schedule-client.js";
 
 /** Live health, not the on-disk identity record or a cached connection snapshot. */
 export type PrivateLocalServiceStatus = Readonly<{
@@ -157,6 +158,8 @@ export type PrivateLocalSessionDiscovery = Readonly<{
 
 /** Local process management stays outside the shared Session HTTP contract. */
 export type PrivateLocalServiceManager = Readonly<{
+  /** Explicit private person-only capability; never provided by a mesh/App grant. */
+  schedules: (invocationRoot: string) => PrivateLocalScheduleCapability;
   reload: (invocationRoot: string) => Promise<string>;
   /** Throws `LocalServiceUpdated` when a live service speaks another protocol. */
   status: () => Promise<PrivateLocalServiceStatus | undefined>;

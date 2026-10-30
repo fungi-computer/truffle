@@ -29,6 +29,7 @@ import {
   likelySandboxDenied,
   runPrivateInvocationProcess,
 } from "../src/private-invocation-computer.js";
+import { createPrivateLocalComputerProcesses } from "../src/private-local-computer-processes.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -73,6 +74,221 @@ async function temporaryDirectory(label: string) {
   temporaryDirectories.push(directory);
   return directory;
 }
+
+it("exec streams stdout and stderr before exit without changing its terminal result", async () => {
+  const root = await temporaryDirectory("live-output");
+  const computer = await createPrivateInvocationComputer(root);
+  const command =
+    "for i in 1 2 3; do echo $i; echo e$i >&2; sleep 0.2; done; touch finished";
+  const stdout: Uint8Array[] = [];
+  const stderr: Uint8Array[] = [];
+  const live = Promise.withResolvers<"output">();
+  const running = computer.call(
+    "exec",
+    { command },
+    {
+      ...invocation(),
+      output: {
+        write: (stream, bytes) => {
+          (stream === "stdout" ? stdout : stderr).push(bytes.slice());
+          if (stdout.length > 0 && stderr.length > 0) live.resolve("output");
+        },
+      },
+    },
+  );
+  try {
+    expect(
+      await Promise.race([live.promise, running.then(() => "terminal")]),
+    ).toBe("output");
+    expect(await exists(join(root, "finished"))).toBe(false);
+  } finally {
+    await running;
+  }
+  expect(Buffer.concat(stdout).toString()).toBe("1\n2\n3\n");
+  expect(Buffer.concat(stderr).toString()).toBe("e1\ne2\ne3\n");
+  const result = await running;
+  expect(result).toEqual({
+    status: "completed",
+    exitCode: 0,
+    stdout: "1\n2\n3\n",
+    stderr: "e1\ne2\ne3\n",
+    truncated: false,
+    sandbox: {
+      mode: "full-access",
+      likelyDenied: false,
+      ranOutsideSandbox: true,
+    },
+  });
+  // Direct callers outside execute have no sink and retain the same contract.
+  expect(await computer.call("exec", { command }, invocation())).toEqual(
+    result,
+  );
+});
+
+it("env reaches the direct form; HOME is refused", async () => {
+  const root = await temporaryDirectory("exec-env-direct");
+  const computer = await createPrivateInvocationComputer(root);
+  const result = execResultSchema.parse(
+    await computer.call(
+      "exec",
+      {
+        executable: process.execPath,
+        args: ["-e", "process.stdout.write(process.env.CUSTOM_VALUE ?? '')"],
+        env: {
+          ...Object.fromEntries(
+            Array.from({ length: 63 }, (_, index) => [
+              `KEY_${String(index)}`,
+              "x".repeat(1_024),
+            ]),
+          ),
+          CUSTOM_VALUE: "space ; $literal\nvalue",
+        },
+      },
+      invocation(),
+    ),
+  );
+  expect(result).toMatchObject({
+    status: "completed",
+    stdout: "space ; $literal\nvalue",
+  });
+  await expect(
+    computer.call(
+      "exec",
+      { executable: "true", env: { HOME: root } },
+      invocation(),
+    ),
+  ).rejects.toThrow();
+});
+
+it("env reaches the shell form with the same bounded name grammar", async () => {
+  const root = await temporaryDirectory("exec-env-shell");
+  const computer = await createPrivateInvocationComputer(root);
+  const result = execResultSchema.parse(
+    await computer.call(
+      "exec",
+      {
+        command: 'printf "%s" "$CUSTOM_VALUE"',
+        env: { CUSTOM_VALUE: "hello" },
+      },
+      invocation(),
+    ),
+  );
+  expect(result).toMatchObject({ status: "completed", stdout: "hello" });
+  for (const env of [
+    { PATH: "/tmp" },
+    { XDG_RUNTIME_DIR: "/tmp" },
+    { DBUS_SESSION_BUS_ADDRESS: "invalid" },
+    { TMPDIR: "/tmp" },
+    { SSH_AUTH_SOCK: "/tmp/agent" },
+    { FUNGI_SANDBOX: "full-access" },
+    { LD_PRELOAD: "/tmp/library.so" },
+    { DYLD_INSERT_LIBRARIES: "/tmp/library.dylib" },
+    { invalid: "lowercase" },
+    { "1INVALID": "leading digit" },
+    { VALUE: 1 },
+    { VALUE: "\0" },
+    Object.fromEntries(
+      Array.from({ length: 65 }, (_, index) => [`KEY_${String(index)}`, "x"]),
+    ),
+  ]) {
+    await expect(
+      computer.call("exec", { command: "true", env }, invocation()),
+    ).rejects.toThrow();
+    await expect(
+      computer.call("exec", { executable: "true", env }, invocation()),
+    ).rejects.toThrow();
+  }
+});
+
+it("env reaches both managed start forms through the same admission grammar", async () => {
+  const root = await temporaryDirectory("exec-env-managed");
+  const processes = createPrivateLocalComputerProcesses(root);
+  const computer = await createPrivateInvocationComputer(
+    root,
+    "/usr/bin:/bin",
+    processes.scope("env"),
+  );
+  try {
+    for (const form of [
+      { command: 'printf "%s" "$CUSTOM_VALUE"' },
+      {
+        executable: process.execPath,
+        args: ["-e", "process.stdout.write(process.env.CUSTOM_VALUE ?? '')"],
+      },
+    ]) {
+      const started = z
+        .object({ process: z.object({ id: z.string() }) })
+        .parse(
+          await computer.call(
+            "exec",
+            { operation: "start", ...form, env: { CUSTOM_VALUE: "managed" } },
+            invocation(),
+          ),
+        );
+      const settled = await computer.call(
+        "exec",
+        { operation: "wait", id: started.process.id, timeoutMs: 1000 },
+        invocation(),
+      );
+      expect(settled).toMatchObject({
+        complete: true,
+        text: "managed",
+        process: { state: "exited", exitCode: 0 },
+      });
+      await expect(
+        computer.call(
+          "exec",
+          { operation: "start", ...form, env: { HOME: root } },
+          invocation(),
+        ),
+      ).rejects.toThrow();
+    }
+  } finally {
+    await processes.close();
+  }
+});
+
+it.each(["run", "start"] as const)(
+  "refuses 64 oversized env values with a typed validation error before %s launches either form",
+  async (operation) => {
+    const root = await temporaryDirectory("exec-env-value-bound");
+    const processes = createPrivateLocalComputerProcesses(root);
+    const computer = await createPrivateInvocationComputer(
+      root,
+      "/usr/bin:/bin",
+      processes.scope("env-value-bound"),
+    );
+    const env = Object.fromEntries(
+      Array.from({ length: 64 }, (_, index) => [
+        `KEY_${String(index)}`,
+        "x".repeat(1_025),
+      ]),
+    );
+    try {
+      for (const form of [
+        { command: "touch should-not-run" },
+        {
+          executable: process.execPath,
+          args: [
+            "-e",
+            "require('node:fs').writeFileSync('should-not-run', '')",
+          ],
+        },
+      ]) {
+        await expect(
+          computer.call("exec", { operation, ...form, env }, invocation()),
+        ).rejects.toBeInstanceOf(z.ZodError);
+        await expect(
+          access(join(root, "should-not-run")),
+        ).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+      }
+    } finally {
+      await processes.close();
+    }
+  },
+);
 
 it("Workspace escape stages without executing, while Full access ignores escape", async () => {
   const root = await temporaryDirectory("escape");
@@ -840,7 +1056,7 @@ describe("private invocation Computer", () => {
       ).resolves.toMatchObject({ status: "completed" });
     });
 
-    it("restricts env to PATH, HOME and the user session locators, keeps the selected client PATH, and never leaks a host secret", async () => {
+    it("defaults to PATH, HOME and the user session locators, keeps the selected client PATH, and never leaks a host secret", async () => {
       const root = await temporaryDirectory("computer-direct-env");
       const toolchain = join(root, "toolchain");
       await mkdir(toolchain);

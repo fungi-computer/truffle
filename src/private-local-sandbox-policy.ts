@@ -147,6 +147,10 @@ export function linuxSandboxProfile(
     mode,
     temporaryDirectory,
     fungiCache: protectedFungiCache,
+    // Adding PATH lookup directories would invalidate the current name-based
+    // extension-install risk classification; revisit private-local-exec-rules.ts
+    // before widening this set. Guard: ../test/private-local-containment.test.ts,
+    // "keeps every captured PATH directory outside Workspace writable roots".
     writable:
       mode === "workspace"
         ? [...new Set([policy.writableRoot, ...writableCaches])]

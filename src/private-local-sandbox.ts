@@ -70,6 +70,8 @@ export function createLocalSandboxControls(
     platform?: string;
     readNativePatchSource?: NativeSourceReader;
     native?: NativePayloadStaging | undefined;
+    /** Test-only hook for inspecting probe launches without native execution. */
+    runProbe?: Parameters<typeof establishLocalSandbox>[2];
   }>,
 ): LocalSandboxControls {
   const mode = input.mode();
@@ -152,6 +154,7 @@ export function createLocalSandboxControls(
           ...platform,
         },
         native,
+        input.runProbe,
       );
     }
   } catch (cause) {
@@ -224,6 +227,7 @@ export function createLocalSandboxControls(
         ...platform,
       },
       native,
+      input.runProbe,
     );
     if (admission.state === "ready") {
       sandbox = admission.sandbox;

@@ -1,5 +1,46 @@
 # @fungi.computer/truffle
 
+## 0.6.0
+
+### Minor Changes
+
+- Changes since 0.5.0:
+
+  - fix(shiitake): settle hung runs and route ancestor reports one-way
+  - fix(shiitake): bound far-future open Agent wake timers
+  - fix(local): reuse admitted schedule discovery
+  - feat(local): expose private retained schedule controls
+  - fix(shiitake): bound and share Session read ancestry
+  - fix: require fresh review for directory-scoped extension installs
+  - fix(mycelium): scope forage discovery to execute
+  - feat: support Agent-authored Local extension snapshots
+  - fix(local): upgrade Bun runtime to 1.4.4
+  - fix(shiitake): bound exec env values and pin create recovery
+  - feat(agents): adopt delegated goals on recipient admission
+  - fix(agents): open first Sessions and admit bounded exec environments
+  - feat(local): stream exec and wait output to invocation sinks
+  - fix(trellis): checkpoint schedule owner integration merge
+  - fix: merge Integration into Agent-authored extensions
+  - fix: merge Integration into Local output streams
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.6.0
+  - @fungi.computer/bird-dog@0.3.1
+  - @fungi.computer/graft@0.1.5
+  - @fungi.computer/mycelium@0.3.0
+  - @fungi.computer/shiitake-extensions@0.5.0
+  - @fungi.computer/shiitake@0.7.0
+  - @fungi.computer/nacre@0.1.1
+  - @fungi.computer/knapsack@0.4.1
+  - @fungi.computer/zookeeper@0.0.6
+
 ## 0.5.0
 
 ### Minor Changes

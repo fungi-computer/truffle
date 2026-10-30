@@ -24,6 +24,13 @@ unit and native patch tests. They do not sign in to a provider or start a
 customer Agent. Build outputs and test fixtures are disposable. Without a built
 engine, Local offers no `apply_patch` tool.
 
+Sandbox policy assertions run in `test:unit` without launching a sandbox: they
+exercise the real admission and command renderer with a deterministic startup
+probe. Native sandbox qualification lives in `test/*.native.test.ts`, selected
+by `test:sandbox:native` through `test:merge`, with one file worker. It retains
+the real bwrap/Seatbelt startup, Git write-refusal, child and delegation proofs;
+`test:merge` also runs the platform sandbox matrix and native patch suite.
+
 ## Host and Session lifetime
 
 [openPrivateLocalRuntimeHost](src/private-local-runtime-host.ts) captures the
@@ -172,7 +179,14 @@ model operation that changes Home.
   interpreted by `sh -c`) and a direct form (`executable` and `args`, run with
   no shell interpretation at all, through the same bounded native process owner
   `runPrivateInvocationProcess`). Zod refuses a request carrying both or
-  neither. Either form accepts optional `stdin`
+  neither. Both forms accept optional `env`: at most 64 string-valued entries,
+  each at most 1,024 UTF-16 code units, named `^[A-Z_][A-Z0-9_]*$`. Values are
+  passed literally, never interpolated into shell source. Host-owned names
+  (`HOME`, `PATH`, session/sandbox locators, temporary-directory and loader
+  controls such as `LD_*`/`DYLD_*`) are refused; ambient host secrets remain
+  excluded. If a host-trusted Node process ever inherits this caller-supplied
+  env, `NODE_OPTIONS` must join the refused list before that path is enabled.
+  Either form accepts optional `stdin`
   ([its own bound](src/private-local-exec-launch.ts), not borrowed from Files),
   written to the child once, then closed; there is no interactive stdin. An
   omitted `stdin` closes immediately rather than leaving an open pipe, so a
@@ -181,8 +195,8 @@ model operation that changes Home.
   generic sandbox failure.
 - [Background processes](src/private-local-computer-processes.ts) support start,
   poll, wait, list and kill on the existing exec surface. `start` takes the same
-  shell-or-direct, optional-stdin input as `run`, through the existing
-  background process owner (`ManagedProcess`/`spawn`, not `run`'s
+  shell-or-direct, optional-stdin and bounded-env input as `run`, through the
+  existing background process owner (`ManagedProcess`/`spawn`, not `run`'s
   `runPrivateInvocationProcess`). Wait is bounded to 60 seconds. Cancelling a
   wait does not kill the process. Output retains a bounded tail with offsets.
   Session deletion or owner close stops its groups. Process IDs do not survive
@@ -284,10 +298,19 @@ activations its own operations write in `~/.fungi/extensions/activations.json`.
 Files in a project or an Agent store never enable anything, so a copied folder
 starts disabled.
 
-- `add(source)` installs a Git URL, npm spec or path with the shipped Bun
+- `add(source, cwd)` installs a Git URL, npm spec or path with the shipped Bun
   package manager, lifecycle scripts disabled and a private cache. A Git source
   is pinned to the commit Bun resolved; updating is another `add`. A package
   whose declared `./host` entry or terminal program is not built is refused.
+  Local paths resolve from the caller's `cwd`, not the private staging folder.
+  Directory sources go through Bun's `pm pack --ignore-scripts` before install:
+  their installed bytes are an isolated package snapshot, not links back into
+  the project. Updating still requires another explicit `add` and activation;
+  existing Agents keep their accepted revision and capabilities. Behaviour
+  outside the manifest, schemas and hashed config needs an extension version
+  bump, per
+  [Core's identity contract](../../wiki/3-resources/shiitake-v0.0.1/extensions.md).
+  Replacing an active extension can require a service restart.
 - `enableProject(root, id)` turns on the extension's client entry and programs
   for that folder, whichever Agent is selected.
 - `enableAgent(store, id, requester?)` grants one Agent store the capabilities

@@ -2170,7 +2170,7 @@ export async function openPrivateLocalRuntimeHost(
       };
     const policyForSession =
       (sessionId: string): LocalExecPolicyRun =>
-      async ({ request, cwd, mode, executionPath }) => {
+      async ({ request, cwd, mode, executionPath, context }) => {
         if (mode !== "workspace" || !("executable" in request))
           return undefined;
         let configuredRemotes: ReadonlySet<string> | undefined;
@@ -2199,6 +2199,7 @@ export async function openPrivateLocalRuntimeHost(
             configRoot.home,
             localTools.processes.scope(sessionId),
             mode,
+            context.output,
           ),
         );
       };

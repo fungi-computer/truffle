@@ -1,5 +1,11 @@
 import { localFailureMetadata, logEvent } from "./log-event.js";
 import { bodyLimit } from "hono/body-limit";
+import { ShiitakeError } from "@fungi.computer/shiitake";
+import { toShiitakeErrorWire } from "@fungi.computer/shiitake/http";
+import {
+  localScheduleControlInputSchema,
+  localScheduleListInputSchema,
+} from "./private-local-schedules.js";
 import {
   enrollPrivateLocalMesh,
   localMeshJoinSchema,
@@ -173,6 +179,14 @@ export async function runPrivateLocalService(
   const app = new Hono();
   app.onError((error, context) => {
     diagnostics.failure(localFailureMetadata("service.request", error));
+    if (
+      error instanceof ShiitakeError &&
+      context.req.path.startsWith(`${prefix}/schedules/`)
+    )
+      return context.json(
+        toShiitakeErrorWire(error),
+        error.cause === "conflict" ? 409 : 400,
+      );
     if (error instanceof LocalStoreSchemaError)
       return context.json(
         {
@@ -441,6 +455,39 @@ export async function runPrivateLocalService(
         }),
       );
     });
+    app.post(
+      `${prefix}/schedules/list`,
+      bodyLimit({ maxSize: 32 * 1024 }),
+      async (context) =>
+        context.json(
+          await owners.schedules(
+            localScheduleListInputSchema.parse(await context.req.json()),
+            context.req.raw.signal,
+          ),
+        ),
+    );
+    app.post(
+      `${prefix}/schedules/pause`,
+      bodyLimit({ maxSize: 32 * 1024 }),
+      async (context) =>
+        context.json(
+          await owners.pauseSchedule(
+            localScheduleControlInputSchema.parse(await context.req.json()),
+            context.req.raw.signal,
+          ),
+        ),
+    );
+    app.post(
+      `${prefix}/schedules/delete`,
+      bodyLimit({ maxSize: 32 * 1024 }),
+      async (context) =>
+        context.json(
+          await owners.deleteSchedule(
+            localScheduleControlInputSchema.parse(await context.req.json()),
+            context.req.raw.signal,
+          ),
+        ),
+    );
     app.post(`${prefix}/reload`, async (context) => {
       try {
         const input = z

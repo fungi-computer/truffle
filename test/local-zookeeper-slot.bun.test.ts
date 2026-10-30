@@ -51,7 +51,7 @@ test("an installed extension holding compaction_handoff keeps it on the real Loc
   git(work, "commit", "-qm", "compactor 1.0.0");
   git(work, "push", "-q", bare, "HEAD:main");
   const owner = localExtensions({ home });
-  await owner.add(`git+file://${bare}#main`);
+  await owner.add(`git+file://${bare}#main`, project);
   await owner.enableAgent(store, "installed-compactor");
 
   const child = Bun.spawn([process.execPath, probe, project, store], {

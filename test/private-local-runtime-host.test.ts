@@ -340,7 +340,9 @@ async function executeComposedTools(
   );
   await Effect.runPromise(
     Stream.runForEach(prepared.execute(), (part) =>
-      Effect.sync(() => parts.push(part)),
+      Effect.sync(() => {
+        if (part.type === "result") parts.push(part);
+      }),
     ),
   );
   const [part] = executionResultSchema.parse(parts);
@@ -722,7 +724,7 @@ describe("private local RuntimeHost", () => {
   });
 
   it("rearms pending work after a successful reconciliation and cancels recovery on close", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const runtime = createPrivateLocalRuntimeHost();
     let reconciliations = 0;
     let pendingWork = true;
@@ -817,8 +819,53 @@ describe("private local RuntimeHost", () => {
     }
   });
 
+  it("caps far-future wake timers and rechecks the deadline before reconciling", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const runtime = createPrivateLocalRuntimeHost();
+    const maximumDelay = 2_147_483_647;
+    let nextWakeAt: number | null = Date.now() + maximumDelay * 2 + 60_000;
+    let reconciliations = 0;
+    const handle = await runtime.bind({
+      reconcile: () => {
+        reconciliations += 1;
+        if (reconciliations === 2) nextWakeAt = null;
+        return Promise.resolve();
+      },
+      pendingWork: () => Promise.resolve({ pending: false, nextWakeAt }),
+    });
+    try {
+      await waitFor(
+        () => reconciliations === 1,
+        "Startup reconciliation did not run",
+      );
+      expect(timeout).toHaveBeenLastCalledWith(
+        expect.any(Function),
+        maximumDelay,
+      );
+      for (let chunk = 0; chunk < 2; chunk += 1) {
+        await vi.advanceTimersByTimeAsync(maximumDelay);
+        expect(reconciliations).toBe(1);
+        expect(vi.getTimerCount()).toBe(1);
+      }
+      expect(timeout).toHaveBeenLastCalledWith(expect.any(Function), 60_000);
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(reconciliations).toBe(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await waitFor(
+        () => reconciliations === 2,
+        "The far-future deadline did not wake RuntimeHost",
+      );
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      await handle.close();
+      timeout.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("rearms after a failed pending-work read and leaves healthy idle owners quiet", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const diagnostic = vi
       .spyOn(console, "error")
       .mockImplementation(() => undefined);
@@ -859,7 +906,7 @@ describe("private local RuntimeHost", () => {
   });
 
   it("recovers a failed native claim without another prompt or model replay", async () => {
-    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
     const diagnostic = vi
       .spyOn(console, "error")
       .mockImplementation(() => undefined);

@@ -1,6 +1,11 @@
+import * as Result from "effect/Result";
 import type { LocalApprovalReview } from "./private-mcp-form-session.js";
-import { gitRuleCoverage, rulePrefix } from "./private-local-exec-rules.js";
-import { quote } from "shell-quote";
+import {
+  gitRuleCoverage,
+  hasExtensionInstallRisk,
+  rulePrefix,
+} from "./private-local-exec-rules.js";
+import { parse, quote } from "shell-quote";
 
 const gitHookGrantSubcommands = new Set([
   "add",
@@ -38,6 +43,19 @@ export function localExecEscapeReview(
       ? undefined
       : [request.executable, ...(request.args ?? [])];
   const command = request.command ?? quote(argv ?? []);
+  // Literal shell tokens only add the extension risk note. They never turn
+  // shell text into argv, establish command identity, or permit a saved rule.
+  // Opaque shell text keeps its existing once-only generic review.
+  const words =
+    argv ??
+    Result.getOrElse(
+      Result.try(() => parse(command, {})),
+      () => [],
+    );
+  const extensionInstall = hasExtensionInstallRisk(
+    words,
+    argv === undefined ? "shell" : "direct",
+  );
   const prefix =
     argv === undefined || (argv[0] === "git" && gitGrant === undefined)
       ? undefined
@@ -47,10 +65,7 @@ export function localExecEscapeReview(
     cwd,
     justification: request.escape.justification,
     form: argv === undefined ? "shell" : "direct",
-    kind:
-      argv?.[0] === "fungi" && argv[1] === "extension" && argv[2] === "add"
-        ? "extension-install"
-        : "exec",
+    kind: extensionInstall ? "extension-install" : "exec",
   };
   if (argv !== undefined) review.argv = argv;
   if (prefix !== undefined && review.kind === "exec") {
@@ -58,7 +73,7 @@ export function localExecEscapeReview(
     review.alwaysAllowCoverage =
       prefix[0] === "git"
         ? gitRuleCoverage(prefix[1] ?? "")
-        : `Direct argv commands beginning ${JSON.stringify(prefix)} in this project; shell commands still ask.`;
+        : `Direct argv commands beginning ${JSON.stringify(prefix)} in this project; shell commands${prefix[0] === "fungi" ? " and extension installs" : ""} still ask.`;
     if (prefix[0] === "git") {
       const hookCapable = gitHookGrantSubcommands.has(prefix[1] ?? "");
       const summary =
@@ -83,7 +98,10 @@ export function localExecEscapeReview(
           : "");
       review.risk = { summary, detail };
     } else {
-      const summary = `Every \`${prefix.join(" ")} …\` command will run outside the sandbox, as you.`;
+      const summary =
+        prefix[0] === "fungi"
+          ? `Matching \`${prefix.join(" ")} …\` commands run outside the sandbox, as you. Extension installs still ask.`
+          : `Every \`${prefix.join(" ")} …\` command will run outside the sandbox, as you.`;
       review.risk = { summary, detail: summary };
     }
   }

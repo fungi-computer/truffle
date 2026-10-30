@@ -195,7 +195,7 @@ test("a Git source with a missing built entry is refused, never reported usable"
   );
   publish("source only");
   const refused = await owner
-    .add(`git+file://${bare}#main`)
+    .add(`git+file://${bare}#main`, project)
     .catch((cause: unknown) => cause);
   expect(refused).toBeInstanceOf(LocalExtensionError);
   expect(refused instanceof LocalExtensionError && refused.reason).toBe(
@@ -219,7 +219,7 @@ test("the extension owner retains its selected home after ambient HOME changes",
 test("installs the Git package pinned to its resolved commit; enables the project and one Agent", async () => {
   await cp(join(fixture, "package.json"), join(work, "package.json"));
   const commit = publish("counter 1.0.0");
-  const installed = await owner.add(`git+file://${bare}#main`);
+  const installed = await owner.add(`git+file://${bare}#main`, project);
   expect(installed).toMatchObject({
     id: "counter",
     commit,
@@ -342,7 +342,7 @@ test("an upgrade keeps the accepted revision until re-enabled; disable and remov
     )}\n`,
   );
   const upgraded = publish("counter 1.1.0 asks for prompt");
-  const next = await owner.add(`git+file://${bare}#main`);
+  const next = await owner.add(`git+file://${bare}#main`, project);
   expect(next.revision).toBe(upgraded);
   const pinned = activationRecord.parse(
     JSON.parse(

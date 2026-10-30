@@ -126,7 +126,7 @@ it.skipIf(process.platform !== "linux")(
             clientPath,
           }),
         });
-        expect(response.status).toBe(200);
+        expect(response.status, await response.clone().text()).toBe(200);
         const selected = selectedSchema.parse(await response.json());
         // A real Session write through the mounted route, then the client
         // leaves: it detaches its private route, as a UI does when it closes.

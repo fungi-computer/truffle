@@ -10,6 +10,7 @@ import {
   type StreamableHTTPClientTransportOptions,
 } from "@modelcontextprotocol/client";
 import { Mycelium, type CapabilitySource } from "@fungi.computer/mycelium";
+import { forageDiscoveryInstructions } from "@fungi.computer/mycelium/effect";
 import { z } from "zod";
 import { parseFungiMcpEndpoint } from "./private-fungi-mcp-endpoint.js";
 import {
@@ -126,8 +127,11 @@ export function createPrivateFungiMcpConnection(
                 operations: {
                   execute: Mycelium.operation({
                     replay: "unsafe",
-                    description:
-                      "Execute JavaScript on the connected Fungi MCP server. Discover permitted Team Computer operations with await forage.search({query: 'read'}) and await forage.describe({path: 'files.read'}). Explicitly return the result. Returns the original MCP content and isError; it does not run on the local machine.",
+                    description: [
+                      "This operation sends its code to the connected Fungi MCP server's execute tool. The following discovery instructions apply inside that remote call, not the outer Local call.",
+                      forageDiscoveryInstructions,
+                      "Explicitly return the result. Returns the original MCP content and isError; it does not run on the local machine.",
+                    ].join(" "),
                     input: z.strictObject({ code: z.string() }),
                     execute: async (input, context) => {
                       try {

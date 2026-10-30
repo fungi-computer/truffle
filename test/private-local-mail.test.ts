@@ -15,6 +15,7 @@ import {
   hasPrivateLocalPendingMail,
 } from "../src/private-local-mail.js";
 import { createPrivateSqliteOwner } from "../src/private-sqlite-owner.js";
+import { createPrivateLocalDelegation } from "../src/private-local-delegation.js";
 
 const parent = {
   kind: "agent",
@@ -26,6 +27,92 @@ const child = {
   agentId: "child-agent",
   sessionId: "main",
 } as const;
+
+it("admits an addressed one-way ancestor notice as ordinary work, not a reply", async () => {
+  const root = await mkdtemp(join(tmpdir(), "fungi-local-ancestor-notice-"));
+  const database = new DatabaseSync(join(root, "agent.sqlite"));
+  const accepted: BirdDogMail[] = [];
+  const delegation = createPrivateLocalDelegation({
+    agentId: parent.agentId,
+    storage: createPrivateSqliteOwner(database),
+    directory: {
+      list: () =>
+        Promise.resolve([
+          { agentId: parent.agentId, name: "Parent" },
+          { agentId: child.agentId, name: "Worker" },
+        ]),
+      open: () =>
+        Promise.reject(new Error("An addressed notice does not open")),
+    },
+    routing: {
+      deliver: () => Promise.reject(new Error("No reply may be mailed")),
+      readSettlement: () => Promise.resolve(undefined),
+    },
+    accept: (mail) => {
+      accepted.push(mail);
+      return Promise.resolve({
+        status: "accepted",
+        sessionId: parent.sessionId,
+        commandId: "notice-command",
+      });
+    },
+  });
+  const notice: BirdDogMail = {
+    key: "worker-to-parent",
+    from: child,
+    to: parent,
+    replyTo: [],
+    content: "Status report",
+    createdAt: 1,
+    meta: {
+      delegation: { ancestors: [parent.agentId, child.agentId], maxDepth: 8 },
+    },
+  };
+  try {
+    await expect(delegation.receive(notice)).resolves.toMatchObject({
+      commandId: "notice-command",
+    });
+    expect(accepted).toEqual([notice]);
+    const mailed: BirdDogMail[] = [];
+    const room = createPrivateLocalMailRoom(database, {
+      deliver: (mail) => {
+        mailed.push(mail);
+        return Promise.resolve({ status: "accepted", commandId: "reply" });
+      },
+      now: () => 2,
+    });
+    const job = BirdDog.agentJob({
+      delivery: "followUp",
+      work: {
+        jobId: "notice-job",
+        sessionId: parent.sessionId,
+        commandFactId: "notice-command",
+      },
+      mail: notice,
+    });
+    await Effect.runPromise(
+      room.fanOut({
+        job: { ...job, state: "settled", outcome: "completed" },
+        content: "Finished the report",
+      }),
+    );
+    await Effect.runPromise(room.drainOutbox());
+    expect(mailed).toEqual([]);
+    await expect(
+      delegation.receive({
+        ...notice,
+        key: "forged-ancestor",
+        meta: {
+          delegation: { ancestors: ["other", child.agentId], maxDepth: 8 },
+        },
+      }),
+    ).rejects.toThrow("Local reply does not match");
+  } finally {
+    await delegation.close();
+    database.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 it("clears a reply from the local outbox when the relay holds custody", async () => {
   const root = await mkdtemp(join(tmpdir(), "fungi-local-mail-held-"));
@@ -43,6 +130,7 @@ it("clears a reply from the local outbox when the relay holds custody", async ()
     now: () => 100,
   });
   const queued = BirdDog.agentJob({
+    delivery: "followUp",
     work: {
       jobId: "job-local-held",
       sessionId: child.sessionId,
@@ -352,6 +440,7 @@ it("reopens a persisted retry and delivers it to the addressed recipient once", 
     now: () => now,
   };
   const queued = BirdDog.agentJob({
+    delivery: "followUp",
     work: {
       jobId: "job-local-retry",
       sessionId: child.sessionId,

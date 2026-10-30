@@ -97,6 +97,12 @@ import {
   settlementReadableBy,
 } from "@fungi.computer/shiitake/fleet";
 import { BirdDogMailSchema } from "@fungi.computer/bird-dog/effect";
+import { controlAgentScheduleWithContent } from "@fungi.computer/shiitake-extensions/schedules";
+import {
+  localScheduleControlInputSchema,
+  localScheduleListInputSchema,
+  readLocalSchedulePage,
+} from "./private-local-schedules.js";
 
 export type LocalServiceRuntime = Pick<
   PrivateLocalRuntimeHost,
@@ -1221,10 +1227,14 @@ export function createLocalServiceOwners(
 
   function directory(invocationRoot: string): LocalAgentControlDirectory &
     Readonly<{
+      targets: (
+        signal: AbortSignal,
+        visibility?: LocalStoreVisibility,
+      ) => Promise<ReadonlyMap<string, string>>;
       owner: (
         agentId: string,
         signal: AbortSignal,
-        /** Read an archived Agent too; for reads that start no work. */
+        /** Retained reads and future-only schedule controls may borrow archived owners. */
         includeArchived?: boolean,
       ) => Promise<HeldRuntime>;
     }> {
@@ -1469,6 +1479,7 @@ export function createLocalServiceOwners(
       }
     }
     return {
+      targets,
       owner: admittedOwner,
       answer: answerAsSender,
       escalate: escalateAsSender,
@@ -1841,6 +1852,46 @@ export function createLocalServiceOwners(
     scheduleWakes();
     await saveRecovery();
   }
+  /** Private person-only schedule discovery, never the Agent or mesh directory. */
+  async function schedules(
+    request: z.input<typeof localScheduleListInputSchema>,
+    signal: AbortSignal,
+  ) {
+    ensureRunning();
+    signal.throwIfAborted();
+    const input = localScheduleListInputSchema.parse(request);
+    const root = await realpath(input.invocationRoot);
+    const control = directory(root);
+    const agents = [...(await control.targets(signal, "all")).keys()];
+    return readLocalSchedulePage(
+      agents,
+      (agentId, requestSignal) => control.owner(agentId, requestSignal, true),
+      input,
+      signal,
+    );
+  }
+
+  async function controlSchedule(
+    request: z.input<typeof localScheduleControlInputSchema>,
+    action: "pause" | "delete",
+    signal: AbortSignal,
+  ) {
+    ensureRunning();
+    signal.throwIfAborted();
+    const input = localScheduleControlInputSchema.parse(request);
+    const root = await realpath(input.invocationRoot);
+    const { owner, release } = await directory(root).owner(
+      input.target.agentId,
+      signal,
+      true,
+    );
+    try {
+      return await controlAgentScheduleWithContent(owner, input.target, action);
+    } finally {
+      release();
+    }
+  }
+
   /** A person archives or restores any Agent of one project folder. */
   async function archive(
     request: Readonly<{
@@ -2017,6 +2068,15 @@ export function createLocalServiceOwners(
     effectiveModel,
     sandboxStatus,
     sweepIdle,
+    schedules,
+    pauseSchedule: (
+      request: z.input<typeof localScheduleControlInputSchema>,
+      signal: AbortSignal,
+    ) => controlSchedule(request, "pause", signal),
+    deleteSchedule: (
+      request: z.input<typeof localScheduleControlInputSchema>,
+      signal: AbortSignal,
+    ) => controlSchedule(request, "delete", signal),
     archive,
     stopAll,
     restore,

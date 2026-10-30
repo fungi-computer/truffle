@@ -498,7 +498,9 @@ it("lists the Agents one Local conversation created and sent work to, shows a cr
         // Both host rows are recorded: the created Agent and the one sent to.
         return (
           agents.length === 2 &&
-          agents.some((agent) => agent.sessionId === null) &&
+          agents.some(
+            (agent) => agent.agentId !== ids.child && agent.sessionId !== null,
+          ) &&
           agents.some(
             (agent) =>
               agent.agentId === ids.child && agent.sessionId === "main",
@@ -520,8 +522,9 @@ it("lists the Agents one Local conversation created and sent work to, shows a cr
       state: "idle",
     });
     expect(child?.name).toMatch(/^[a-z]+-[a-z]+$/u);
-    const made = rows.agents.find((agent) => agent.sessionId === null);
+    const made = rows.agents.find((agent) => agent.agentId !== ids.child);
     expect(made?.state).toBe("idle");
+    expect(made?.sessionId).not.toBeNull();
     // The Agent that ran the create is recorded as the creator, from its own host.
     expect(
       readPrivateLocalAgentProfile(
@@ -607,22 +610,8 @@ it("a created child sends followUp and steer back to its creator from delegated 
   for (const [key, value] of Object.entries(environment))
     vi.stubEnv(key, value);
   const parentContexts: Context[] = [];
-  const childContexts: Context[] = [];
   const callbacks = Promise.withResolvers<Context>();
   const childCompletionReceived = Promise.withResolvers<undefined>();
-  const creatorCompletionReceived = Promise.withResolvers<undefined>();
-  const observeCreatorCompletion = (context: Context) => {
-    if (
-      !context.messages.some(
-        (message) =>
-          message.role === "user" &&
-          JSON.stringify(message.content).includes("Creator callback complete"),
-      )
-    )
-      return;
-    childContexts.push(structuredClone(context));
-    creatorCompletionReceived.resolve(undefined);
-  };
   const creatorResponse: FauxResponseStep = (context) => {
     parentContexts.push(structuredClone(context));
     if (JSON.stringify(context.messages).includes("Child callbacks finished"))
@@ -636,11 +625,8 @@ it("a created child sends followUp and steer back to its creator from delegated 
           fauxToolCall("execute", {
             code: `async () => {
               const child = await agents.create({ requestId: "creator-returner" });
-              const session = await agents.createSession({
-                agentId: child.agentId, requestId: "returner-session"
-              });
               await agents.send({
-                agentId: child.agentId, sessionId: session.sessionId,
+                agentId: child.agentId, sessionId: child.sessionId,
                 requestId: "creator-delegates-to-created-child",
                 text: "Send both callbacks to your creator", delivery: "followUp"
               });
@@ -675,15 +661,8 @@ it("a created child sends followUp and steer back to its creator from delegated 
           { stopReason: "toolUse" },
         ),
       (context) => {
-        // A verified reply steers the active run: it may already be visible
-        // in this post-tool turn, without requiring a later model call.
-        observeCreatorCompletion(context);
         callbacks.resolve(structuredClone(context));
         return fauxAssistantMessage("Child callbacks finished");
-      },
-      (context) => {
-        observeCreatorCompletion(context);
-        return fauxAssistantMessage("Creator response received");
       },
     ],
   );
@@ -734,16 +713,16 @@ it("a created child sends followUp and steer back to its creator from delegated 
     expect(
       z.object({ createdBy: z.string() }).parse(JSON.parse(result.text)),
     ).toEqual({ createdBy: ids.parent });
-    // Both directions create real correspondence obligations. Let completion
-    // mail reach both models before teardown can close either SQLite owner.
-    await Promise.all([
-      childCompletionReceived.promise,
-      creatorCompletionReceived.promise,
-    ]);
-    expect(JSON.stringify(childContexts[0])).toContain(
-      "Creator callback complete",
+    // The ancestor callbacks are one-way, not new delegated work from the
+    // child. The creator still receives the child's original work completion;
+    // its responses to the callbacks do not create replies back to the child.
+    await childCompletionReceived.promise;
+    expect(JSON.stringify(parentContexts.at(-1))).toContain(
+      "<fungi_agent_reply",
     );
-    expect(JSON.stringify(childContexts[0])).toContain("<fungi_agent_reply");
+    expect(JSON.stringify(parentContexts.at(-1))).toContain(
+      "Child callbacks finished",
+    );
   } finally {
     await watched.close();
     await local.owners.close();

@@ -24,6 +24,7 @@ import {
 } from "@fungi.computer/shiitake/extensions";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
+import npa from "npm-package-arg";
 import writeFileAtomic from "write-file-atomic";
 import { z } from "zod";
 import {
@@ -546,18 +547,26 @@ export function localExtensions(options: LocalExtensionsOptions) {
      * is pinned to the commit Bun's lockfile resolved; updating is another
      * explicit `add`. Missing declared artifacts are a refusal.
      */
-    async add(source: string): Promise<LocalInstalledExtension> {
+    async add(source: string, cwd: string): Promise<LocalInstalledExtension> {
+      if (source.length === 0)
+        throw new LocalExtensionError(
+          "install",
+          "An extension source is required",
+        );
+      // Bun installs in private staging, not the caller's project. Let the
+      // maintained package-spec parser resolve only local sources there first;
+      // leave Git and registry specifications to Bun unchanged.
+      const parsed = npa(source, cwd);
+      const installSource =
+        parsed.type === "directory" || parsed.type === "file"
+          ? z.string().parse(parsed.fetchSpec)
+          : source;
       await mkdir(join(root, "staging"), { recursive: true, mode: 0o700 });
       const staging = await mkdtemp(join(root, "staging", "install-"));
       try {
-        await writeFile(
-          join(staging, "package.json"),
-          `${JSON.stringify({ private: true })}\n`,
-        );
-        const child = Bun.spawn(
-          [process.execPath, "add", "--ignore-scripts", source],
-          {
-            cwd: staging,
+        const runBun = async (args: readonly string[], directory: string) => {
+          const child = Bun.spawn([process.execPath, ...args], {
+            cwd: directory,
             // A private cache resolves the named ref afresh instead of a
             // cached checkout of an earlier commit.
             env: {
@@ -565,19 +574,41 @@ export function localExtensions(options: LocalExtensionsOptions) {
               BUN_BE_BUN: "1",
               BUN_INSTALL_CACHE_DIR: join(staging, ".install-cache"),
             },
-            stdout: "pipe",
+            stdout: "ignore",
             stderr: "pipe",
-          },
-        );
-        const [status, stderr] = await Promise.all([
-          child.exited,
-          new Response(child.stderr).text(),
-        ]);
-        if (status !== 0)
-          throw new LocalExtensionError(
-            "install",
-            `Could not install ${source}: ${stderr.trim().slice(0, 2_000)}`,
+          });
+          const [status, stderr] = await Promise.all([
+            child.exited,
+            new Response(child.stderr).text(),
+          ]);
+          if (status !== 0)
+            throw new LocalExtensionError(
+              "install",
+              `Could not install ${source}: ${stderr.trim().slice(0, 2_000)}`,
+            );
+        };
+        // Bun links a directory dependency's files back to its source, even
+        // with --backend=copyfile. Its ordinary pack operation supplies an
+        // isolated package snapshot and the install lock supplies its integrity.
+        // Both operations keep lifecycle scripts disabled.
+        const archive = join(staging, "source.tgz");
+        if (parsed.type === "directory")
+          await runBun(
+            ["pm", "pack", "--ignore-scripts", "--filename", archive],
+            installSource,
           );
+        await writeFile(
+          join(staging, "package.json"),
+          `${JSON.stringify({ private: true })}\n`,
+        );
+        await runBun(
+          [
+            "add",
+            "--ignore-scripts",
+            parsed.type === "directory" ? archive : installSource,
+          ],
+          staging,
+        );
         const lock = lockSchema.parse(
           Bun.JSONC.parse(await readFile(join(staging, "bun.lock"), "utf8")),
         );

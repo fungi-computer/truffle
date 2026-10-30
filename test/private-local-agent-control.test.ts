@@ -100,7 +100,24 @@ it("binds Local Agent creation to the exact Session that invokes it", async () =
       Promise.resolve({ status: "unavailable", reason: "unsupported" }),
     escalate: () =>
       Promise.resolve({ status: "unavailable", reason: "unsupported" }),
-    open: () => Promise.reject(new Error("unused")),
+    open: () =>
+      Promise.resolve({
+        agent: {
+          createSession: () => Promise.resolve("session-first"),
+          deleteSession: () => Promise.reject(new Error("unused")),
+          listSessions: () => Promise.reject(new Error("unused")),
+          extensions: {
+            list: () => Promise.reject(new Error("unused")),
+            resume: () => Promise.reject(new Error("unused")),
+            call: () => Promise.reject(new Error("unused")),
+          },
+          session: () => {
+            throw new Error("unused");
+          },
+          close: () => Promise.resolve(),
+        },
+        release: () => Promise.resolve(),
+      }),
     archive: () => Promise.resolve(),
     unarchive: () => Promise.resolve(),
   };
@@ -143,7 +160,10 @@ it("binds Local Agent creation to the exact Session that invokes it", async () =
           },
         }),
       );
-      await Effect.runPromise(Stream.runCollect(prepared.execute()));
+      const parts = await Effect.runPromise(
+        Stream.runCollect(prepared.execute()),
+      );
+      expect(parts[0]).toMatchObject({ result: { isError: false } });
     } finally {
       await lease.release();
       await runtime.close();
@@ -1203,7 +1223,7 @@ const agentsSchema = z.array(
   }),
 );
 
-it("joins project Agent ownership to real Local Shiitake control", async () => {
+it("joins real Local control and recovers a committed create after its first Session open fails", async () => {
   const root = await temporaryDirectory();
   const stores = join(root, ".fungi", "agents");
   const agentPaths = {
@@ -1412,7 +1432,37 @@ it("joins project Agent ownership to real Local Shiitake control", async () => {
     });
     const parent = opened.get(parentHost.databasePath);
     if (parent === undefined) throw new Error("Request-owning parent missing");
-    const localTools = await createBuiltPrivateLocalTools(root, parent.control);
+    let failNextOpen = false;
+    let failNextSessionOpen = false;
+    let failedOpenAgentId: string | undefined;
+    const localTools = await createBuiltPrivateLocalTools(root, {
+      ...parent.control,
+      open: async (agentId, signal) => {
+        if (failNextOpen) {
+          failNextOpen = false;
+          failedOpenAgentId = agentId;
+          return Promise.reject(
+            new Error("Injected first Session open failure"),
+          );
+        }
+        const opened = await parent.control.open(agentId, signal);
+        return {
+          ...opened,
+          agent: {
+            ...opened.agent,
+            createSession: (requestId) => {
+              if (failNextSessionOpen) {
+                failNextSessionOpen = false;
+                return Promise.reject(
+                  new Error("Injected Session creation failure"),
+                );
+              }
+              return opened.agent.createSession(requestId);
+            },
+          },
+        };
+      },
+    });
     if (localTools.tools.sources === undefined)
       throw new Error("Local tools did not compose Agent control");
     const runtime = await Mycelium.make({
@@ -1525,38 +1575,87 @@ it("joins project Agent ownership to real Local Shiitake control", async () => {
         },
       ]);
 
+      const createdAgentSchema = agentsSchema.element.extend({
+        sessionId: z.string().min(1),
+      });
+      failNextOpen = true;
+      await expect(
+        executeSource(
+          runtime,
+          'return agents.create({ requestId: "model-agent-create" })',
+        ),
+      ).rejects.toThrow();
+      expect(failedOpenAgentId).toBeDefined();
+      // Create committed before open failed: the same request must recover that
+      // exact durable identity, not create another Agent or invent a Session.
+      const committedStore = await resolvePrivateLocalCreateStore(
+        await realpath(root),
+        "model-agent-create",
+        { agentId: "agent-parent", sessionId: "creator-session" },
+      );
+      expect(committedStore.agentId).toBe(failedOpenAgentId);
+      expect(
+        agentsSchema.parse(
+          await executeSource(runtime, "return agents.list({})"),
+        ),
+      ).toContainEqual(
+        expect.objectContaining({ agentId: committedStore.agentId }),
+      );
+      const beforeRecovery = await directory.open(
+        committedStore.agentId,
+        new AbortController().signal,
+      );
+      try {
+        expect((await beforeRecovery.agent.listSessions()).sessions).toEqual(
+          [],
+        );
+      } finally {
+        await beforeRecovery.release();
+      }
+      failNextSessionOpen = true;
+      await expect(
+        executeSource(
+          runtime,
+          'return agents.create({ requestId: "model-agent-create" })',
+        ),
+      ).rejects.toThrow();
+      expect(failNextSessionOpen).toBe(false);
       const created = z
         .strictObject({
-          agent: agentsSchema.element,
-          session: z.strictObject({ sessionId: z.string().min(1) }),
+          agent: createdAgentSchema,
           accepted: acceptedSchema,
         })
         .parse(
           await executeSource(
             runtime,
-            'const agent = await agents.create({ requestId: "model-agent-create" }); const session = await agents.createSession({ agentId: agent.agentId, requestId: "model-session-create" }); const accepted = await agents.send({ agentId: agent.agentId, sessionId: session.sessionId, requestId: "child-first", text: "Work on the new goal", delivery: "followUp" }); return { agent, session, accepted }',
+            'const agent = await agents.create({ requestId: "model-agent-create" }); const accepted = await agents.send({ agentId: agent.agentId, sessionId: agent.sessionId, requestId: "child-first", text: "Work on the new goal", delivery: "steer" }); return { agent, accepted }',
           ),
         );
+      expect(created.agent.agentId).toBe(committedStore.agentId);
       await expect(
         executeSource(
           runtime,
           `return agents.create({ requestId: ${JSON.stringify("é".repeat(200))} })`,
         ),
       ).rejects.toThrow();
-      const replayed = z
-        .strictObject({
-          agent: agentsSchema.element,
-          session: z.strictObject({ sessionId: z.string().min(1) }),
-        })
-        .parse(
-          await executeSource(
-            runtime,
-            'const agent = await agents.create({ requestId: "model-agent-create" }); const session = await agents.createSession({ agentId: agent.agentId, requestId: "model-session-create" }); return { agent, session }',
-          ),
-        );
-      expect(replayed).toEqual({
-        agent: created.agent,
-        session: created.session,
+      const replayed = createdAgentSchema.parse(
+        await executeSource(
+          runtime,
+          'return agents.create({ requestId: "model-agent-create" })',
+        ),
+      );
+      expect(replayed).toEqual(created.agent);
+      const childTerminal = terminalSchema.parse(
+        await executeSource(
+          runtime,
+          `return agents.wait({ agentId: ${JSON.stringify(created.agent.agentId)}, sessionId: ${JSON.stringify(created.agent.sessionId)}, commandId: ${JSON.stringify(created.accepted.commandId)}, timeoutMs: 5000 })`,
+        ),
+      );
+      expect(childTerminal).toEqual({
+        commandId: created.accepted.commandId,
+        outcome: "completed",
+        text: "B reply",
+        truncated: false,
       });
       expect(
         agentsSchema.parse(
@@ -1578,7 +1677,7 @@ it("joins project Agent ownership to real Local Shiitake control", async () => {
           (await childOpened.agent.listSessions()).sessions.map(
             ({ sessionId }) => sessionId,
           ),
-        ).toContain(created.session.sessionId);
+        ).toEqual([created.agent.sessionId]);
       } finally {
         await childOpened.release();
       }
@@ -1589,10 +1688,10 @@ it("joins project Agent ownership to real Local Shiitake control", async () => {
       const selectedChild = await owners.select({
         invocationRoot: root,
         databasePath: childStore.databasePath,
-        sessionId: created.session.sessionId,
+        sessionId: created.agent.sessionId,
       });
       expect(selectedChild.session.address).toContain(
-        `/sessions/${created.session.sessionId}`,
+        `/sessions/${created.agent.sessionId}`,
       );
     } finally {
       releaseFirstA.resolve(undefined);

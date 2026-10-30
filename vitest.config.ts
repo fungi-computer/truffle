@@ -7,6 +7,7 @@ export default defineConfig({
       "**/.botanical/**",
       "**/.pnpm-store/**",
       "**/*.bun.test.{ts,mjs}",
+      "**/*.native.test.ts",
     ],
   },
 });

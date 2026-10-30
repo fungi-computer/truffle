@@ -142,6 +142,121 @@ function invocation(): InvocationContext {
   };
 }
 
+it("wait streams newly appended stdout and stderr before the process exits", async () => {
+  const { root, processes } = await fixture("live-wait");
+  const computer = await computerFor(root, processes);
+  const stdout: Uint8Array[] = [];
+  const stderr: Uint8Array[] = [];
+  const live = Promise.withResolvers<"output">();
+  const context: InvocationContext = {
+    ...invocation(),
+    output: {
+      write: (stream, bytes) => {
+        (stream === "stdout" ? stdout : stderr).push(bytes.slice());
+        if (stdout.length > 0 && stderr.length > 0) live.resolve("output");
+      },
+    },
+  };
+  const started = z.object({ process: z.object({ id: z.string() }) }).parse(
+    await computer.call(
+      "exec",
+      {
+        operation: "start",
+        command:
+          "sleep 0.1; for i in 1 2 3; do echo $i; echo e$i >&2; sleep 0.2; done",
+      },
+      context,
+    ),
+  );
+  expect(stdout).toEqual([]);
+  expect(stderr).toEqual([]);
+  const id = started.process.id;
+  const waiting = computer.call(
+    "exec",
+    { operation: "wait", id, timeoutMs: 5_000 },
+    context,
+  );
+  try {
+    expect(
+      await Promise.race([live.promise, waiting.then(() => "terminal")]),
+    ).toBe("output");
+    expect(processes.scope("session-a").status(id).state).toBe("running");
+  } finally {
+    await waiting;
+  }
+  expect(Buffer.concat(stdout).toString()).toBe("1\n2\n3\n");
+  expect(Buffer.concat(stderr).toString()).toBe("e1\ne2\ne3\n");
+  const result = await waiting;
+  expect(result).toMatchObject({
+    process: { state: "exited", exitCode: 0, logBytes: 15 },
+    timedOut: false,
+    complete: true,
+    nextOffset: 15,
+  });
+  const calls = stdout.length + stderr.length;
+  // An exited wait/poll is still a log read, not a replay into the live sink.
+  expect(
+    await computer.call("exec", { operation: "wait", id }, context),
+  ).toEqual(result);
+  expect(
+    await computer.call("exec", { operation: "poll", id }, context),
+  ).toEqual(result);
+  expect(stdout.length + stderr.length).toBe(calls);
+});
+
+it.each(["timeout", "cancel"] as const)(
+  "wait detaches its sink after %s without killing the process",
+  async (ending) => {
+    const { root, processes } = await fixture(`live-wait-${ending}`);
+    const computer = await computerFor(root, processes);
+    const started = z.object({ process: z.object({ id: z.string() }) }).parse(
+      await computer.call(
+        "exec",
+        {
+          operation: "start",
+          command:
+            "while [ ! -f release ]; do sleep 0.01; done; echo after-wait",
+        },
+        invocation(),
+      ),
+    );
+    const controller = new AbortController();
+    const chunks: Uint8Array[] = [];
+    const waiting = computer.call(
+      "exec",
+      {
+        operation: "wait",
+        id: started.process.id,
+        timeoutMs: ending === "timeout" ? 30 : 5_000,
+      },
+      {
+        ...invocation(),
+        signal: controller.signal,
+        output: { write: (_stream, bytes) => chunks.push(bytes.slice()) },
+      },
+    );
+    if (ending === "cancel") {
+      controller.abort();
+      await expect(waiting).rejects.toThrow();
+    } else {
+      expect(await waiting).toMatchObject({
+        timedOut: true,
+        process: { state: "running" },
+      });
+    }
+    expect(processes.running()).toBe(true);
+    await writeFile(join(root, "release"), "");
+    expect(
+      await computer.call(
+        "exec",
+        { operation: "wait", id: started.process.id, timeoutMs: 5_000 },
+        invocation(),
+      ),
+    ).toMatchObject({ text: "after-wait\n", complete: true });
+    expect(chunks).toEqual([]);
+  },
+);
+
 const processSchema = z.looseObject({
   id: z.string(),
   state: z.enum(["running", "exited"]),

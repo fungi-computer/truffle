@@ -59,7 +59,9 @@ async function execute(code) {
     const parts = await Effect.runPromise(
       Stream.runCollect(prepared.execute()),
     );
-    const [part] = resultSchema.parse(parts);
+    const [part] = resultSchema.parse(
+      parts.filter((value) => value.type === "result"),
+    );
     return JSON.parse(part.result.content[0].text);
   } finally {
     await lease.release();

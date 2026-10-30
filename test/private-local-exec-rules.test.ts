@@ -229,6 +229,28 @@ it("extension installs never offer a persistent prefix", () => {
   ).toBeUndefined();
 });
 
+it("a project-directory Fungi grant cannot cover an extension install", async () => {
+  const root = await mkdtemp(join(tmpdir(), "fungi-rule-extension-cwd-"));
+  cleanups.push(() => rm(root, { recursive: true, force: true }));
+  const rules = localExecRules(root);
+  rules.add(["fungi", "-C"]);
+  expect(
+    rules.match([
+      "fungi",
+      "-C",
+      root,
+      "sessions",
+      "status",
+      "--last",
+      "--json",
+    ]),
+  ).toBeDefined();
+  const install = ["fungi", "-C", root, "extension", "add", "./ext"];
+  expect(rules.match(install)).toBeUndefined();
+  expect(rulePrefix(install)).toBeUndefined();
+  expect(manageLocalExecRules(root, "list")).toEqual([["fungi", "-C"]]);
+});
+
 it("a human's project git prefix applies to a second Agent, not another project; removing it restores the ask", async () => {
   const a = await mkdtemp(join(tmpdir(), "fungi-rule-a-"));
   const b = await mkdtemp(join(tmpdir(), "fungi-rule-b-"));

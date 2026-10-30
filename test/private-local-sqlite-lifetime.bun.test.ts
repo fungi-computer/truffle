@@ -115,7 +115,7 @@ test.skipIf(process.platform !== "linux")(
             body: JSON.stringify(payload),
           };
         const response = await fetch(`${base}${path}`, options);
-        expect(response.ok).toBe(true);
+        expect(response.ok, await response.clone().text()).toBe(true);
         return response.status === 204 ? undefined : response.json();
       }
       const selections: z.infer<typeof selectedSchema>[] = [];
@@ -137,7 +137,7 @@ test.skipIf(process.platform !== "linux")(
           await call("/select", {
             invocationRoot: project,
             databasePath: path,
-            clientPath: process.env.PATH,
+            clientPath: "/usr/bin:/bin",
           }),
         );
         await call(
@@ -195,7 +195,10 @@ test.skipIf(process.platform !== "linux")(
       }
       const paths = selections.map((selected) => selected.databasePath);
       const sidecars = paths.map((path) => `${path}.owner.sqlite`);
-      const manager = createPrivateLocalServiceManager({ directory });
+      const manager = createPrivateLocalServiceManager({
+        directory,
+        executionPath: "/usr/bin:/bin",
+      });
       // A Session's first projection read starts the sub-agents roster's
       // background refresh, whose Agent listing opens each store read-only.
       // Its connection closes before the refresh publishes the roster, so wait

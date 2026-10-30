@@ -116,7 +116,7 @@ test("a skills-only extension with no ./host is optional, then switches off and 
       await skillFile(work, "closer");
     },
   );
-  const installed = await owner.add(source);
+  const installed = await owner.add(source, project);
   expect([...installed.skills].sort()).toEqual(["closer", "greeter"]);
   expect(installed.capabilities).toEqual([]);
 
@@ -190,7 +190,7 @@ test("skills source reads from its selected home after ambient HOME changes", as
 
 test("an extension that ships no skills refuses the skills opt-in", async () => {
   const source = await publish("plain", {}, () => undefined);
-  await owner.add(source);
+  await owner.add(source, project);
   const refusal = await owner
     .enableAgentSkills(agent, "plain")
     .catch((cause: unknown) => cause);
@@ -205,7 +205,9 @@ test("Install-path containment: a skills path that escapes the package is refuse
     { skills: "./../elsewhere" },
     () => undefined,
   );
-  const refusal = await owner.add(dotdot).catch((cause: unknown) => cause);
+  const refusal = await owner
+    .add(dotdot, project)
+    .catch((cause: unknown) => cause);
   expect(refusal).toBeInstanceOf(LocalExtensionError);
   expect(refusal).toMatchObject({ reason: "manifest" });
 
@@ -224,7 +226,7 @@ test("Install-path containment: a skills path that escapes the package is refuse
   );
   // Bun may drop or keep the link; either way the package is refused.
   const linkedRefusal = await owner
-    .add(linked)
+    .add(linked, project)
     .catch((cause: unknown) => cause);
   expect(linkedRefusal).toBeInstanceOf(LocalExtensionError);
   expect(await owner.list()).toEqual([]);
@@ -243,7 +245,7 @@ test("Opting into an extension's skills is not holding its tools: a skills-only 
     },
     { "./host": "./host.mjs" },
   );
-  await owner.add(source);
+  await owner.add(source, project);
   const target = join(project, ".fungi", "agents", "local_store_target");
   await mkdir(target, { recursive: true });
 

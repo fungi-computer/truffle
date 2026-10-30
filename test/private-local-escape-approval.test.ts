@@ -216,6 +216,11 @@ it("a real Workspace Agent runs a narrow rule without writing a ledger approval"
   ]);
   await writeFile(join(project, "tracked"), "approved\n");
   await execFile("git", ["-C", project, "add", "tracked"]);
+  await writeFile(
+    join(project, ".git", "hooks", "pre-commit"),
+    "#!/bin/sh\necho rule-stdout\necho rule-stderr >&2\nsleep 0.6\n",
+    { mode: 0o755 },
+  );
   localExecRules(project).add(["git", "commit"]);
   localExecRules(project).add(["git", "status"]);
   const nested = join(project, "nested");
@@ -280,7 +285,15 @@ it("a real Workspace Agent runs a narrow rule without writing a ledger approval"
         requestId: "narrow-rule-run",
       });
       let completed = false;
+      let liveRuleOutput = false;
       for await (const frame of watch.changes) {
+        if (frame.kind === "tool_output") {
+          liveRuleOutput ||= frame.toolOutput.some(
+            (output) =>
+              output.tail.includes("rule-stdout") &&
+              output.tail.includes("rule-stderr"),
+          );
+        }
         if (frame.kind !== "update") continue;
         const terminal = frame.terminals.find(
           (item) => item.commandId === accepted.commandId,
@@ -291,6 +304,7 @@ it("a real Workspace Agent runs a narrow rule without writing a ledger approval"
         break;
       }
       expect(completed).toBe(true);
+      expect(liveRuleOutput).toBe(true);
     } finally {
       await watch.close();
     }

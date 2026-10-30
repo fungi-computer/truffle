@@ -34,7 +34,10 @@ import {
   launchStdinSchema,
   maximumLaunchTextLength,
 } from "./private-local-exec-launch.js";
-import { privateLocalExecEnvironment } from "./private-local-exec-environment.js";
+import {
+  privateLocalExecEnvironment,
+  privateLocalExecEnvironmentInput,
+} from "./private-local-exec-environment.js";
 import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import type { SandboxCommand } from "./private-local-containment.js";
 import type { LocalPermissionMode } from "./private-local-permission-mode.js";
@@ -82,6 +85,7 @@ const runCommonFields = {
     .strictObject({ justification: z.string().min(1).max(2048) })
     .optional(),
   cwd: launchCwdSchema.optional(),
+  env: privateLocalExecEnvironmentInput.optional(),
   // Accepted up to the full invocation deadline and silently clamped to
   // maximumCommandTimeoutMs (see runCommandAtInvocationBoundary); rejecting
   // outright here would just trade one confusing failure for another.
@@ -201,6 +205,8 @@ export async function dispatchApprovedLocalExec(
   home: string,
   processes: PrivateLocalProcessScope,
   mode: LocalPermissionMode,
+  /** Only inline rule matches have a live execute sink; ledger dispatch does not. */
+  sink?: InvocationContext["output"],
 ): Promise<ExecOutput | z.output<typeof backgroundExecOutput>> {
   const request = shellInput.parse(input);
   if (request.operation === "run") {
@@ -210,6 +216,8 @@ export async function dispatchApprovedLocalExec(
       executionPath,
       home,
       new AbortController().signal,
+      undefined,
+      sink,
     );
     return execOutput.parse({
       ...result,
@@ -499,10 +507,20 @@ function nativeGroupFinalizer(process: ChildProcessSpawner.ChildProcessHandle) {
   );
 }
 
-function captureBoundedOutput<E, R>(stream: Stream.Stream<Uint8Array, E, R>) {
+function captureBoundedOutput<E, R>(
+  stream: Stream.Stream<Uint8Array, E, R>,
+  name: "stdout" | "stderr",
+  output: InvocationContext["output"],
+) {
   const initial: BoundedOutput = { chunks: [], byteLength: 0, totalBytes: 0 };
   return Stream.runFold(
-    stream,
+    output === undefined
+      ? stream
+      : Stream.tap(stream, (bytes) =>
+          Effect.sync(() => {
+            output.write(name, bytes);
+          }),
+        ),
     () => initial,
     (captured, chunk) => {
       const remaining = keptStreamBytes - captured.byteLength;
@@ -609,11 +627,15 @@ function buildRunCommand(
   home: string,
   sandbox?: LocalSandboxLaunch,
 ): ChildProcess.Command {
-  const env = privateLocalExecEnvironment(executionPath, {
-    HOME: home,
-    XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
-    DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS,
-  });
+  const env = privateLocalExecEnvironment(
+    executionPath,
+    {
+      HOME: home,
+      XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+      DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS,
+    },
+    request.env,
+  );
   // Effect's own default stdin is an open "pipe" that nothing closes, so an
   // executable that reads stdin (`cat`, `python3 -`) would otherwise hang
   // for the full timeout. "ignore" gives it immediate EOF, matching the
@@ -673,6 +695,7 @@ async function runCommandAtInvocationBoundary(
   home: string,
   signal: AbortSignal,
   sandbox?: LocalSandboxLaunch,
+  output?: InvocationContext["output"],
 ): Promise<ProcessOutput> {
   const processCommand = buildRunCommand(
     request,
@@ -691,6 +714,7 @@ async function runCommandAtInvocationBoundary(
         requestedMs: request.timeoutMs,
         describeCommand: () => describeRunRequest(request),
       },
+      output,
     );
   } catch (cause) {
     // Spawning the direct form's named executable can fail at the OS level
@@ -723,6 +747,7 @@ export function runPrivateInvocationProcess(
     /** The real command text, for the timeout message; omitted when not meaningful (e.g. a native helper). */
     describeCommand?: () => string;
   }>,
+  output?: InvocationContext["output"],
 ): Promise<ProcessOutput> {
   return Effect.runPromise(
     Effect.scoped(
@@ -740,10 +765,10 @@ export function runPrivateInvocationProcess(
         // Keep both readers alive when the exit wait times out. Killing and
         // reaping the owned group closes the pipes, preserving bounded output.
         const stdoutFiber = yield* Effect.forkChild(
-          captureBoundedOutput(process.stdout),
+          captureBoundedOutput(process.stdout, "stdout", output),
         );
         const stderrFiber = yield* Effect.forkChild(
-          captureBoundedOutput(process.stderr),
+          captureBoundedOutput(process.stderr, "stderr", output),
         );
         const exited = yield* timeoutMs === undefined
           ? Effect.map(process.exitCode, Option.some)
@@ -805,6 +830,7 @@ async function execute(
     home,
     context.signal,
     sandbox,
+    context.output,
   );
   return execOutput.parse({
     ...result,
@@ -937,6 +963,7 @@ export async function createPrivateInvocationComputer(
           path,
           context.signal,
           sandbox,
+          context.output,
         );
         return jsonValueSchema.parse(
           "text" in output

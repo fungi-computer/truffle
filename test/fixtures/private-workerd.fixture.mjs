@@ -64,7 +64,9 @@ export async function observeExecution(lease, code, parts, signal) {
 }
 
 function parseExecutionResult(parts) {
-  const [part] = executionResultSchema.parse(parts);
+  const [part] = executionResultSchema.parse(
+    parts.filter((value) => value.type === "result"),
+  );
   const [content] = part.result.content;
   return JSON.parse(content.text);
 }

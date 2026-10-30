@@ -16,11 +16,15 @@ import {
   launchStdinSchema,
   maximumLaunchTextLength,
 } from "./private-local-exec-launch.js";
-import { privateLocalExecEnvironment } from "./private-local-exec-environment.js";
+import {
+  privateLocalExecEnvironment,
+  privateLocalExecEnvironmentInput,
+} from "./private-local-exec-environment.js";
 import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import { Writable } from "node:stream";
 import type { SandboxCommand } from "./private-local-containment.js";
 import type { LocalSandboxLaunch } from "./private-invocation-computer.js";
+import type { InvocationContext } from "@fungi.computer/mycelium";
 
 /**
  * Background processes of the local Computer: the one owner of "a command that
@@ -87,6 +91,7 @@ const shellStartInput = z.strictObject({
     .optional(),
   command: z.string().min(1).max(maximumLaunchTextLength),
   stdin: launchStdinSchema.optional(),
+  env: privateLocalExecEnvironmentInput.optional(),
   cwd: launchCwdSchema.optional(),
 });
 /** The direct form of background `start`: argv run with no shell interpretation. */
@@ -99,6 +104,7 @@ const directStartInput = z
     executable: z.string().min(1),
     args: z.array(z.string()).default([]),
     stdin: launchStdinSchema.optional(),
+    env: privateLocalExecEnvironmentInput.optional(),
     cwd: launchCwdSchema.optional(),
   })
   .refine(
@@ -202,30 +208,31 @@ export type PrivateLocalProcessCommandSpec = Readonly<
       readonly kind: "shell";
       readonly command: string;
       readonly stdin?: string;
+      readonly env?: Readonly<Record<string, string>>;
     }
   | {
       readonly kind: "direct";
       readonly executable: string;
       readonly args: readonly string[];
       readonly stdin?: string;
+      readonly env?: Readonly<Record<string, string>>;
     }
 >;
 
 function toCommandSpec(
   request: z.output<typeof shellStartInput> | z.output<typeof directStartInput>,
 ): PrivateLocalProcessCommandSpec {
-  if ("command" in request) {
-    const spec = { kind: "shell" as const, command: request.command };
-    return request.stdin === undefined
-      ? spec
-      : { ...spec, stdin: request.stdin };
-  }
-  const spec = {
-    kind: "direct" as const,
-    executable: request.executable,
-    args: request.args,
-  };
-  return request.stdin === undefined ? spec : { ...spec, stdin: request.stdin };
+  let spec: PrivateLocalProcessCommandSpec =
+    "command" in request
+      ? { kind: "shell", command: request.command }
+      : {
+          kind: "direct",
+          executable: request.executable,
+          args: request.args,
+        };
+  if (request.stdin !== undefined) spec = { ...spec, stdin: request.stdin };
+  if (request.env !== undefined) spec = { ...spec, env: request.env };
+  return spec;
 }
 
 /**
@@ -271,6 +278,7 @@ class ManagedProcess {
   #signal: string | null = null;
   #endedAt: number | null = null;
   #leaderExited = false;
+  #output = new Map<NonNullable<InvocationContext["output"]>, number>();
 
   readonly command: string;
 
@@ -287,11 +295,15 @@ class ManagedProcess {
     this.#fd = openSync(this.logPath, "wx+", 0o600);
     const closed = Promise.withResolvers<undefined>();
     this.closed = closed.promise;
-    const env = privateLocalExecEnvironment(executionPath, {
-      HOME: home,
-      XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
-      DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS,
-    });
+    const env = privateLocalExecEnvironment(
+      executionPath,
+      {
+        HOME: home,
+        XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR,
+        DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS,
+      },
+      spec.env,
+    );
     if (launch !== undefined) {
       delete env.XDG_RUNTIME_DIR;
       delete env.DBUS_SESSION_BUS_ADDRESS;
@@ -366,11 +378,12 @@ class ManagedProcess {
       pid !== undefined && Number.isSafeInteger(pid) && pid > 1
         ? pid
         : undefined;
-    const append = (chunk: Buffer) => {
-      this.#append(chunk);
-    };
-    this.#child.stdout?.on("data", append);
-    this.#child.stderr?.on("data", append);
+    this.#child.stdout?.on("data", (chunk: Buffer) => {
+      this.#append(chunk, "stdout");
+    });
+    this.#child.stderr?.on("data", (chunk: Buffer) => {
+      this.#append(chunk, "stderr");
+    });
     this.#child.on("error", (error) => {
       this.#append(
         Buffer.from(`\n[fungi: process failed: ${error.message}]\n`),
@@ -397,7 +410,7 @@ class ManagedProcess {
     return this.#endedAt === null;
   }
 
-  #append(chunk: Uint8Array) {
+  #append(chunk: Uint8Array, stream: "stdout" | "stderr" = "stderr") {
     const fd = this.#fd;
     if (fd === undefined) return;
     // Circular storage retains the latest bytes without growing the log or
@@ -411,6 +424,19 @@ class ManagedProcess {
       writeSync(fd, kept, first, kept.byteLength - first, 0);
     this.#logBytes += chunk.byteLength;
     this.#logTruncated = this.#logBytes > maximumLogBytes;
+    for (const output of this.#output.keys()) output.write(stream, chunk);
+  }
+
+  /** Observe only new chunks during this wait; no extra pipe reader or replay. */
+  observeOutput(output: InvocationContext["output"]) {
+    if (output !== undefined)
+      this.#output.set(output, (this.#output.get(output) ?? 0) + 1);
+    return () => {
+      if (output === undefined) return;
+      const remaining = (this.#output.get(output) ?? 1) - 1;
+      if (remaining === 0) this.#output.delete(output);
+      else this.#output.set(output, remaining);
+    };
   }
 
   /** Read atomically with appends, including a wrap in circular storage. */
@@ -527,6 +553,7 @@ export type PrivateLocalProcessScope = Readonly<{
     id: string,
     timeoutMs: number,
     signal: AbortSignal,
+    output?: InvocationContext["output"],
   ) => Promise<z.output<typeof waitOutput>>;
   kill: (id: string) => Promise<z.output<typeof killOutput>>;
 }>;
@@ -629,8 +656,10 @@ export function createPrivateLocalComputerProcesses(
         [...(scopes.get(key)?.values() ?? [])].map((r) => r.snapshot()),
       read: (id, offset, maxBytes) =>
         Promise.resolve(find(id).read(offset, maxBytes)),
-      wait: async (id, timeoutMs, signal) => {
+      wait: async (id, timeoutMs, signal, output) => {
+        signal.throwIfAborted();
         const record = find(id);
+        const stopOutput = record.observeOutput(output);
         const controller = new AbortController();
         const abandon = () => {
           controller.abort();
@@ -643,6 +672,7 @@ export function createPrivateLocalComputerProcesses(
           ]);
           return waitOutput.parse({ process: record.snapshot(), timedOut });
         } finally {
+          stopOutput();
           signal.removeEventListener("abort", abandon);
           controller.abort();
         }
@@ -721,6 +751,7 @@ export async function callBackgroundExec(
   executionPath: string,
   signal: AbortSignal,
   sandbox?: LocalSandboxLaunch,
+  sink?: InvocationContext["output"],
 ): Promise<z.output<typeof backgroundExecOutput>> {
   signal.throwIfAborted();
   if (request.operation === "list") return { processes: [...scope.list()] };
@@ -738,7 +769,8 @@ export async function callBackgroundExec(
     }
     case "wait":
       id = request.id;
-      timedOut = (await scope.wait(id, request.timeoutMs, signal)).timedOut;
+      timedOut = (await scope.wait(id, request.timeoutMs, signal, sink))
+        .timedOut;
       break;
     case "kill":
       id = request.id;

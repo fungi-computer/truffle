@@ -104,7 +104,7 @@ it("does not stop the current service on every invocation of a markerless home",
       version: z.string(),
     })
     .parse(JSON.parse(await readFile(recordPath, "utf8")));
-  record.protocol = 4;
+  record.protocol = 5;
   record.version = privateLocalServiceVersion();
   record.baseUrl = "http://127.0.0.1:12345/";
   delete record.endpoint;

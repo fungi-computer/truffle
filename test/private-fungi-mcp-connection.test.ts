@@ -143,6 +143,13 @@ it.each([false, true])(
           expect(() => lease.catalog.describe({ path })).toThrow(
             `Unknown target: ${path}`,
           );
+        const remoteExecute = lease.catalog.describe({
+          path: "fungiMcp.execute",
+        });
+        expect(remoteExecute.kind).toBe("operation");
+        expect(remoteExecute.description).toContain(
+          "The following discovery instructions apply inside that remote call, not the outer Local call. Inside execute, call forage.search, forage.list or forage.describe",
+        );
         expect(() => lease.catalog.describe({ path: "home.exec" })).toThrow(
           "Unknown target: home.exec",
         );

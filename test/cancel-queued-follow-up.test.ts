@@ -114,7 +114,11 @@ it.each(["followUp", "steer"] as const)(
         { timeout: 2_000, interval: 10 },
       );
       expect(faux.state.callCount).toBe(3);
-      expect((await session.read()).activity.queue.state).toBe("idle");
+      // The Session terminal is durable before Watchdog finishes settling its
+      // running claim; observe the eventual idle state without another wake.
+      await vi.waitFor(async () => {
+        expect((await session.read()).activity.queue.state).toBe("idle");
+      });
     } finally {
       cancelled.resolve();
       cleanup.resolve();

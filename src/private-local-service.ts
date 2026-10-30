@@ -1,5 +1,12 @@
 import { FungiMcpSelectionConflict } from "./private-fungi-mcp-selection.js";
 import { logEvent } from "./log-event.js";
+import { createPrivateLocalScheduleCapability } from "./private-local-schedule-client.js";
+export type { PrivateLocalScheduleCapability } from "./private-local-schedule-client.js";
+export type {
+  AgentScheduleRow,
+  AgentScheduleTarget,
+} from "@fungi.computer/shiitake-extensions/schedules";
+export type { LocalSchedulePage } from "./private-local-schedules.js";
 import { readBoundedResponse } from "./private-bounded-response.js";
 import {
   LocalSandboxUnavailable,
@@ -719,6 +726,8 @@ export function createPrivateLocalServiceManager(
     snapshot: z.unknown(),
   });
   return {
+    schedules: (invocationRoot) =>
+      createPrivateLocalScheduleCapability(invocationRoot, start),
     status,
     start,
     createSession: (creation, request) =>

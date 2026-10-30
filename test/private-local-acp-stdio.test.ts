@@ -41,6 +41,9 @@ it("advertises terminal login and lists project Sessions through Local discovery
   const agent = createPrivateLocalAcpAgent({
     invocationRoot: "/workspace",
     manager: {
+      schedules: () => {
+        throw new Error("Unexpected schedule capability");
+      },
       reload: unused,
       status: unused,
       start: unused,

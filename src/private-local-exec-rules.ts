@@ -9,6 +9,37 @@ import {
 import { basename, join } from "node:path";
 import { correlationKey, defineIdFamily } from "@fungi.computer/cairn";
 import { z } from "zod";
+import type { ParseEntry } from "shell-quote";
+
+function fungiWord(word: ParseEntry | undefined): boolean {
+  const parsed = z.string().safeParse(word);
+  return parsed.success && basename(parsed.data) === "fungi";
+}
+
+/**
+ * Conservative literal risk, not CLI parsing or executable identity. Global
+ * options can occur among positionals. Shell tokens may disclose risk, but
+ * only actual direct argv ever reaches the reusable-grant matcher.
+ */
+export function hasExtensionInstallRisk(
+  words: readonly ParseEntry[],
+  form: "direct" | "shell",
+): boolean {
+  const executable =
+    form === "direct"
+      ? fungiWord(words[0])
+        ? 0
+        : -1
+      : words.findIndex(fungiWord);
+  if (executable < 0) return false;
+  const extension = words.findIndex(
+    (word, index) => index > executable && word === "extension",
+  );
+  return (
+    extension >= 0 &&
+    words.some((word, index) => index > extension && word === "add")
+  );
+}
 
 const prefixSchema = z.array(z.string().min(1).max(4096)).min(1).max(32);
 const projectRuleIds = defineIdFamily({
@@ -294,12 +325,7 @@ export function rulePrefix(
       ? prefix
       : undefined;
   }
-  if (
-    basename(argv[0] ?? "") === "fungi" &&
-    argv[1] === "extension" &&
-    argv[2] === "add"
-  )
-    return undefined;
+  if (hasExtensionInstallRisk(argv, "direct")) return undefined;
   const parsed = prefixSchema.safeParse(argv.slice(0, 2));
   return parsed.success && validPrefix(parsed.data) ? parsed.data : undefined;
 }
@@ -472,9 +498,7 @@ export function localExecRules(project: string) {
   ) => {
     if (
       unsafeExecutable(argv[0] ?? "") ||
-      (basename(argv[0] ?? "") === "fungi" &&
-        argv[1] === "extension" &&
-        argv[2] === "add")
+      hasExtensionInstallRisk(argv, "direct")
     )
       return undefined;
     if (argv[0] === "git" && !safeGitCommand(argv, configuredRemotes))
