@@ -97,7 +97,7 @@ import {
   settlementReadableBy,
 } from "@fungi.computer/shiitake/fleet";
 import { BirdDogMailSchema } from "@fungi.computer/bird-dog/effect";
-import { controlAgentScheduleWithContent } from "@fungi.computer/shiitake-extensions/schedules";
+import { controlAgentScheduleWithContent } from "@fungi.computer/shiitake-extensions/schedules/client";
 import {
   localScheduleControlInputSchema,
   localScheduleListInputSchema,

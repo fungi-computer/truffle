@@ -4,8 +4,8 @@ import {
   agentScheduleListInputSchema,
   agentSchedulePageSchema,
   agentScheduleTargetSchema,
-  readAgentSchedulePage,
 } from "@fungi.computer/shiitake-extensions/schedules";
+import { readAgentSchedulePage } from "@fungi.computer/shiitake-extensions/schedules/client";
 import type { ShiitakeAgent } from "@fungi.computer/shiitake";
 import { logEvent } from "./log-event.js";
 

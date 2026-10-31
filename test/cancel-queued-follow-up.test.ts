@@ -2,6 +2,7 @@ import { fauxModel } from "@fungi.computer/mule/testing";
 import { DatabaseSync } from "node:sqlite";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { Shiitake } from "@fungi.computer/shiitake";
+import { runFinalizerGraceMs } from "@fungi.computer/shiitake/testing";
 import { expect, it, vi } from "vitest";
 import { createPrivateLocalRuntimeHost } from "../src/private-local-runtime-host.js";
 import { createPrivateSqliteOwner } from "../src/private-sqlite-owner.js";
@@ -13,6 +14,10 @@ function deferred() {
   });
   return { promise, resolve };
 }
+
+// The run's last foreign release may consume its whole grace. Leave one
+// event-loop/scheduler window after that for Watchdog to settle the claim.
+const queueSettlementMarginMs = 1_000;
 
 it.each(["followUp", "steer"] as const)(
   "runs a queued %s after cancelling only the active command without another submission or manual wake",
@@ -116,9 +121,15 @@ it.each(["followUp", "steer"] as const)(
       expect(faux.state.callCount).toBe(3);
       // The Session terminal is durable before Watchdog finishes settling its
       // running claim; observe the eventual idle state without another wake.
-      await vi.waitFor(async () => {
-        expect((await session.read()).activity.queue.state).toBe("idle");
-      });
+      await vi.waitFor(
+        async () => {
+          expect((await session.read()).activity.queue.state).toBe("idle");
+        },
+        {
+          timeout: runFinalizerGraceMs + queueSettlementMarginMs,
+          interval: 10,
+        },
+      );
     } finally {
       cancelled.resolve();
       cleanup.resolve();

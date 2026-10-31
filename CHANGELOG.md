@@ -1,5 +1,31 @@
 # @fungi.computer/truffle
 
+## 0.7.0
+
+### Minor Changes
+
+- Changes since 0.6.0:
+
+  - fix(shiitake): retain Mule recorder failure cause in local diagnostics
+  - fix(shiitake): bound finalizer settlement wait by its grace
+  - feat(trellis): finish connection-bound schedules consumer
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/nacre@0.1.2
+  - @fungi.computer/shiitake-extensions@0.6.0
+  - @fungi.computer/shiitake@0.8.0
+  - @fungi.computer/veil@0.3.0
+  - @fungi.computer/agar@0.6.1
+  - @fungi.computer/mycelium@0.3.1
+  - @fungi.computer/graft@0.1.6
+  - @fungi.computer/zookeeper@0.0.7
+  - @fungi.computer/knapsack@0.4.2
+
 ## 0.6.0
 
 ### Minor Changes

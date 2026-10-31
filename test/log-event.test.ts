@@ -1,7 +1,10 @@
 import { inspect } from "node:util";
 import * as Redacted from "effect/Redacted";
 import { afterEach, expect, it, vi } from "vitest";
-import { logEvent } from "../src/log-event.js";
+import { ShiitakeError } from "@fungi.computer/shiitake";
+import { z } from "zod";
+import { localFailureMetadata, logEvent } from "../src/log-event.js";
+import { encodeServiceLogRecord } from "../src/private-local-service-log.js";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -38,3 +41,78 @@ it.each([failure, marker])(
     ).not.toContain(marker);
   },
 );
+
+it("logs a recorder failure's typed cause, not its session content", () => {
+  const privateText = "private session content";
+  const native = Object.assign(new Error(privateText), {
+    code: "ERR_SQLITE_ERROR",
+    errcode: 5,
+  });
+  const store = new ShiitakeError(
+    "store",
+    "rejected",
+    "Native Session store operation failed",
+    undefined,
+    native,
+  );
+  const rejected = new ShiitakeError(
+    "runtime",
+    "rejected",
+    "Mule rejected the durable command run",
+    undefined,
+    {
+      _tag: "MuleError",
+      phase: "listener",
+      message: privateText,
+      cause: store,
+    },
+  );
+  const metadata = localFailureMetadata("service.request", rejected);
+  expect(metadata).toMatchObject({
+    failureKind: "Error",
+    recorderCause: "store:rejected",
+    sqliteCause: "busy",
+  });
+  expect(JSON.stringify(metadata)).not.toContain(privateText);
+  const line = encodeServiceLogRecord({
+    source: "local-service",
+    timestamp: "2026-10-30T19:07:11.000Z",
+    pid: 42,
+    version: "test",
+    event: "failure",
+    failure: metadata,
+  });
+  expect(JSON.parse(line)).toMatchObject({
+    event: "failure",
+    failure: { recorderCause: "store:rejected", sqliteCause: "busy" },
+  });
+  expect(line).not.toContain(privateText);
+  const report = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  logEvent("service.request", rejected);
+  const logged = z.string().parse(report.mock.calls[0]?.[0]);
+  expect(JSON.parse(logged)).toMatchObject({
+    recorderCause: "store:rejected",
+    sqliteCause: "busy",
+  });
+  expect(JSON.stringify(report.mock.calls)).not.toContain(privateText);
+
+  const conflict = new ShiitakeError("store", "conflict", privateText);
+  const retry = new ShiitakeError(
+    "runtime",
+    "rejected",
+    "Mule rejected the durable command run",
+    undefined,
+    {
+      _tag: "MuleError",
+      phase: "listener",
+      message: privateText,
+      cause: conflict,
+    },
+  );
+  expect(localFailureMetadata("service.request", retry)).toMatchObject({
+    recorderCause: "store:conflict",
+  });
+  expect(
+    JSON.stringify(localFailureMetadata("service.request", retry)),
+  ).not.toContain(privateText);
+});
