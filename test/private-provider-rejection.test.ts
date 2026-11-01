@@ -67,6 +67,14 @@ it("uses typed transport evidence even when Pi did not produce an assistant mess
   ).toBe("OpenAI is unavailable; try again shortly.");
 });
 
+it("keeps the HTTP status in a typed provider unavailability message", () => {
+  expect(
+    modelFailureMessage("openai", {
+      rejection: { code: "provider_unavailable", status: 503 },
+    }),
+  ).toBe("OpenAI is unavailable (HTTP 503); try again shortly.");
+});
+
 const retryCases: {
   rejection: ProviderRejection | undefined;
   expected: boolean;

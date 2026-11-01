@@ -53,8 +53,11 @@ export function modelFailureMessage(
     return `${name} rate limit reached; try again shortly.`;
   if (failure.rejection?.code === "overloaded")
     return `${name} is overloaded; try again shortly.`;
-  if (failure.rejection?.code === "provider_unavailable")
-    return `${name} is unavailable; try again shortly.`;
+  if (failure.rejection?.code === "provider_unavailable") {
+    const status = failure.rejection.status;
+    const http = status === undefined ? "" : ` (HTTP ${String(status)})`;
+    return `${name} is unavailable${http}; try again shortly.`;
+  }
   if (failure.upstream !== undefined) {
     if (isContextOverflow(failure.upstream))
       return `${name} request exceeds the context window; compact the Session or choose another model.`;

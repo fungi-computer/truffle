@@ -363,6 +363,39 @@ describe("archiving an Agent", () => {
     }
   });
 
+  it("the Local owner API archives a sub-agent-created Agent even after its creator is archived", async () => {
+    const local = await project();
+    try {
+      // The child belongs to the project, but its creator is an Agent, not the person.
+      await local.owners.archive(
+        { invocationRoot: local.folder, agentId: maker, archived: true },
+        signal(),
+      );
+      await local.owners.archive(
+        { invocationRoot: local.folder, agentId: child, archived: true },
+        signal(),
+      );
+      expect(await local.ids(true)).toEqual([child, maker]);
+      await local.owners.archive(
+        { invocationRoot: local.folder, agentId: child, archived: false },
+        signal(),
+      );
+      expect(await local.ids(false)).toEqual([child, other]);
+      await expect(
+        local.owners.archive(
+          {
+            invocationRoot: local.folder,
+            agentId: "outside-project",
+            archived: true,
+          },
+          signal(),
+        ),
+      ).rejects.toThrow("Agent is outside this Local project");
+    } finally {
+      await local.owners.close();
+    }
+  });
+
   it("Delegation to an archived Agent is refused, and discovery and newest-Session resolution skip it", async () => {
     const local = await project();
     try {

@@ -677,21 +677,29 @@ it("a created child sends followUp and steer back to its creator from delegated 
     expect(
       context.messages.findLast((message) => message.role === "toolResult"),
     ).toMatchObject({ isError: false });
-    const arrived = (snapshot: Pick<SessionSnapshot, "messages">) => {
-      const lines = snapshot.messages
+    const arrived = (messages: SessionSnapshot["messages"]) => {
+      const lines = messages
         .filter(({ value }) => value.role === "user")
         .map(({ value }) => JSON.stringify(value));
       return ["child-followUp-to-creator", "child-steer-to-creator"].every(
         (text) => lines.some((line) => line.includes(text)),
       );
     };
-    if (!arrived(watched.snapshot)) {
-      for await (const frame of watched.changes)
-        if (frame.kind === "update" && arrived(frame)) break;
+    // Each update frame carries only newly visible messages, and the two
+    // callbacks commit separately, so collect what the watch has shown.
+    const seen = [...watched.snapshot.messages];
+    if (!arrived(seen)) {
+      for await (const frame of watched.changes) {
+        if (frame.kind !== "update") continue;
+        seen.push(...frame.messages);
+        if (arrived(seen)) break;
+      }
     }
     // Observe the actual creator Session, not only the send receipts or the
     // child's model transcript. Both callback deliveries must have arrived.
-    expect(arrived(await local.parent.session.read({ limit: 100 }))).toBe(true);
+    expect(
+      arrived((await local.parent.session.read({ limit: 100 })).messages),
+    ).toBe(true);
     const child = await resolvePrivateLocalCreateStore(
       local.root,
       "creator-returner",

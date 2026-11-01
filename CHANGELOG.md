@@ -1,5 +1,24 @@
 # @fungi.computer/truffle
 
+## 0.7.1
+
+### Patch Changes
+
+- Changes since 0.7.0:
+
+  - fix(mule): classify observed provider failures for retry
+  - fix(agents): admit narrow owner archive authority
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/graft@0.2.0
+  - @fungi.computer/shiitake-extensions@0.6.1
+  - @fungi.computer/shiitake@0.9.0
+  - @fungi.computer/knapsack@0.4.3
+  - @fungi.computer/mycelium@0.3.2
+  - @fungi.computer/zookeeper@0.0.8
+
 ## 0.7.0
 
 ### Minor Changes
