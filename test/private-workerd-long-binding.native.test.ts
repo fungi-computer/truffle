@@ -1,17 +1,22 @@
-import {
-  execute,
-  openRuntime,
-  closeRuntime,
-  ownedWorkerdProcesses,
-} from "./fixtures/private-workerd.fixture.mjs";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 import { expect, it } from "vitest";
 import { z } from "zod";
 import { Mycelium } from "@fungi.computer/mycelium";
 import { createPrivateWorkerdSandbox } from "../dist/index.js";
+import {
+  execute,
+  openRuntime,
+  closeRuntime,
+  ownedWorkerdProcesses,
+} from "./fixtures/private-workerd.fixture.mjs";
+
+// codemode's DynamicWorkerExecutor defaults to a 60 s budget. The unit suite
+// proves the request's timeoutMs reaches the executor in about 2 s; this merge
+// qualification proves a real binding survives past that default end to end,
+// through Mycelium's deadline, the node:http dispatch and the workerd process.
 it("completes a binding beyond 60 seconds under the selected larger budget", async () => {
-  const events = [];
+  const events: { event: string; aborted: boolean }[] = [];
   const runtime = await openRuntime({
     execution: { timeoutMs: 120_007 },
     modules: [

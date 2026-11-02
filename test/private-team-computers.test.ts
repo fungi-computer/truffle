@@ -186,6 +186,54 @@ it("reports changing queue positions while one start waits, then confirms runnin
   );
 });
 
+it.each([
+  ["running", { state: "running" }],
+  ["start_failed", { state: "start_failed" }],
+] as const)(
+  "follows a start the Hub answered as queued until it is %s",
+  async (end, last) => {
+    const states: Parameters<
+      Parameters<typeof startPrivateTeamComputer>[2]["onState"]
+    >[0][] = [];
+    let polls = 0;
+    let starts = 0;
+    await withHub(
+      async (options) => {
+        const started = startPrivateTeamComputer(endpoint, "cedar", {
+          ...options,
+          onState: (state) => {
+            states.push(state);
+          },
+        });
+        if (end === "running")
+          expect(await started).toEqual({ computerId: "a", name: "cedar" });
+        else
+          await expect(started).rejects.toThrow("could not start. Try again");
+        expect(states).toEqual([
+          { state: "starting" },
+          { state: "queued", position: 1 },
+          { state: "starting" },
+          ...(end === "running" ? [last] : []),
+        ]);
+        expect(starts).toBe(1);
+      },
+      (code) => {
+        if (code.includes("computers.list"))
+          return {
+            computers: [{ computerId: "a", name: "cedar" }],
+            nextOffset: null,
+          };
+        if (code.includes("computers.start")) {
+          starts++;
+          return { state: "queued", position: 1 };
+        }
+        polls++;
+        return polls === 1 ? { state: "starting" } : last;
+      },
+    );
+  },
+);
+
 it("rejects malformed queue state and non-advancing pagination", async () => {
   await withHub(
     async (options) => {

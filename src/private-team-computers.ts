@@ -8,7 +8,9 @@ import {
 } from "./private-fungi-account.js";
 
 const stateSchema = z.discriminatedUnion("state", [
-  z.strictObject({ state: z.enum(["running", "sleeping", "starting"]) }),
+  z.strictObject({
+    state: z.enum(["running", "sleeping", "starting", "start_failed"]),
+  }),
   z.strictObject({
     state: z.literal("queued"),
     position: z.number().int().positive(),
@@ -151,28 +153,41 @@ export async function startPrivateTeamComputer(
     (state) => ({ state }),
     (error: unknown) => ({ error }),
   );
+  // A full host answers the start with its queue place; the Hub keeps that
+  // start and runs it when a slot frees, so watch the state until it runs.
+  let queued = false;
   try {
     for (;;) {
-      const outcome = await Promise.race([
-        completion,
-        delay(1_000, undefined, { signal }).then(() => undefined),
-      ]);
+      if (queued) await delay(1_000, undefined, { signal });
+      const outcome = queued
+        ? undefined
+        : await Promise.race([
+            completion,
+            delay(1_000, undefined, { signal }).then(() => undefined),
+          ]);
       if (outcome !== undefined) {
         if ("error" in outcome) throw outcome.error;
-        if (outcome.state.state !== "running")
+        if (outcome.state.state === "running") {
+          options.onState(outcome.state);
+          return computer;
+        }
+        if (outcome.state.state !== "queued")
           throw new Error("The Hub did not confirm that the Computer started.");
+        queued = true;
         options.onState(outcome.state);
-        return computer;
+        continue;
       }
-      options.onState(
-        await control(
-          endpoint,
-          "state",
-          { computerId: computer.computerId },
-          stateSchema,
-          { ...options, signal },
-        ),
+      const state = await control(
+        endpoint,
+        "state",
+        { computerId: computer.computerId },
+        stateSchema,
+        { ...options, signal },
       );
+      if (state.state === "start_failed")
+        throw new Error("The Computer could not start. Try again.");
+      options.onState(state);
+      if (queued && state.state === "running") return computer;
     }
   } finally {
     polling.abort();

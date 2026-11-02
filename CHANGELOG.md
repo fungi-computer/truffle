@@ -1,5 +1,28 @@
 # @fungi.computer/truffle
 
+## 0.7.2
+
+### Patch Changes
+
+- Changes since 0.7.1:
+
+  - fix(local): let macOS Workspace pnpm use its default store
+  - fix(hub): keep a queued Computer start until it runs or visibly fails
+  - perf(truffle): prove the executor deadline in 2 s; move 62 s survival to
+    merge
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.7.0
+  - @fungi.computer/nacre@0.1.3
+  - @fungi.computer/shiitake@0.9.1
+  - @fungi.computer/knapsack@0.4.4
+  - @fungi.computer/mycelium@0.3.3
+  - @fungi.computer/graft@0.2.1
+  - @fungi.computer/shiitake-extensions@0.6.2
+  - @fungi.computer/zookeeper@0.0.9
+
 ## 0.7.1
 
 ### Patch Changes

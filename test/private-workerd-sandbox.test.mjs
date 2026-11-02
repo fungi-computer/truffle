@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
 import { setImmediate } from "node:timers";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -1057,6 +1058,44 @@ it(
       ),
     ).resolves.toEqual(["deep", "flat", "legacy-flat"]);
     expect(calls).toEqual(["deep", "flat", "legacy-flat"]);
+  },
+  WORKERD_TEST_TIMEOUT_MS,
+);
+
+// codemode's DynamicWorkerExecutor defaults to a 60 s budget. A binding that
+// outlasts a 1 s request can only reach the executor's deadline when the
+// worker passes the request's timeoutMs through; with the default it would
+// resolve after 2 s. Mycelium's own deadline is not involved here, and the
+// Sandbox still drains the admitted binding before it settles.
+it(
+  "hands the request's timeoutMs to the workerd executor",
+  async () => {
+    const events = [];
+    const failure = await createPrivateWorkerdSandbox()
+      .execute(
+        {
+          executionId: "executor-timeout",
+          code: "return await slow.wait({})",
+          timeoutMs: 1000,
+          bindings: {
+            slow: {
+              wait: async () => {
+                events.push("binding-started");
+                await delay(2_000);
+                events.push("binding-drained");
+                return { done: true };
+              },
+            },
+          },
+        },
+        new AbortController().signal,
+      )
+      .catch((caught) => caught);
+    expect(failure).toMatchObject({
+      _tag: "DeadlineExceeded",
+      limitMs: 1000,
+    });
+    expect(events).toEqual(["binding-started", "binding-drained"]);
   },
   WORKERD_TEST_TIMEOUT_MS,
 );

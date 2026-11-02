@@ -299,6 +299,32 @@ describe("Seatbelt command policy", () => {
     ]);
   });
 
+  it("Workspace lets pnpm write its macOS default store and cache, not a project-local fallback", () => {
+    const base = fixture();
+    const home = join(base.projectRoot, "home");
+    // pnpm 11 on macOS without PNPM_HOME/XDG_*: ~/Library/pnpm/store and
+    // ~/Library/Caches/pnpm. Unwritable, pnpm silently links the project from
+    // a store at the volume or project root, and the owner's next ordinary
+    // `pnpm add` stops with ERR_PNPM_UNEXPECTED_STORE.
+    const store = join(home, "Library", "pnpm", "store");
+    const cache = join(home, "Library", "Caches", "pnpm");
+    mkdirSync(store, { recursive: true });
+    mkdirSync(cache, { recursive: true });
+    const workspace = seatbeltProfile(base, "workspace", home);
+    expect(workspace.writable).toEqual([base.writableRoot, store, cache]);
+    expect(
+      linuxSandboxProfile(
+        base,
+        "workspace",
+        base.temporaryDirectory,
+        { HOME: home },
+        home,
+        "linux",
+      ).writable,
+    ).toEqual([base.writableRoot]);
+    expect(seatbeltProfile(base, "read-only", home).writable).toEqual([]);
+  });
+
   it("Workspace fallback temp grant cannot inherit the Fungi cache write exclusion", () => {
     const base = fixture();
     const home = join(base.projectRoot, "home");

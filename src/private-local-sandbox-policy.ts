@@ -101,10 +101,25 @@ export function linuxSandboxProfile(
   const cache = host.XDG_CACHE_HOME ?? join(home, ".cache");
   const data = host.XDG_DATA_HOME ?? join(home, ".local", "share");
   const cargo = host.CARGO_HOME ?? join(home, ".cargo");
+  // pnpm's own macOS defaults when neither PNPM_HOME nor XDG_* names them.
+  // Left unwritable, pnpm silently links the project from a store at the
+  // volume or project root, and the owner's next `pnpm add` outside the
+  // sandbox stops with ERR_PNPM_UNEXPECTED_STORE.
+  const macOS = platform === "darwin";
+  const pnpmHome =
+    host.PNPM_HOME ??
+    (macOS && host.XDG_DATA_HOME === undefined
+      ? join(home, "Library", "pnpm")
+      : join(data, "pnpm"));
+  const pnpmCache =
+    macOS && host.XDG_CACHE_HOME === undefined
+      ? [join(home, "Library", "Caches", "pnpm")]
+      : [];
   const caches = [
     cache,
     join(home, ".npm"),
-    join(host.PNPM_HOME ?? join(data, "pnpm"), "store"),
+    join(pnpmHome, "store"),
+    ...pnpmCache,
     join(home, ".bun", "install", "cache"),
     join(cargo, "registry"),
     join(cargo, "git"),
