@@ -7,12 +7,15 @@ import { defineIdFamily } from "@fungi.computer/cairn/id";
 import { z } from "zod";
 import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import {
-  callFungiMcpTeamControl,
+  callFungiMcpControl,
   fungiMcpTeamEndpoint,
   readFungiMcpLocalBackends,
   writeFungiMcpLocalBackends,
-  type LocalBackendRecord,
 } from "./private-fungi-account.js";
+import { oysterMcpKeyAuth } from "./private-oyster-mcp-auth.js";
+import { parseFungiMcpEndpoint } from "./private-fungi-mcp-endpoint.js";
+import { createPrivateCredentialStore } from "./private-file-credential-store.js";
+import type { OysterLocalBackendRecord } from "./private-local-backend-record.js";
 import {
   runLocalComputerBackend,
   startLocalComputerd,
@@ -21,11 +24,13 @@ import {
 
 /**
  * `fungi computer attach|status|detach`: this machine's folders as execution
- * backends of Team Computers. Attaching generates a device key here, stores
- * the folder path and private key in Local's owner-only credential file, and
- * sends the Hub only the public key and two labels through the member's
- * existing Team MCP login. Every request id is persisted before the network
- * call so an uncertain outcome is retried, never duplicated.
+ * backends of Computers, on a Hub Team or a standalone Oyster. Attaching
+ * generates a device key here, stores the folder path and private key in
+ * Local's owner-only credential file, and sends the host only the public key
+ * and two labels through the existing MCP login (the Fungi account for a Team,
+ * the saved Oyster key for a standalone Oyster). Every request id is persisted
+ * before the network call so an uncertain outcome is retried, never
+ * duplicated.
  */
 const requestIds = defineIdFamily({
   family: "local-computer-backend",
@@ -37,6 +42,75 @@ export type ControlOptions = Readonly<{
   credentialPath?: string;
   fetch?: FetchLike;
 }>;
+
+/** What one attachment record needs; a Team's carries its Team too. */
+type AttachedRecord = OysterLocalBackendRecord & Readonly<{ teamId?: string }>;
+
+/**
+ * Where an attachment lives: a Hub Team (its records ride the Fungi login)
+ * or a standalone Oyster (its records are keyed by origin, beside its key).
+ */
+type Host = Readonly<{
+  endpoint: URL;
+  teamId: string | undefined;
+  authentication: "oyster-key" | undefined;
+  requireLogin(options: StoreOptions): Promise<void>;
+  read(options: StoreOptions): Promise<readonly AttachedRecord[]>;
+  edit(
+    options: StoreOptions,
+    update: (current: readonly AttachedRecord[]) => AttachedRecord[],
+  ): Promise<void>;
+}>;
+type StoreOptions = Readonly<{ credentialPath: string }>;
+
+function teamHost(endpoint: URL, teamId: string): Host {
+  const mine = (all: readonly AttachedRecord[]) =>
+    all.filter((candidate) => candidate.teamId === teamId);
+  return {
+    endpoint,
+    teamId,
+    authentication: undefined,
+    requireLogin: async (options) => {
+      if ((await readFungiMcpLocalBackends(options)).issuer !== endpoint.origin)
+        throw new Error(
+          `Fungi MCP sign-in is required; run fungi login --fungi-mcp ${endpoint.href}`,
+        );
+    },
+    read: async (options) =>
+      mine((await readFungiMcpLocalBackends(options)).backends),
+    edit: (options, update) =>
+      writeFungiMcpLocalBackends(
+        (all) => [
+          ...all.filter((candidate) => candidate.teamId !== teamId),
+          ...update(mine(all)).map((record) => ({ ...record, teamId })),
+        ],
+        options,
+      ),
+  };
+}
+
+function oysterHost(endpoint: URL): Host {
+  const store = (options: StoreOptions) =>
+    createPrivateCredentialStore(options.credentialPath);
+  return {
+    endpoint,
+    teamId: undefined,
+    authentication: "oyster-key",
+    // The saved Oyster key is checked by the first control call.
+    requireLogin: () => Promise.resolve(),
+    read: (options) => store(options).readLocalBackends(endpoint.origin),
+    edit: (options, update) =>
+      store(options).modifyLocalBackends(endpoint.origin, (all) => update(all)),
+  };
+}
+
+/** A Hub Team MCP endpoint, or a standalone Oyster's `/mcp`. */
+function hostOf(rawEndpoint: string | URL): Host {
+  const parsed = parseFungiMcpEndpoint(rawEndpoint);
+  if (parsed.pathname === "/mcp") return oysterHost(parsed);
+  const { endpoint, teamId } = fungiMcpTeamEndpoint(parsed);
+  return teamHost(endpoint, teamId);
+}
 
 const computerPageSchema = z.looseObject({
   computers: z.array(
@@ -61,37 +135,45 @@ const detachResultSchema = z.discriminatedUnion("kind", [
 ]);
 
 async function control<T extends z.ZodType>(
-  teamEndpoint: URL,
+  host: Host,
   call: string,
   schema: T,
   options: ControlOptions,
 ): Promise<z.output<T> | undefined> {
-  const text = await callFungiMcpTeamControl(
-    teamEndpoint,
+  const text = await callFungiMcpControl(
+    host.endpoint,
     `return await ${call};`,
-    options,
+    {
+      ...options,
+      authProvider:
+        host.authentication === "oyster-key"
+          ? oysterMcpKeyAuth(host.endpoint, options)
+          : undefined,
+    },
   );
   if (text === undefined) return undefined;
   const parsed = schema.safeParse(JSON.parse(text));
   return parsed.success ? parsed.data : undefined;
 }
 
-/** A Team Computer by id or name, through the member's own directory view. */
+/** A Computer by id or name, through the caller's own directory view. */
 async function findComputer(
-  teamEndpoint: URL,
+  host: Host,
   computer: string,
   options: ControlOptions,
 ): Promise<Readonly<{ computerId: string; name: string }> | undefined> {
   let offset: number | null = 0;
   while (offset !== null) {
     const page: z.output<typeof computerPageSchema> | undefined = await control(
-      teamEndpoint,
-      `computers.list(${JSON.stringify({ limit: 100, offset })})`,
+      host,
+      `env.computers.list(${JSON.stringify({ limit: 100, offset })})`,
       computerPageSchema,
       options,
     );
     if (page === undefined)
-      throw new Error("The Hub did not list this Team's Computers; retry");
+      throw new Error(
+        "The host did not list its Computers; check your login or Oyster key, then retry",
+      );
     const found = page.computers.find(
       (candidate) =>
         candidate.computerId === computer || candidate.name === computer,
@@ -102,7 +184,7 @@ async function findComputer(
   return undefined;
 }
 
-function sameComputer(record: LocalBackendRecord, computer: string): boolean {
+function sameComputer(record: AttachedRecord, computer: string): boolean {
   return record.computerId === computer || record.computerName === computer;
 }
 
@@ -132,7 +214,7 @@ export type PrivateLocalComputerAttachResult =
       kind: "not-found" | "uncertain" | "denied" | "conflict" | "invalid";
     }>;
 
-/** Attach `folderPath` to a Team Computer, or return the existing attachment. */
+/** Attach `folderPath` to a Computer, or return the existing attachment. */
 export async function attachPrivateLocalComputer(
   rawEndpoint: string | URL,
   input: Readonly<{ computer: string; folderPath: string; hostLabel?: string }>,
@@ -144,29 +226,23 @@ export async function attachPrivateLocalComputer(
       controlOptions.credentialPath ??
       capturePrivateLocalConfigRoot().credentialPath,
   };
-  const { endpoint, teamId } = fungiMcpTeamEndpoint(rawEndpoint);
+  const host = hostOf(rawEndpoint);
   const rootPath = await realpath(resolve(input.folderPath));
   if (!(await stat(rootPath)).isDirectory())
     throw new Error("The folder to attach is not a directory");
-  const saved = await readFungiMcpLocalBackends(options);
-  if (saved.issuer !== endpoint.origin)
-    throw new Error(
-      `Fungi MCP sign-in is required; run fungi login --fungi-mcp ${endpoint.href}`,
-    );
-  let record = saved.backends.find(
-    (candidate) =>
-      candidate.teamId === teamId && sameComputer(candidate, input.computer),
+  await host.requireLogin(options);
+  let record = (await host.read(options)).find((candidate) =>
+    sameComputer(candidate, input.computer),
   );
   if (record !== undefined && record.rootPath !== rootPath)
     throw new Error(
       `This machine is already attached to ${record.computerName} with another folder; run fungi computer detach first`,
     );
   if (record === undefined) {
-    const computer = await findComputer(endpoint, input.computer, options);
+    const computer = await findComputer(host, input.computer, options);
     if (computer === undefined) return { kind: "not-found" };
-    record = {
+    const pending: AttachedRecord = {
       requestId: requestIds.attach.generate(),
-      teamId,
       computerId: computer.computerId,
       computerName: computer.name,
       rootPath,
@@ -179,11 +255,8 @@ export async function attachPrivateLocalComputer(
       folderLabel: z.string().min(1).max(256).parse(basename(rootPath)),
       ...deviceKey(),
     };
-    const pending = record;
-    await writeFungiMcpLocalBackends(
-      (current) => [...current, pending],
-      options,
-    );
+    record = pending;
+    await host.edit(options, (current) => [...current, pending]);
   }
   if (record.backendId !== undefined)
     return {
@@ -194,8 +267,8 @@ export async function attachPrivateLocalComputer(
       rootPath,
     };
   const result = await control(
-    endpoint,
-    `computers.attachLocal(${JSON.stringify({
+    host,
+    `env.computers.attachLocal(${JSON.stringify({
       computerId: record.computerId,
       publicKey: record.publicKey,
       hostLabel: record.hostLabel,
@@ -208,12 +281,10 @@ export async function attachPrivateLocalComputer(
   if (result === undefined) return { kind: "uncertain" };
   if (result.kind !== "attached") return { kind: result.kind };
   const attached = { ...record, backendId: result.backendId };
-  await writeFungiMcpLocalBackends(
-    (current) =>
-      current.map((candidate) =>
-        candidate.requestId === attached.requestId ? attached : candidate,
-      ),
-    options,
+  await host.edit(options, (current) =>
+    current.map((candidate) =>
+      candidate.requestId === attached.requestId ? attached : candidate,
+    ),
   );
   return {
     kind: "attached",
@@ -229,8 +300,8 @@ export type PrivateLocalComputerDetachResult = Readonly<{
 }>;
 
 /**
- * Detach a Computer's attachment on the Hub, then forget it here. A pending
- * attach is replayed first so the Hub never keeps an attachment Local forgot.
+ * Detach a Computer's attachment on its host, then forget it here. A pending
+ * attach is replayed first so the host never keeps an attachment Local forgot.
  */
 export async function detachPrivateLocalComputer(
   rawEndpoint: string | URL,
@@ -242,17 +313,15 @@ export async function detachPrivateLocalComputer(
     credentialPath:
       input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
   };
-  const { endpoint, teamId } = fungiMcpTeamEndpoint(rawEndpoint);
-  const saved = await readFungiMcpLocalBackends(options);
-  const record = saved.backends.find(
-    (candidate) =>
-      candidate.teamId === teamId && sameComputer(candidate, computer),
+  const host = hostOf(rawEndpoint);
+  const record = (await host.read(options)).find((candidate) =>
+    sameComputer(candidate, computer),
   );
   if (record === undefined) return { kind: "not-attached" };
   let backendId = record.backendId;
   if (backendId === undefined) {
     const replay = await attachPrivateLocalComputer(
-      endpoint,
+      host.endpoint,
       { computer: record.computerId, folderPath: record.rootPath },
       options,
     );
@@ -260,8 +329,8 @@ export async function detachPrivateLocalComputer(
     backendId = replay.backendId;
   }
   const result = await control(
-    endpoint,
-    `computers.detachLocal(${JSON.stringify({
+    host,
+    `env.computers.detachLocal(${JSON.stringify({
       computerId: record.computerId,
       backendId,
     })})`,
@@ -271,10 +340,8 @@ export async function detachPrivateLocalComputer(
   if (result === undefined) return { kind: "uncertain" };
   if (result.kind === "denied") return { kind: "denied" };
   if (result.kind !== "detached") return { kind: "uncertain" };
-  await writeFungiMcpLocalBackends(
-    (current) =>
-      current.filter((candidate) => candidate.requestId !== record.requestId),
-    options,
+  await host.edit(options, (current) =>
+    current.filter((candidate) => candidate.requestId !== record.requestId),
   );
   return { kind: "detached" };
 }
@@ -284,21 +351,35 @@ export async function listPrivateLocalComputers(
   options: Readonly<{ credentialPath?: string }> = {},
 ): Promise<
   readonly Readonly<{
-    teamId: string;
+    /** The Hub Team, or null for a standalone Oyster. */
+    teamId: string | null;
+    /** The standalone Oyster's origin, or null for a Hub Team. */
+    origin: string | null;
     computerId: string;
     computerName: string;
     rootPath: string;
     backendId: string | null;
   }>[]
 > {
-  const saved = await readFungiMcpLocalBackends(options);
-  return saved.backends.map((record) => ({
-    teamId: record.teamId,
+  const credentialPath =
+    options.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath;
+  const view = (record: AttachedRecord, origin: string | null) => ({
+    teamId: record.teamId ?? null,
+    origin,
     computerId: record.computerId,
     computerName: record.computerName,
     rootPath: record.rootPath,
     backendId: record.backendId ?? null,
-  }));
+  });
+  const hub = await readFungiMcpLocalBackends({ credentialPath });
+  const oysters =
+    await createPrivateCredentialStore(credentialPath).readAllLocalBackends();
+  return [
+    ...hub.backends.map((record) => view(record, null)),
+    ...oysters.flatMap((entry) =>
+      entry.backends.map((record) => view(record, entry.origin)),
+    ),
+  ];
 }
 
 export type PrivateLocalComputerRunOptions = {
@@ -308,7 +389,7 @@ export type PrivateLocalComputerRunOptions = {
 };
 
 /**
- * Serve one attached folder until `signal` aborts or the Hub refuses the
+ * Serve one attached folder until `signal` aborts or its host refuses the
  * machine (it was detached elsewhere), in which case Local forgets it.
  */
 export async function runPrivateLocalComputer(
@@ -321,11 +402,9 @@ export async function runPrivateLocalComputer(
     credentialPath:
       input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
   };
-  const { endpoint, teamId } = fungiMcpTeamEndpoint(rawEndpoint);
-  const saved = await readFungiMcpLocalBackends(options);
-  const record = saved.backends.find(
-    (candidate) =>
-      candidate.teamId === teamId && sameComputer(candidate, computer),
+  const host = hostOf(rawEndpoint);
+  const record = (await host.read(options)).find((candidate) =>
+    sameComputer(candidate, computer),
   );
   if (record?.backendId === undefined)
     throw new Error(`This machine is not attached to ${computer}`);
@@ -333,8 +412,8 @@ export async function runPrivateLocalComputer(
   try {
     const outcome = await runLocalComputerBackend({
       target: {
-        hubOrigin: endpoint.origin,
-        teamId,
+        origin: host.endpoint.origin,
+        teamId: host.teamId,
         computerId: record.computerId,
         backendId: record.backendId,
         deviceId: record.backendId.slice("local-".length),
@@ -346,10 +425,8 @@ export async function runPrivateLocalComputer(
       onStatus: options.onStatus,
     });
     if (outcome === "stopped") return "stopped";
-    await writeFungiMcpLocalBackends(
-      (current) =>
-        current.filter((candidate) => candidate.requestId !== record.requestId),
-      options,
+    await host.edit(options, (current) =>
+      current.filter((candidate) => candidate.requestId !== record.requestId),
     );
     return "detached";
   } finally {

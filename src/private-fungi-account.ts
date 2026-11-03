@@ -55,6 +55,10 @@ import {
   signOutFungiThroughLocalService,
   type FungiAccountLogoutResult,
 } from "./private-fungi-service-logout.js";
+import {
+  hubLocalBackendRecordSchema,
+  type HubLocalBackendRecord,
+} from "./private-local-backend-record.js";
 
 const credentialId = "fungi";
 const localScopes =
@@ -68,27 +72,6 @@ const registrationPath = "/client-registration";
  * (RFC 8252 §7.3), so the port-free loopback URI names the registered path.
  */
 const nonInteractiveCallbackUri = `http://${callbackHost}${callbackPath}`;
-/**
- * One folder attached to a Team Computer. The absolute folder path and the
- * device's private key never leave this file; the Hub holds only the public
- * key and the two labels.
- */
-const localBackendRecordSchema = z.strictObject({
-  requestId: z.string().min(1).max(256),
-  teamId: z.string().min(1).max(256),
-  computerId: z.string().min(1).max(256),
-  computerName: z.string().min(1).max(256),
-  rootPath: z.string().min(1).max(4096),
-  hostLabel: z.string().min(1).max(256),
-  folderLabel: z.string().min(1).max(256),
-  publicKey: z.base64().length(44),
-  privateKey: z.base64().min(1).max(512),
-  backendId: z
-    .string()
-    .regex(/^local-[a-z2-7]{16}$/)
-    .optional(),
-});
-export type LocalBackendRecord = z.output<typeof localBackendRecordSchema>;
 
 const teamChoiceSchema = z.object({
   teamId: z.string().min(1).max(256),
@@ -108,7 +91,7 @@ const savedCredentialSchema = z
     clientInformation: z.json().optional(),
     tokens: z.json().optional(),
     codeVerifier: z.string().optional(),
-    localBackends: z.array(localBackendRecordSchema).max(16).optional(),
+    localBackends: z.array(hubLocalBackendRecordSchema).max(16).optional(),
     team: teamChoiceSchema.optional(),
     teamCount: z.number().int().min(0).max(1000).optional(),
   })
@@ -868,15 +851,18 @@ export async function signOutOwnedFungiAccount(
 }
 
 /**
- * Run one Mycelium control call against the Team MCP endpoint with the saved
- * login, and return the tool's text result. An error result or a transport
- * failure is `undefined`: the caller retries with its persisted request id.
+ * Run one Mycelium control call against a Team MCP endpoint with the saved
+ * Fungi login, or a standalone Oyster's with its saved key, and return the
+ * tool's text result. An error result or a transport failure is `undefined`:
+ * the caller retries with its persisted request id.
  */
-export async function callFungiMcpTeamControl(
-  teamEndpoint: URL,
+export async function callFungiMcpControl(
+  endpoint: URL,
   code: string,
   options: Readonly<{
     credentialPath?: string;
+    /** The caller's own bearer; the saved Fungi login when absent. */
+    authProvider?: AuthProvider | undefined;
     fetch?: FetchLike;
     signal?: AbortSignal;
     timeoutMs?: number;
@@ -893,13 +879,14 @@ export async function callFungiMcpTeamControl(
   }
   if (options.timeoutMs !== undefined) callOptions.timeout = options.timeoutMs;
   const transportOptions: StreamableHTTPClientTransportOptions = {
-    authProvider: fungiMcpAccountAuth(teamEndpoint, options),
+    authProvider:
+      options.authProvider ?? fungiMcpAccountAuth(endpoint, options),
     requestInit,
   };
   if (options.fetch !== undefined) transportOptions.fetch = options.fetch;
   try {
     await client.connect(
-      new StreamableHTTPClientTransport(teamEndpoint, transportOptions),
+      new StreamableHTTPClientTransport(endpoint, transportOptions),
       connectOptions,
     );
     const response = z
@@ -953,7 +940,7 @@ export function fungiMcpTeamEndpoint(rawEndpoint: string | URL) {
 export async function readFungiMcpLocalBackends(
   input: Readonly<{ credentialPath?: string }> = {},
 ): Promise<
-  Readonly<{ issuer: string | undefined; backends: LocalBackendRecord[] }>
+  Readonly<{ issuer: string | undefined; backends: HubLocalBackendRecord[] }>
 > {
   const options = {
     ...input,
@@ -969,7 +956,9 @@ export async function readFungiMcpLocalBackends(
 
 /** Replace the attached folder records in the owner-only credential file. */
 export async function writeFungiMcpLocalBackends(
-  update: (current: readonly LocalBackendRecord[]) => LocalBackendRecord[],
+  update: (
+    current: readonly HubLocalBackendRecord[],
+  ) => HubLocalBackendRecord[],
   input: Readonly<{ credentialPath?: string }> = {},
 ): Promise<void> {
   const options = {

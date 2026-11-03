@@ -29,13 +29,15 @@ function credentialId(endpoint: URL): string {
   return `oyster-mcp:${parseFungiMcpEndpoint(endpoint).origin}`;
 }
 
-// Ear Tag's Oyster producer uses the oyk family and nanoid's URL-safe alphabet.
+// An Oyster bearer is an issued key (Ear Tag's oyk family, nanoid's URL-safe
+// alphabet) or the owner key the operator configured as OYSTER_OWNER_KEY, which
+// is at least 24 URL-safe characters. Only the owner reaches Computer control.
 const oysterKey = z
   .string()
   .trim()
   .min(5)
   .max(maximumCredentialStringLength)
-  .regex(/^oyk_[A-Za-z0-9_-]+$/);
+  .regex(/^[A-Za-z0-9_-]+$/);
 
 const keychainService = "fungi-oyster-mcp";
 const warnedFallbackPaths = new Set<string>();
@@ -174,7 +176,8 @@ export async function saveOysterMcpKey(
   }
   text += decoder.decode();
   const parsed = oysterKey.safeParse(text);
-  if (!parsed.success) throw new Error("Expected one Oyster oyk_ key on stdin");
+  if (!parsed.success)
+    throw new Error("Expected one Oyster key or owner key on stdin");
   const entry = await keychain(id);
   if (entry === undefined) {
     await fileStore(path).modify(id, () =>

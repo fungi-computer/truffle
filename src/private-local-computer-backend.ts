@@ -415,8 +415,9 @@ export async function startLocalComputerd(
 
 /** Where one attached backend dials. */
 export type LocalBackendTarget = Readonly<{
-  hubOrigin: string;
-  teamId: string;
+  origin: string;
+  /** A Hub Team; absent when the target is a standalone Oyster's owner. */
+  teamId?: string | undefined;
   computerId: string;
   backendId: string;
   deviceId: string;
@@ -431,9 +432,12 @@ export type LocalBackendStatus =
   | Readonly<{ kind: "refused" }>;
 
 function dialUrl(target: LocalBackendTarget): URL {
+  const computer = `computers/${encodeURIComponent(target.computerId)}/backends/${encodeURIComponent(target.backendId)}/connect`;
   return new URL(
-    `/api/teams/${encodeURIComponent(target.teamId)}/computers/${encodeURIComponent(target.computerId)}/backends/${encodeURIComponent(target.backendId)}/connect`,
-    target.hubOrigin,
+    target.teamId === undefined
+      ? `/api/${computer}`
+      : `/api/teams/${encodeURIComponent(target.teamId)}/${computer}`,
+    target.origin,
   );
 }
 
@@ -488,7 +492,7 @@ function openSocket(url: URL, header: string): Promise<WebSocket> {
     socket.addEventListener(
       "error",
       () => {
-        reject(new Error("Hub refused or dropped the connection"));
+        reject(new Error("The host refused or dropped the connection"));
       },
       { once: true },
     );

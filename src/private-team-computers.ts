@@ -3,7 +3,7 @@ import type { FetchLike } from "@modelcontextprotocol/client";
 import { z } from "zod";
 import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import {
-  callFungiMcpTeamControl,
+  callFungiMcpControl,
   fungiMcpTeamEndpoint,
 } from "./private-fungi-account.js";
 
@@ -41,7 +41,7 @@ async function control<T extends z.ZodType>(
   options: Options,
 ): Promise<z.output<T>> {
   options.signal?.throwIfAborted();
-  const text = await callFungiMcpTeamControl(
+  const text = await callFungiMcpControl(
     endpoint,
     `return await computers.${operation}(${JSON.stringify(input)});`,
     { ...options, timeoutMs: operation === "start" ? 30 * 60 * 1_000 : 60_000 },

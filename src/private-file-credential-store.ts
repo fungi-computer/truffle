@@ -1,6 +1,11 @@
 import { correlationKey } from "@fungi.computer/cairn";
 import { createHash } from "node:crypto";
 import {
+  localBackendsRecordSchema,
+  type LocalBackendsRecord,
+  type OysterLocalBackendRecord,
+} from "./private-local-backend-record.js";
+import {
   machineEnrollmentRecordSchema,
   type MachineEnrollmentRecord,
   type LocalMachineEnrollment,
@@ -88,9 +93,12 @@ const credentialSchema = z.discriminatedUnion("type", [
   apiKeyCredentialSchema,
   oauthCredentialSchema,
   machineEnrollmentRecordSchema,
+  localBackendsRecordSchema,
 ]);
 const machineRecordId = (origin: string) =>
   `machine-enrollment:${createHash("sha256").update(origin).digest("hex")}`;
+const localBackendsRecordId = (origin: string) =>
+  `local-backends:${createHash("sha256").update(origin).digest("hex")}`;
 const credentialMapSchema = z
   .record(providerIdSchema, credentialSchema)
   .superRefine((credentials, context) => {
@@ -103,6 +111,15 @@ const credentialMapSchema = z
           code: "custom",
           message: "Machine enrollment origin does not match its record",
         });
+    for (const [id, record] of Object.entries(credentials))
+      if (
+        record.type === "local_backends" &&
+        id !== localBackendsRecordId(record.origin)
+      )
+        context.addIssue({
+          code: "custom",
+          message: "Local backend origin does not match its record",
+        });
     if (Object.keys(credentials).length > maximumCredentialEntries) {
       context.addIssue({
         code: "custom",
@@ -112,7 +129,10 @@ const credentialMapSchema = z
   });
 const missingFileErrorSchema = z.object({ code: z.literal("ENOENT") });
 
-type CredentialMap = Record<string, Credential | MachineEnrollmentRecord>;
+type CredentialMap = Record<
+  string,
+  Credential | MachineEnrollmentRecord | LocalBackendsRecord
+>;
 export type AtomicWrite = (
   path: string,
   content: string,
@@ -146,6 +166,20 @@ export type PrivateCredentialStore = CredentialStore & {
     owner?: MachineEnrollmentOwner,
   ): Promise<void>;
   removeMachineEnrollments(origin: string): Promise<boolean>;
+  /** One standalone Oyster's attached folders, as Local keeps them. */
+  readLocalBackends(origin: string): Promise<OysterLocalBackendRecord[]>;
+  /** Every standalone Oyster's attached folders. */
+  readAllLocalBackends(): Promise<LocalBackendsRecord[]>;
+  /**
+   * Edit one origin's attached folders under the file lock. An empty result
+   * removes the record.
+   */
+  modifyLocalBackends(
+    origin: string,
+    edit: (
+      current: readonly OysterLocalBackendRecord[],
+    ) => OysterLocalBackendRecord[],
+  ): Promise<void>;
   /** Stable host identity supplied to Pi's ChatGPT sign-in, never a credential. */
   getDeviceId(): Promise<string>;
   /** Revoke or validate current custody under the same lock, then delete it atomically. */
@@ -168,6 +202,15 @@ function credentialStoreError(message: string): Error {
   return new Error(message);
 }
 
+/** Records Local keeps beside, and never as, a model or account credential. */
+function isPrivateRecord(
+  record: Credential | MachineEnrollmentRecord | LocalBackendsRecord,
+): record is MachineEnrollmentRecord | LocalBackendsRecord {
+  return (
+    record.type === "machine_enrollment" || record.type === "local_backends"
+  );
+}
+
 function ownCredential(
   credentials: CredentialMap | undefined,
   providerId: string,
@@ -176,7 +219,7 @@ function ownCredential(
     return undefined;
   }
   const record = credentials[providerId];
-  return record?.type === "machine_enrollment" ? undefined : record;
+  return record === undefined || isPrivateRecord(record) ? undefined : record;
 }
 
 function parseCredentials(serialized: string): CredentialMap {
@@ -260,7 +303,7 @@ export class FileCredentialStore implements PrivateCredentialStore {
     const credentials = await this.#readCredentials();
     if (credentials === undefined) return [];
     return Object.entries(credentials).flatMap(([providerId, credential]) =>
-      credential.type === "machine_enrollment"
+      isPrivateRecord(credential)
         ? []
         : [{ providerId, type: credential.type }],
     );
@@ -277,9 +320,10 @@ export class FileCredentialStore implements PrivateCredentialStore {
     return await this.#withLock(async () => {
       options?.signal?.throwIfAborted();
       const credentials = (await this.#readCredentials()) ?? {};
-      if (credentials[providerId]?.type === "machine_enrollment")
+      const occupant = credentials[providerId];
+      if (occupant !== undefined && isPrivateRecord(occupant))
         throw credentialStoreError(
-          "A model credential cannot replace a machine enrollment",
+          "A model credential cannot replace a private Local record",
         );
       const current = ownCredential(credentials, providerId);
       const next = await callback(current);
@@ -343,6 +387,53 @@ export class FileCredentialStore implements PrivateCredentialStore {
                   type: "machine_enrollment",
                   origin,
                   enrollments,
+                }),
+              },
+        ),
+      );
+    });
+  }
+
+  async readLocalBackends(origin: string): Promise<OysterLocalBackendRecord[]> {
+    const record = (await this.#readCredentials())?.[
+      localBackendsRecordId(origin)
+    ];
+    return record?.type === "local_backends" ? record.backends : [];
+  }
+
+  async readAllLocalBackends(): Promise<LocalBackendsRecord[]> {
+    return Object.values((await this.#readCredentials()) ?? {}).filter(
+      (record): record is LocalBackendsRecord =>
+        record.type === "local_backends",
+    );
+  }
+
+  async modifyLocalBackends(
+    origin: string,
+    edit: (
+      current: readonly OysterLocalBackendRecord[],
+    ) => OysterLocalBackendRecord[],
+  ): Promise<void> {
+    await this.#withLock(async () => {
+      const credentials = (await this.#readCredentials()) ?? {};
+      const id = localBackendsRecordId(origin);
+      const previous = credentials[id];
+      if (previous !== undefined && previous.type !== "local_backends")
+        throw credentialStoreError("Local backend record is occupied");
+      const backends = edit(previous?.backends ?? []);
+      const others = Object.fromEntries(
+        Object.entries(credentials).filter(([key]) => key !== id),
+      );
+      await this.#replace(
+        this.#validateCredentials(
+          backends.length === 0
+            ? others
+            : {
+                ...others,
+                [id]: localBackendsRecordSchema.parse({
+                  type: "local_backends",
+                  origin,
+                  backends,
                 }),
               },
         ),
