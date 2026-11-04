@@ -9,6 +9,14 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import {
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import { join } from "node:path";
@@ -291,6 +299,181 @@ describe("private invocation Files port", () => {
         invocation(),
       ),
     ).rejects.toThrow("outside the invocation root");
+  });
+
+  it("refuses a read whose checked path was swapped for a symlink before open", async () => {
+    const root = await temporaryDirectory("files-swap");
+    const outside = await temporaryDirectory("files-swap-outside");
+    const target = join(root, "note.txt");
+    await writeFile(target, "ordinary");
+    await writeFile(join(outside, "record"), "synthetic hidden record");
+    let swapped = false;
+    // The hidden-record query runs after the containment check and before
+    // open: the exact window a concurrent sandboxed child can use.
+    const port = await createPrivateInvocationFilesPort(
+      root,
+      undefined,
+      {
+        assertWrite: () => undefined,
+        launch: () => undefined,
+        hiddenRecords: () => {
+          if (!swapped) {
+            swapped = true;
+            rmSync(target);
+            symlinkSync(join(outside, "record"), target);
+          }
+          return [];
+        },
+      },
+      () => "workspace",
+    );
+
+    await expect(
+      port.read({ path: "note.txt", offset: 0, limit: 64 }, invocation()),
+    ).rejects.toThrow("Files path changed during read: note.txt");
+    expect(swapped).toBe(true);
+  });
+
+  it("lists only the checked directory, even when it is swapped for a symlink before opening", async () => {
+    const root = await temporaryDirectory("files-list-swap");
+    const outside = await temporaryDirectory("files-list-swap-outside");
+    const project = join(root, "project");
+    await mkdir(project);
+    await writeFile(join(project, "ordinary.txt"), "ordinary");
+    await writeFile(
+      join(outside, "dummy-credential"),
+      "synthetic hidden record",
+    );
+    let swapped = false;
+    // The hidden-record query runs after the directory's containment check
+    // and before it is opened: the window a concurrent sandboxed child can use.
+    const port = await createPrivateInvocationFilesPort(
+      root,
+      undefined,
+      {
+        assertWrite: () => undefined,
+        launch: () => undefined,
+        hiddenRecords: () => {
+          if (!swapped) {
+            swapped = true;
+            renameSync(project, join(root, "moved"));
+            symlinkSync(outside, project);
+          }
+          return [];
+        },
+      },
+      () => "workspace",
+    );
+
+    const listed = listIn(port, { path: "project", limit: 10 }, invocation());
+    await expect(listed).rejects.toThrow(
+      "Files path changed during list: project",
+    );
+    expect(swapped).toBe(true);
+  });
+
+  it("writes a replacement only into the file it checked and read", async () => {
+    const root = await temporaryDirectory("files-replace-swap");
+    const outside = await temporaryDirectory("files-replace-swap-outside");
+    const project = join(root, "project");
+    await mkdir(project);
+    await writeFile(join(project, "note.txt"), "before");
+    const record = join(outside, "note.txt");
+    writeFileSync(record, "synthetic hidden record");
+    // Write admission is the last decision before the write: a concurrent
+    // child swaps the checked file's folder for a symlink to a hidden one.
+    const port = await createPrivateInvocationFilesPort(
+      root,
+      undefined,
+      {
+        assertWrite: () => {
+          renameSync(project, join(root, "moved"));
+          symlinkSync(outside, project);
+        },
+        launch: () => undefined,
+        hiddenRecords: () => [],
+      },
+      () => "workspace",
+    );
+
+    await port.replace(
+      { path: "project/note.txt", expectedContent: "before", content: "after" },
+      invocation(),
+    );
+    expect(readFileSync(record, "utf8")).toBe("synthetic hidden record");
+    await expect(
+      readFile(join(root, "moved", "note.txt"), "utf8"),
+    ).resolves.toBe("after");
+  });
+
+  it("leaves the original whole when a replacement is interrupted mid-write", async () => {
+    const root = await temporaryDirectory("files-replace-interrupted");
+    const target = join(root, "note.txt");
+    const original = "o".repeat(120 * 1_024);
+    writeFileSync(target, original);
+    const port = await createPrivateInvocationFilesPort(root);
+    // Interrupt the write the moment any of its bytes reach the folder: a new
+    // file appears or the original changes. That is the crash window.
+    const begun = () =>
+      readdirSync(root).length > 1 || readFileSync(target, "utf8") !== original;
+    let interrupted = false;
+    const signal = new AbortController().signal;
+    signal.throwIfAborted = () => {
+      if (!begun()) return;
+      interrupted = true;
+      throw new Error("synthetic crash mid-write");
+    };
+
+    await expect(
+      port.replace(
+        {
+          path: "note.txt",
+          expectedContent: original,
+          content: "n".repeat(120 * 1_024),
+        },
+        invocation(signal),
+      ),
+    ).rejects.toThrow("synthetic crash mid-write");
+    expect(interrupted).toBe(true);
+    expect(readFileSync(target, "utf8")).toBe(original);
+    expect(readdirSync(root)).toEqual(["note.txt"]);
+  });
+
+  it("treats the live mode's hidden records as absent to reads, lists and searches", async () => {
+    const root = await temporaryDirectory("files-hidden");
+    const hidden = join(root, ".config", "fungi");
+    await mkdir(hidden, { recursive: true });
+    await writeFile(join(hidden, "record"), "synthetic hidden record");
+    await writeFile(join(root, ".config", "visible.txt"), "visible");
+    await symlink(join(hidden, "record"), join(root, "pointer"));
+    const port = await createPrivateInvocationFilesPort(
+      root,
+      undefined,
+      {
+        assertWrite: () => undefined,
+        launch: () => undefined,
+        hiddenRecords: () => [hidden],
+      },
+      () => "workspace",
+    );
+
+    for (const path of [".config/fungi/record", "pointer", ".config/fungi"])
+      await expect(
+        port.read({ path, offset: 0, limit: 64 }, invocation()),
+      ).rejects.toThrow("Files path does not exist");
+    const listed = await listIn(
+      port,
+      { path: ".config", limit: 10 },
+      invocation(),
+    );
+    expect(JSON.stringify(listed)).toContain("visible.txt");
+    expect(JSON.stringify(listed)).not.toContain("fungi");
+    const found = await grepIn(
+      port,
+      { path: ".", pattern: "synthetic", limit: 10 },
+      invocation(),
+    );
+    expect(found.results).toEqual([]);
   });
 
   it("caps one-level, name and content searches after collecting one truncation witness", async () => {

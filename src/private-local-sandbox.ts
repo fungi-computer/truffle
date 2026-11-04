@@ -1,6 +1,7 @@
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { rmSync } from "node:fs";
+import { userInfo } from "node:os";
 import { createNativePayloadStaging } from "./private-local-native-staging.js";
 import type { NativeSourceReader } from "./private-local-bwrap.js";
 import { z } from "zod";
@@ -17,6 +18,7 @@ import type { LocalPermissionMode } from "./private-local-permission-mode.js";
 import type { LocalSandboxWrites } from "./private-invocation-files.js";
 import {
   protectedSandboxPaths,
+  fungiHiddenRecords,
   assertHostCodeOutsideAgent,
   UnsafeHostCode,
   resolveAgentFolder,
@@ -264,6 +266,8 @@ export function createLocalSandboxControls(
     if (unavailable.kind === "folder") throw new Error(unavailable.message);
     throw new LocalSandboxUnavailable(unavailable);
   }
+  const hiddenRecords = () =>
+    fungiHiddenRecords(process.env, userInfo().homedir);
   const assertReady = () => {
     if (input.mode() === "full-access") return;
     launch(folder.absolute, ["/usr/bin/true"]);
@@ -279,6 +283,10 @@ export function createLocalSandboxControls(
         throw new Error("Local sandbox preparation produced no result");
       sandbox.command(folder.absolute, ["/usr/bin/true"]);
     },
+    hiddenRecords: () =>
+      input.mode() === "full-access"
+        ? []
+        : protectedSandboxPaths(hiddenRecords()),
     assertWrite: (paths) => {
       if (input.mode() === "full-access") return;
       assertReady();
@@ -286,6 +294,7 @@ export function createLocalSandboxControls(
       const protectedPaths = protectedSandboxPaths([
         ...policy.readOnly,
         join(policy.writableRoot, ".git"),
+        ...hiddenRecords(),
       ]);
       for (const path of paths) {
         const target = resolve(path);

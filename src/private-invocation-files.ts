@@ -1,5 +1,16 @@
-import { lstat, open, opendir, realpath, stat } from "node:fs/promises";
+import { constants, type Dir, type Dirent, type Stats } from "node:fs";
 import {
+  lstat,
+  open,
+  opendir,
+  realpath,
+  rename,
+  stat,
+  unlink,
+} from "node:fs/promises";
+import {
+  basename,
+  dirname,
   isAbsolute,
   join,
   matchesGlob,
@@ -8,6 +19,7 @@ import {
   resolve,
   sep,
 } from "node:path";
+import { correlationKey } from "@fungi.computer/cairn";
 import { FilesEditError, type FilesPort } from "@fungi.computer/knapsack";
 import { SearchVisibility } from "@fungi.computer/knapsack/files-search";
 import {
@@ -24,12 +36,14 @@ import {
   fitLocalImage,
   maximumLocalImageInputBytes,
 } from "./local-image-fit.js";
-import writeFileAtomic from "write-file-atomic";
 import type { LocalSandboxLaunch } from "./private-invocation-computer.js";
 
 /** Same live authority as exec; the policy module owns protected-path checks. */
 export type LocalSandboxWrites = Readonly<{
   assertWrite(paths: readonly string[]): void;
+  /** Paths the live mode hides from commands (none in Full access); Files
+   * reads, listings and searches treat them as absent. */
+  hiddenRecords(): readonly string[];
   launch: LocalSandboxLaunch;
 }>;
 
@@ -175,13 +189,26 @@ function decodeUtf8(data: Uint8Array, path: string, moreBytesRemain = false) {
 }
 
 function entryType(
-  metadata: Awaited<ReturnType<typeof lstat>>,
+  metadata: Stats | Dirent,
   path: string,
 ): "file" | "directory" | "symlink" {
   if (metadata.isSymbolicLink()) return "symlink";
   if (metadata.isFile()) return "file";
   if (metadata.isDirectory()) return "directory";
   throw new Error(`Files path has an unsupported filesystem type: ${path}`);
+}
+
+/** Whether the directory entry carries its own type; some filesystems report none. */
+function typed(entry: Dirent): boolean {
+  return (
+    entry.isFile() ||
+    entry.isDirectory() ||
+    entry.isSymbolicLink() ||
+    entry.isSocket() ||
+    entry.isFIFO() ||
+    entry.isBlockDevice() ||
+    entry.isCharacterDevice()
+  );
 }
 
 function outputPath(parent: string, child: string): string {
@@ -231,12 +258,22 @@ function appendMatchingLines(
   return false;
 }
 
-async function openRegularFile(
+type FileHandle = Awaited<ReturnType<typeof open>>;
+
+/**
+ * Open a checked pathname and bind the descriptor to that check. A
+ * sandboxed child can swap a selected-folder entry (or one of its folders)
+ * for a symlink between the containment check and open, so the pathname is
+ * re-resolved after open and must still name the object just opened. Every
+ * later read or write goes through this descriptor, never the pathname.
+ */
+async function openChecked(
   path: RootedPath,
+  operation: "read" | "list" | "replace",
   context: InvocationContext,
-): Promise<OpenFile> {
+): Promise<Readonly<{ handle: FileHandle; metadata: Stats }>> {
   checkCancellation(context);
-  let handle: Awaited<ReturnType<typeof open>>;
+  let handle: FileHandle;
   try {
     handle = await open(path.resolved, "r");
   } catch (cause) {
@@ -247,26 +284,238 @@ async function openRegularFile(
   try {
     checkCancellation(context);
     const metadata = await handle.stat();
-    if (!metadata.isFile())
-      throw new FilesPathError("not-file", path.requested);
-    return { handle, size: metadata.size };
+    const current = await existingRealpath(path.resolved, path.requested);
+    const named = current === path.resolved ? await stat(current) : undefined;
+    if (named?.dev !== metadata.dev || named.ino !== metadata.ino)
+      throw new Error(
+        `Files path changed during ${operation}: ${path.requested}`,
+      );
+    return { handle, metadata };
   } catch (cause) {
     await handle.close();
     throw cause;
   }
 }
 
+async function openRegularFile(
+  path: RootedPath,
+  context: InvocationContext,
+): Promise<OpenFile> {
+  const { handle, metadata } = await openChecked(path, "read", context);
+  if (!metadata.isFile()) {
+    await handle.close();
+    throw new FilesPathError("not-file", path.requested);
+  }
+  return { handle, size: metadata.size };
+}
+
+/**
+ * A pathname naming one open descriptor. The kernel resolves it to that
+ * object, not to whatever the checked pathname names by now.
+ */
+function descriptorPath(handle: FileHandle): string {
+  return process.platform === "linux"
+    ? `/proc/self/fd/${String(handle.fd)}`
+    : `/dev/fd/${String(handle.fd)}`;
+}
+
+/** One checked directory, read through a descriptor bound to that check. */
+type CheckedDirectory = Readonly<{
+  entries: Dir;
+  /** The bound descriptor's pathname, for looking up one entry. */
+  bound: string;
+  close: () => Promise<void>;
+}>;
+
+async function openCheckedDirectory(
+  directory: RootedPath,
+  context: InvocationContext,
+): Promise<CheckedDirectory> {
+  const { handle } = await openChecked(directory, "list", context);
+  try {
+    const bound = descriptorPath(handle);
+    const entries = await opendir(bound);
+    return {
+      entries,
+      bound,
+      // Iterating to the end closes the Dir; the descriptor is closed here.
+      close: () => handle.close(),
+    };
+  } catch (cause) {
+    await handle.close();
+    throw cause;
+  }
+}
+
+/** Bytes per replacement write; cancellation is checked between them. */
+const replaceChunkBytes = 16 * 1_024;
+
+/**
+ * Replace one checked file atomically, inside the folder it was checked in.
+ * The folder is held by a descriptor bound to that check, so a sandboxed
+ * child swapping it (or the leaf) for a symlink cannot redirect the read or
+ * the write. The new bytes go to a fresh temporary file in that held folder,
+ * are synced, and are renamed over the leaf only while the leaf is still the
+ * file that was read; any interruption before the rename leaves it whole.
+ */
+async function replaceChecked(
+  path: RootedPath,
+  input: Readonly<{ path: string; expectedContent: string; content: string }>,
+  context: InvocationContext,
+  admitWrite: () => void,
+): Promise<number> {
+  const { handle: folder, metadata: folderMetadata } = await openChecked(
+    { requested: path.requested, resolved: dirname(path.resolved) },
+    "replace",
+    context,
+  );
+  try {
+    if (!folderMetadata.isDirectory())
+      throw new Error(`Files path changed during replace: ${path.requested}`);
+    const held = descriptorPath(folder);
+    const leaf = join(held, basename(path.resolved));
+    const original = await readHeldLeaf(leaf, path, context);
+    if (original.content !== input.expectedContent)
+      throw new FilesEditError(
+        "conflict",
+        input.path,
+        "File changed since it was read; read it again before editing",
+      );
+    const content = utf8.encode(input.content);
+    if (content.byteLength > maximumFileBytes) {
+      throw new FilesEditError(
+        "file-too-large",
+        input.path,
+        `Result exceeds ${String(maximumFileBytes)} bytes; use files.patch for a small change`,
+      );
+    }
+    checkCancellation(context);
+    admitWrite();
+    const temporary = join(
+      held,
+      `.${basename(path.resolved)}.${correlationKey()}.fungi-replace`,
+    );
+    const staged = await open(
+      temporary,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      try {
+        await staged.chmod(original.metadata.mode & 0o7777);
+        let written = 0;
+        while (written < content.byteLength) {
+          const next = await staged.write(
+            content,
+            written,
+            Math.min(replaceChunkBytes, content.byteLength - written),
+            written,
+          );
+          written += next.bytesWritten;
+          checkCancellation(context);
+        }
+        await staged.sync();
+      } finally {
+        await staged.close();
+      }
+      checkCancellation(context);
+      const current = await lstat(leaf);
+      if (
+        current.dev !== original.metadata.dev ||
+        current.ino !== original.metadata.ino
+      )
+        throw new Error(`Files path changed during replace: ${path.requested}`);
+      await rename(temporary, leaf);
+    } catch (cause) {
+      await discardStaged(temporary, cause);
+    }
+    await folder.sync();
+    return content.byteLength;
+  } finally {
+    await folder.close();
+  }
+}
+
+/** The held folder's leaf, opened without following a symlink, and its whole text. */
+async function readHeldLeaf(
+  leaf: string,
+  path: RootedPath,
+  context: InvocationContext,
+): Promise<Readonly<{ content: string; metadata: Stats }>> {
+  checkCancellation(context);
+  let handle: FileHandle;
+  try {
+    handle = await open(leaf, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (cause) {
+    if (missingPath(cause))
+      throw new FilesPathError("not-found", path.requested);
+    // The checked leaf is a regular file; a symlink here was swapped in.
+    if (cause instanceof Error && "code" in cause && cause.code === "ELOOP")
+      throw new Error(`Files path changed during replace: ${path.requested}`, {
+        cause,
+      });
+    throw cause;
+  }
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile())
+      throw new FilesPathError("not-file", path.requested);
+    return {
+      content: await readOpenText(
+        { handle, size: metadata.size },
+        path,
+        context,
+      ),
+      metadata,
+    };
+  } finally {
+    await handle.close();
+  }
+}
+
+/** Remove an unrenamed temporary file, then report why the replacement stopped. */
+async function discardStaged(
+  temporary: string,
+  cause: unknown,
+): Promise<never> {
+  try {
+    await unlink(temporary);
+  } catch (cleanup) {
+    if (!missingPath(cleanup))
+      throw new AggregateError(
+        [cause, cleanup],
+        "Files replace stopped and its temporary file remains",
+        { cause: cleanup },
+      );
+  }
+  throw cause;
+}
+
 /**
  * One canonical invocation root and every pathname decision made beneath it.
  *
- * This is same-user containment, not an OS sandbox against pathname races.
+ * Same-user containment; each opened file is re-bound to its checked path.
  */
 class InvocationRoot {
-  static async capture(path: string): Promise<InvocationRoot> {
-    return new InvocationRoot(await realpath(resolve(path)));
+  static async capture(
+    path: string,
+    hidden: () => readonly string[],
+  ): Promise<InvocationRoot> {
+    return new InvocationRoot(await realpath(resolve(path)), hidden);
   }
 
-  private constructor(readonly canonicalPath: string) {}
+  private constructor(
+    readonly canonicalPath: string,
+    private readonly hidden: () => readonly string[],
+  ) {}
+
+  /** Whether the live mode hides this path from the Agent, as commands see it. */
+  hides(path: string): boolean {
+    return this.hidden().some((record) => within(record, path));
+  }
 
   async existing(
     requested: string,
@@ -279,6 +528,9 @@ class InvocationRoot {
     this.assertContained(candidate, requested);
     const resolvedPath = await existingRealpath(candidate, requested);
     this.assertContained(resolvedPath, requested);
+    // A hidden record is absent to the Agent, exactly as the child's mask shows it.
+    if (this.hides(candidate) || this.hides(resolvedPath))
+      throw new FilesPathError("not-found", requested);
     return { requested, resolved: resolvedPath };
   }
 
@@ -294,17 +546,19 @@ class InvocationRoot {
   }
 
   private assertContained(candidate: string, requested: string): void {
-    const fromRoot = relative(this.canonicalPath, candidate);
-    if (
-      fromRoot === "" ||
-      (!fromRoot.startsWith(`..${sep}`) &&
-        fromRoot !== ".." &&
-        !isAbsolute(fromRoot))
-    ) {
-      return;
-    }
+    if (within(this.canonicalPath, candidate)) return;
     throw new FilesPathError("outside-root", requested);
   }
+}
+
+function within(root: string, path: string): boolean {
+  const fromRoot = relative(root, path);
+  return (
+    fromRoot === "" ||
+    (!fromRoot.startsWith(`..${sep}`) &&
+      fromRoot !== ".." &&
+      !isAbsolute(fromRoot))
+  );
 }
 
 async function readBytesAt(
@@ -407,33 +661,42 @@ async function readBoundedText(
 ): Promise<string> {
   const file = await openRegularFile(path, context);
   try {
-    if (file.size > maximumFileBytes) {
-      throw new FilesTextError(
-        `Files path exceeds the ${String(maximumFileBytes)}-byte bound: ${path.requested}`,
-      );
-    }
-    const buffer = Buffer.alloc(maximumFileBytes + 1);
-    let bytesRead = 0;
-    while (bytesRead < buffer.byteLength) {
-      checkCancellation(context);
-      const next = await file.handle.read(
-        buffer,
-        bytesRead,
-        buffer.byteLength - bytesRead,
-        bytesRead,
-      );
-      if (next.bytesRead === 0) break;
-      bytesRead += next.bytesRead;
-    }
-    if (bytesRead > maximumFileBytes) {
-      throw new FilesTextError(
-        `Files path exceeds the ${String(maximumFileBytes)}-byte bound: ${path.requested}`,
-      );
-    }
-    return decodeUtf8(buffer.subarray(0, bytesRead), path.requested).content;
+    return await readOpenText(file, path, context);
   } finally {
     await file.handle.close();
   }
+}
+
+/** The whole bounded UTF-8 text of one already-bound open file. */
+async function readOpenText(
+  file: OpenFile,
+  path: RootedPath,
+  context: InvocationContext,
+): Promise<string> {
+  if (file.size > maximumFileBytes) {
+    throw new FilesTextError(
+      `Files path exceeds the ${String(maximumFileBytes)}-byte bound: ${path.requested}`,
+    );
+  }
+  const buffer = Buffer.alloc(maximumFileBytes + 1);
+  let bytesRead = 0;
+  while (bytesRead < buffer.byteLength) {
+    checkCancellation(context);
+    const next = await file.handle.read(
+      buffer,
+      bytesRead,
+      buffer.byteLength - bytesRead,
+      bytesRead,
+    );
+    if (next.bytesRead === 0) break;
+    bytesRead += next.bytesRead;
+  }
+  if (bytesRead > maximumFileBytes) {
+    throw new FilesTextError(
+      `Files path exceeds the ${String(maximumFileBytes)}-byte bound: ${path.requested}`,
+    );
+  }
+  return decodeUtf8(buffer.subarray(0, bytesRead), path.requested).content;
 }
 
 async function readGrepCandidate(
@@ -503,36 +766,51 @@ async function* walkFiles(
     if (ancestors.has(directory)) return;
     const childAncestors = new Set(ancestors).add(directory);
     checkCancellation(context);
-    const handle = await opendir(directory);
-    for await (const entry of handle) {
-      checkCancellation(context);
-      const candidate = join(directory, entry.name);
-      if (
-        !(await visiblePath(root, visibility, candidate, entry.isDirectory()))
-      )
-        continue;
-      if (!budget.admitCandidate()) return;
-      const relativePath =
-        relativeParent === "" ? entry.name : join(relativeParent, entry.name);
-      const resolvedPath = await root.walked(
-        candidate,
-        outputPath(base.requested, relativePath),
-        context,
-      );
-      checkCancellation(context);
-      const metadata = await stat(resolvedPath);
-      const walkedEntry = {
-        relativePath,
-        resolvedPath,
-        isDirectory: metadata.isDirectory(),
-        isFile: metadata.isFile(),
-        size: metadata.size,
-      };
-      yield walkedEntry;
-      if (walkedEntry.isDirectory) {
-        yield* visit(resolvedPath, relativePath, childAncestors);
-        if (budget.exhausted) return;
+    const checked = await openCheckedDirectory(
+      {
+        requested:
+          relativeParent === ""
+            ? base.requested
+            : outputPath(base.requested, relativeParent),
+        resolved: directory,
+      },
+      context,
+    );
+    try {
+      for await (const entry of checked.entries) {
+        checkCancellation(context);
+        const candidate = join(directory, entry.name);
+        if (
+          root.hides(candidate) ||
+          !(await visiblePath(root, visibility, candidate, entry.isDirectory()))
+        )
+          continue;
+        if (!budget.admitCandidate()) return;
+        const relativePath =
+          relativeParent === "" ? entry.name : join(relativeParent, entry.name);
+        const resolvedPath = await root.walked(
+          candidate,
+          outputPath(base.requested, relativePath),
+          context,
+        );
+        if (root.hides(resolvedPath)) continue;
+        checkCancellation(context);
+        const metadata = await stat(resolvedPath);
+        const walkedEntry = {
+          relativePath,
+          resolvedPath,
+          isDirectory: metadata.isDirectory(),
+          isFile: metadata.isFile(),
+          size: metadata.size,
+        };
+        yield walkedEntry;
+        if (walkedEntry.isDirectory) {
+          yield* visit(resolvedPath, relativePath, childAncestors);
+          if (budget.exhausted) return;
+        }
       }
+    } finally {
+      await checked.close();
     }
   }
 
@@ -569,27 +847,36 @@ async function listLevel(
   visibility: SearchVisibility,
   context: InvocationContext,
 ): Promise<SearchOutput> {
-  const handle = await opendir(directory.resolved);
-  const results: Found[] = [];
-  for await (const entry of handle) {
-    checkCancellation(context);
-    if (
-      !(await visiblePath(
-        root,
-        visibility,
-        join(directory.resolved, entry.name),
-        entry.isDirectory(),
-      ))
-    )
-      continue;
-    if (results.length === input.limit) {
-      return { path: input.path, results, truncated: "limit" };
+  const { entries, bound, close } = await openCheckedDirectory(
+    directory,
+    context,
+  );
+  try {
+    const results: Found[] = [];
+    for await (const entry of entries) {
+      checkCancellation(context);
+      const candidate = join(directory.resolved, entry.name);
+      if (
+        root.hides(candidate) ||
+        !(await visiblePath(root, visibility, candidate, entry.isDirectory()))
+      )
+        continue;
+      if (results.length === input.limit) {
+        return { path: input.path, results, truncated: "limit" };
+      }
+      const path = outputPath(input.path, entry.name);
+      results.push({
+        path,
+        type: entryType(
+          typed(entry) ? entry : await lstat(join(bound, entry.name)),
+          path,
+        ),
+      });
     }
-    const metadata = await lstat(join(directory.resolved, entry.name));
-    const path = outputPath(input.path, entry.name);
-    results.push({ path, type: entryType(metadata, path) });
+    return { path: input.path, results, truncated: null };
+  } finally {
+    await close();
   }
-  return { path: input.path, results, truncated: null };
 }
 
 /** One bounded walk for a glob or content search with an optional include glob. */
@@ -733,8 +1020,9 @@ function createWriteQueue() {
  * Construct the private local Files port for one captured invocation root.
  *
  * Resolved paths stay under the captured canonical root, including admitted
- * in-root symlinks. This is trusted same-user containment, not protection from
- * a same-user process racing pathname resolution.
+ * in-root symlinks. Each opened file is re-bound to its checked path, and the
+ * live mode's hidden records stay absent, so a sandboxed child cannot steer a
+ * host read past either decision. Full access trusts the same-user host.
  */
 export async function createPrivateInvocationFilesPort(
   path: string,
@@ -742,7 +1030,10 @@ export async function createPrivateInvocationFilesPort(
   sandbox?: LocalSandboxWrites,
   mode: () => LocalPermissionMode = () => "full-access",
 ): Promise<FilesPort> {
-  const root = await InvocationRoot.capture(path);
+  const root = await InvocationRoot.capture(
+    path,
+    () => sandbox?.hiddenRecords() ?? [],
+  );
   const write = createWriteQueue();
   const port: FilesPort = {
     assertEditable(requested) {
@@ -787,26 +1078,9 @@ export async function createPrivateInvocationFilesPort(
         checkCancellation(context);
         port.assertEditable?.(input.path);
         const path = await root.existing(input.path, context);
-        const current = await readBoundedText(path, context);
-        if (current !== input.expectedContent)
-          throw new FilesEditError(
-            "conflict",
-            input.path,
-            "File changed since it was read; read it again before editing",
-          );
-        const bytes = utf8.encode(input.content).byteLength;
-        if (bytes > maximumFileBytes) {
-          throw new FilesEditError(
-            "file-too-large",
-            input.path,
-            `Result exceeds ${String(maximumFileBytes)} bytes; use files.patch for a small change`,
-          );
-        }
-        checkCancellation(context);
-        sandbox?.assertWrite([path.resolved]);
-        await writeFileAtomic(path.resolved, input.content, {
-          encoding: "utf8",
-        });
+        const bytes = await replaceChecked(path, input, context, () =>
+          sandbox?.assertWrite([path.resolved]),
+        );
         return { path: input.path, bytes };
       });
     },

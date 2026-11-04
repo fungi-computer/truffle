@@ -86,6 +86,19 @@ function covers(root: string, path: string): boolean {
   return within(root, path);
 }
 
+/**
+ * Fungi's credentials and Local service record: every sandboxed mode hides
+ * them from commands, and host-side Files operations keep the same boundary.
+ */
+export function fungiHiddenRecords(
+  host: NodeJS.ProcessEnv,
+  /** Pass the real passwd home in production; fixtures supply their own. */
+  osHome: string,
+): string[] {
+  const home = host.HOME ?? osHome;
+  return [join(home, ".config", "fungi"), join(home, ".fungi", "service")];
+}
+
 export function linuxSandboxProfile(
   policy: LocalSandboxPolicy,
   mode: "workspace" | "read-only",
@@ -171,8 +184,7 @@ export function linuxSandboxProfile(
         ? [...new Set([policy.writableRoot, ...writableCaches])]
         : [],
     hidden: [
-      join(home, ".config", "fungi"),
-      join(home, ".fungi", "service"),
+      ...fungiHiddenRecords(host, osHome),
       // Linux mounts a private tmpfs over siblings after re-binding our temp.
       // Seatbelt's path denial would also hide the Agent's own fallback temp.
       ...(platform === "linux" ? fallbackTemporaryBases : []),

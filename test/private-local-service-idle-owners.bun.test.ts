@@ -24,12 +24,13 @@ import {
 const fixture = join(import.meta.dir, "fixtures", "idle-owners-service.ts");
 const agentsPerRound = 16;
 
-/** What a released Agent may still retain, measured per distinct Agent. */
-const retainedObjectsPerAgent = 16;
-const retainedHeapBytesPerAgent = 32_768;
+/**
+ * Released Agents a conservative stack scan may still pin at one sample, the
+ * same allowance the open-store fd bound uses below.
+ */
+const pinnedAgentAllowance = 3;
 const heapSchema = z.object({
-  objectCount: z.number().int().nonnegative(),
-  heapSize: z.number().int().nonnegative(),
+  statements: z.number().int().nonnegative(),
 });
 
 /** Read-only: this service's open Agent-store files. */
@@ -166,8 +167,9 @@ it.skipIf(process.platform !== "linux")(
       expect(await listed()).toBe(0);
 
       // Live: each round of distinct Agents is released once idle, so fds
-      // return to a bound and retained objects stop growing with the Agents
-      // ever opened.
+      // return to a bound and the Agents the heap still holds stop growing
+      // with the Agents ever opened.
+      const idle = await sample(second.child, second.record.pid);
       const released: Awaited<ReturnType<typeof sample>>[] = [];
       for (let pass = 0; pass < 8; pass += 1) {
         await openRound(secondBase);
@@ -175,24 +177,14 @@ it.skipIf(process.platform !== "linux")(
         released.push(await sample(second.child, second.record.pid));
       }
       // JSC scans the stack conservatively, so a collection may still miss
-      // the last released Agent's connection; it never grows per round.
-      for (const { stores } of released) expect(stores).toBeLessThanOrEqual(3);
-      // The first rounds warm the service. After them, the rounds that follow
-      // open distinct Agents that must not stay reachable once released. A
-      // conservative stack scan can pin a transient burst in a single sample,
-      // so compare the smallest of the last three samples with the warmed one.
-      const warmed = released[3];
-      const settled = released.slice(-3);
-      if (warmed === undefined || settled.length < 3)
-        throw new Error("Missing samples");
-      const laterAgents = (released.length - 3 - 3) * agentsPerRound;
-      expect(
-        Math.min(...settled.map((sample) => sample.objectCount)) -
-          warmed.objectCount,
-      ).toBeLessThanOrEqual(retainedObjectsPerAgent * laterAgents);
-      expect(
-        Math.min(...settled.map((sample) => sample.heapSize)) - warmed.heapSize,
-      ).toBeLessThanOrEqual(retainedHeapBytesPerAgent * laterAgents);
+      // the last released Agents; that never grows per round. Eight rounds
+      // open 128 distinct Agents, so a leak exceeds both bounds at once.
+      for (const { stores, statements } of released) {
+        expect(stores).toBeLessThanOrEqual(pinnedAgentAllowance);
+        expect(statements - idle.statements).toBeLessThanOrEqual(
+          pinnedAgentAllowance,
+        );
+      }
       second.child.kill("SIGTERM");
       expect(await second.child.exited).toBe(0);
     } finally {

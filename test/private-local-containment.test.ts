@@ -18,7 +18,7 @@ import { tmpdir, userInfo } from "node:os";
 import { createServer } from "node:net";
 import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   establishLocalSandbox,
   LocalSandboxUnavailable,
@@ -208,6 +208,38 @@ it("refuses Files writes into protected markers even before .git exists", () => 
     }).toThrow(ProtectedLocalFilesPath);
   } finally {
     controls.close();
+  }
+});
+
+it("hides Fungi records from Files in sandboxed modes and refuses writes into them", () => {
+  const project = fixture();
+  // The Agent folder is HOME here, so the hidden records lie inside it.
+  vi.stubEnv("HOME", join(project, "agent"));
+  let mode: "workspace" | "full-access" = "workspace";
+  const controls = policyControls({
+    project,
+    folder: "agent",
+    mode: () => mode,
+  });
+  try {
+    const credentials = join(project, "agent", ".config", "fungi");
+    expect(controls.hiddenRecords()).toEqual(
+      expect.arrayContaining([
+        credentials,
+        join(project, "agent", ".fungi", "service"),
+      ]),
+    );
+    expect(() => {
+      controls.assertWrite([join(credentials, "credentials.json")]);
+    }).toThrow(ProtectedLocalFilesPath);
+    expect(() => {
+      controls.assertWrite([join(project, "agent", ".config", "note.txt")]);
+    }).not.toThrow();
+    mode = "full-access";
+    expect(controls.hiddenRecords()).toEqual([]);
+  } finally {
+    controls.close();
+    vi.unstubAllEnvs();
   }
 });
 

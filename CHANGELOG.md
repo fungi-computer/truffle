@@ -1,5 +1,26 @@
 # @fungi.computer/truffle
 
+## 0.8.1
+
+### Patch Changes
+
+- Changes since 0.8.0:
+
+  - fix(truffle): keep bound Files replacements atomic
+  - fix(truffle): bind Files listings and replacements to the checked object
+  - fix(truffle): keep Fungi hidden records out of Workspace Files
+  - fix(local): count retained Agents, not heap objects, in the idle-owner proof
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/nacre@0.2.0
+  - @fungi.computer/shiitake@0.10.0
+  - @fungi.computer/veil@0.5.0
+  - @fungi.computer/graft@0.2.3
+  - @fungi.computer/shiitake-extensions@0.6.4
+  - @fungi.computer/zookeeper@0.0.11
+
 ## 0.8.0
 
 ### Minor Changes
