@@ -1,5 +1,28 @@
 # @fungi.computer/truffle
 
+## 0.8.2
+
+### Patch Changes
+
+- Changes since 0.8.1:
+
+  - fix(truffle): keep the project .fungi read-only below a host cache
+  - fix(truffle): keep sandbox-hidden records out of host skill reads
+  - fix(truffle): pin hidden records' parents in the Linux Workspace sandbox
+  - fix(truffle): require the invocation secret on the code-mode listener
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/lantern@0.4.0
+  - @fungi.computer/seam@0.2.2
+  - @fungi.computer/shiitake@0.11.0
+  - @fungi.computer/veil@0.6.0
+  - @fungi.computer/graft@0.2.4
+  - @fungi.computer/shiitake-extensions@0.6.5
+  - @fungi.computer/zookeeper@0.0.12
+
 ## 0.8.1
 
 ### Patch Changes

@@ -267,7 +267,11 @@ export function createLocalSandboxControls(
     throw new LocalSandboxUnavailable(unavailable);
   }
   const hiddenRecords = () =>
-    fungiHiddenRecords(process.env, userInfo().homedir);
+    fungiHiddenRecords(
+      process.env,
+      userInfo().homedir,
+      input.platform ?? process.platform,
+    );
   const assertReady = () => {
     if (input.mode() === "full-access") return;
     launch(folder.absolute, ["/usr/bin/true"]);

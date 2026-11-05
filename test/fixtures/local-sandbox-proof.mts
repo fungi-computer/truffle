@@ -231,10 +231,11 @@ try {
     const run = async (
       sandboxMode: typeof workspace.sandbox,
       script: string,
+      cwd = folder,
     ) => {
-      const launch = sandboxMode.command(folder, ["sh", "-c", script]);
+      const launch = sandboxMode.command(cwd, ["sh", "-c", script]);
       const child = spawn(launch.executable, [...launch.args], {
-        cwd: folder,
+        cwd,
         env: { ...environment, ...launch.environment },
         timeout: 120_000,
         stdio: ["ignore", "pipe", "pipe", "pipe"],
@@ -295,6 +296,107 @@ try {
         }
       }
       console.log("PASS: absent default and XDG Fungi caches cannot be seeded");
+      // A project inside a host cache keeps its host-trusted .fungi read-only
+      // from an Agent subfolder: the covering cache is not a writable grant.
+      // The runtime host creates the project .fungi before an Agent runs.
+      const previousCache = process.env.XDG_CACHE_HOME;
+      const hostCache = join(root, "xdg-cache");
+      process.env.XDG_CACHE_HOME = hostCache;
+      const cachedProject = join(hostCache, "proj");
+      const cachedFolder = join(cachedProject, "sub");
+      await mkdir(cachedFolder, { recursive: true });
+      await mkdir(join(cachedProject, ".fungi"));
+      const cached = establishLocalSandbox({
+        project: cachedProject,
+        folder: cachedFolder,
+        mode: "workspace",
+        temporaryDirectory: environment.TMPDIR,
+      });
+      assert.equal(cached.state, "ready", JSON.stringify(cached));
+      try {
+        const rules = join(cachedProject, ".fungi", "exec-rules.json");
+        const planted = await run(
+          cached.sandbox,
+          "printf '{}' > ../.fungi/exec-rules.json",
+          cachedFolder,
+        );
+        assert.notEqual(
+          planted.status,
+          0,
+          "Workspace wrote the project .fungi through a covering cache grant",
+        );
+        await assert.rejects(stat(rules), { code: "ENOENT" });
+        const sibling = await run(
+          cached.sandbox,
+          "printf x > ../sibling",
+          cachedFolder,
+        );
+        assert.notEqual(
+          sibling.status,
+          0,
+          "Workspace wrote outside its Agent folder through a cache grant",
+        );
+        const own = await run(cached.sandbox, "printf x > own", cachedFolder);
+        assert.equal(own.status, 0, own.stderr);
+      } finally {
+        cached.sandbox.close();
+        if (previousCache === undefined) delete process.env.XDG_CACHE_HOME;
+        else process.env.XDG_CACHE_HOME = previousCache;
+      }
+      console.log(
+        "PASS: a project inside a host cache keeps .fungi and siblings read-only",
+      );
+      // With HOME as the Workspace folder, one command must not rename the
+      // credential record's parent so that a later command reads it unmasked.
+      const homeFolder = join(project, "home-agent");
+      await mkdir(join(homeFolder, ".config", "fungi"), { recursive: true });
+      await writeFile(
+        join(homeFolder, ".config", "fungi", "credentials.json"),
+        "secret",
+      );
+      process.env.HOME = homeFolder;
+      try {
+        const homeWorkspace = establishLocalSandbox({
+          project,
+          folder: homeFolder,
+          mode: "workspace",
+          temporaryDirectory: environment.TMPDIR,
+        });
+        assert.equal(
+          homeWorkspace.state,
+          "ready",
+          JSON.stringify(homeWorkspace),
+        );
+        try {
+          const moved = join(homeFolder, ".moved");
+          assert.notEqual(
+            (
+              await run(
+                homeWorkspace.sandbox,
+                `mv ${join(homeFolder, ".config")} ${moved}`,
+              )
+            ).status,
+            0,
+            "Workspace renamed the credential record's parent",
+          );
+          assert.notEqual(
+            (
+              await run(
+                homeWorkspace.sandbox,
+                `cat ${join(moved, "fungi", "credentials.json")}`,
+              )
+            ).status,
+            0,
+          );
+        } finally {
+          homeWorkspace.sandbox.close();
+        }
+      } finally {
+        process.env.HOME = home;
+      }
+      console.log(
+        "PASS: a Workspace HOME folder cannot rename hidden records out of their masks",
+      );
       assert.equal(
         (await run(workspace.sandbox, "printf persisted > /tmp/persisted"))
           .status,

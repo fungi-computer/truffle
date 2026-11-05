@@ -409,7 +409,8 @@ it("Full access runs a real Agent command bare outside its folder without bwrap"
   } finally {
     await host.close();
   }
-});
+  // ~1 s alone; measured 5.06 s in a full test:node run, past vitest's 5 s default.
+}, 30_000);
 
 it("a fresh Agent defaults to Full access with the failed sandbox probe reason", async () => {
   const fixture = await sandboxProductionFixture();
@@ -785,7 +786,9 @@ it.runIf(process.platform === "linux")(
         waitForAgentSettlement(
           host.session,
           accepted.commandId,
-          3_000,
+          // Four tools, two of them the real sandboxed native patch: ~1 s idle,
+          // measured 4.8 s under merge-gate load (batch 2885).
+          20_000,
           new AbortController().signal,
         ).then(({ terminal }) => terminal),
       ).resolves.toMatchObject({ outcome: "completed" });
@@ -800,6 +803,7 @@ it.runIf(process.platform === "linux")(
       await host.close();
     }
   },
+  30_000,
 );
 
 it

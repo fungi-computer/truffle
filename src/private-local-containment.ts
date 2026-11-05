@@ -7,16 +7,14 @@ import {
   type NativePayloadStaging,
 } from "./private-local-native-staging.js";
 import { linuxSandboxCommand } from "./private-local-linux-sandbox.js";
-import {
-  seatbeltCommand,
-  UnsafeSeatbeltFolder,
-} from "./private-local-seatbelt.js";
+import { seatbeltCommand } from "./private-local-seatbelt.js";
 import {
   sandboxPolicy,
   linuxSandboxProfile,
   UnsafeGitMarker,
   UnsafeHostCode,
   UnsafeNativePayload,
+  UnsafeSandboxFolder,
 } from "./private-local-sandbox-policy.js";
 import { z } from "zod";
 import type { LocalPermissionMode } from "./private-local-permission-mode.js";
@@ -64,7 +62,7 @@ export function sandboxUnavailableReason(
 ): SandboxUnavailableReason {
   if (cause instanceof UnsafeGitMarker)
     return { kind: "folder", message: cause.message };
-  if (cause instanceof UnsafeSeatbeltFolder)
+  if (cause instanceof UnsafeSandboxFolder)
     return { kind: "folder", message: cause.message };
   if (cause instanceof UnsafeHostCode)
     return { kind: "install", message: cause.message };

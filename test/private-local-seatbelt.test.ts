@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { seatbeltCommand } from "../src/private-local-seatbelt.js";
 import {
@@ -18,12 +18,14 @@ afterEach(() => {
 function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "fungi-seatbelt-")));
   directories.push(root);
-  const writableRoot = join(root, 'work "a"');
+  // Host HOME and caches live beside the project, never inside it.
+  const projectRoot = join(root, "project");
+  const writableRoot = join(projectRoot, 'work "a"');
   const temporaryDirectory = join(root, "private-temp");
-  mkdirSync(writableRoot);
+  mkdirSync(writableRoot, { recursive: true });
   mkdirSync(temporaryDirectory);
   return {
-    projectRoot: root,
+    projectRoot,
     writableRoot,
     temporaryDirectory,
     readOnly: [
@@ -42,7 +44,7 @@ function seatbeltProfile(
   policy: Parameters<typeof linuxSandboxProfile>[0] &
     Readonly<{ temporaryDirectory: string }>,
   mode: "read-only" | "workspace",
-  home = join(policy.projectRoot, "home"),
+  home = join(dirname(policy.projectRoot), "home"),
 ) {
   return linuxSandboxProfile(
     policy,
@@ -77,6 +79,24 @@ describe("Seatbelt command policy", () => {
     expect(command.args[1]).toContain(
       `(require-not (literal (param "PROTECTED_${String(index)}")))`,
     );
+    expect(command.args[1]).toContain(
+      `(require-not (subpath (param "PROTECTED_${String(index)}")))`,
+    );
+  });
+
+  it("protects the project .fungi from an Agent folder below the project", () => {
+    const { projectRoot, writableRoot, temporaryDirectory } = fixture();
+    const policy = {
+      ...sandboxPolicy(projectRoot, writableRoot),
+      temporaryDirectory,
+    };
+    const fungi = join(projectRoot, ".fungi");
+    const index = policy.readOnly.indexOf(fungi);
+    expect(index).toBeGreaterThanOrEqual(0);
+    const command = seatbeltCommand(seatbeltProfile(policy, "workspace"), [
+      "/usr/bin/true",
+    ]);
+    expect(command.args).toContain(`PROTECTED_${String(index)}=${fungi}`);
     expect(command.args[1]).toContain(
       `(require-not (subpath (param "PROTECTED_${String(index)}")))`,
     );
@@ -188,7 +208,7 @@ describe("Seatbelt command policy", () => {
   });
   it("Workspace writes only the Agent folder and temp; Fungi records are hidden", () => {
     const policy = fixture();
-    const home = join(policy.projectRoot, "home");
+    const home = join(dirname(policy.projectRoot), "home");
     mkdirSync(home);
     const command = seatbeltCommand(
       seatbeltProfile(policy, "workspace", home),
@@ -226,7 +246,7 @@ describe("Seatbelt command policy", () => {
 
   it("refuses writable roots that can rename Fungi records or their parents", () => {
     const base = fixture();
-    const home = join(base.projectRoot, "home");
+    const home = join(dirname(base.projectRoot), "home");
     const config = join(home, ".config");
     const fungi = join(config, "fungi");
     const state = join(home, ".fungi");
@@ -263,7 +283,7 @@ describe("Seatbelt command policy", () => {
 
   it("preserves the Agent's fallback Mac temp while Linux masks sibling temps", () => {
     const base = fixture();
-    const home = join(base.projectRoot, "home");
+    const home = join(dirname(base.projectRoot), "home");
     const tempBase = join(home, ".cache", "fungi", "tmp");
     const ownTemp = join(tempBase, "agent");
     mkdirSync(ownTemp, { recursive: true });
@@ -301,7 +321,7 @@ describe("Seatbelt command policy", () => {
 
   it("Workspace lets pnpm write its macOS default store and cache, not a project-local fallback", () => {
     const base = fixture();
-    const home = join(base.projectRoot, "home");
+    const home = join(dirname(base.projectRoot), "home");
     // pnpm 11 on macOS without PNPM_HOME/XDG_*: ~/Library/pnpm/store and
     // ~/Library/Caches/pnpm. Unwritable, pnpm silently links the project from
     // a store at the volume or project root, and the owner's next ordinary
@@ -327,7 +347,7 @@ describe("Seatbelt command policy", () => {
 
   it("Workspace fallback temp grant cannot inherit the Fungi cache write exclusion", () => {
     const base = fixture();
-    const home = join(base.projectRoot, "home");
+    const home = join(dirname(base.projectRoot), "home");
     const cache = join(home, ".cache");
     const ownTemp = join(cache, "fungi", "tmp", "agent");
     mkdirSync(ownTemp, { recursive: true });

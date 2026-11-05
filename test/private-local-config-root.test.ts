@@ -47,7 +47,11 @@ it("passes captured A through the existing leaf parameters after ambient HOME be
     await expect(
       access(join(homeB, ".config", "fungi", "credentials.json")),
     ).rejects.toMatchObject({ code: "ENOENT" });
-    const skills = createLocalSkillSource({ cwd: project, home: root.home });
+    const skills = createLocalSkillSource({
+      cwd: project,
+      home: root.home,
+      hidden: () => [],
+    });
     const signal = new AbortController().signal;
     expect((await skills.read("selected", undefined, signal)).content).toBe(
       homeA,

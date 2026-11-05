@@ -78,6 +78,7 @@ async function names(
     cwd: project,
     home,
     extensions: skills,
+    hidden: () => [],
   });
   return (await source.catalog(signal)).skills.map((skill) => skill.name);
 }
@@ -169,7 +170,11 @@ test("skills source reads from its selected home after ambient HOME changes", as
   const previous = process.env.HOME;
   try {
     process.env.HOME = ambientHome;
-    const source = createLocalSkillSource({ cwd: project, home });
+    const source = createLocalSkillSource({
+      cwd: project,
+      home,
+      hidden: () => [],
+    });
     expect(
       (await source.catalog(signal)).skills.map((skill) => skill.name),
     ).not.toContain("ambient");

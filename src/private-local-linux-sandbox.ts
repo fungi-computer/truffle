@@ -1,7 +1,14 @@
-import { existsSync, mkdirSync, realpathSync, statSync } from "node:fs";
-import { isAbsolute, join, relative, sep } from "node:path";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
+import { dirname, isAbsolute, join, relative, sep } from "node:path";
 import {
   protectedSandboxPaths,
+  UnsafeSandboxFolder,
   type LinuxSandboxProfile,
 } from "./private-local-sandbox-policy.js";
 
@@ -16,7 +23,8 @@ export function linuxSandboxCommand(
 ) {
   const root = policy.writableRoot;
   // Bind sources must exist. Only the trusted host prepares the reserved paths.
-  mkdirSync(join(root, ".fungi"), { recursive: true });
+  for (const path of new Set([policy.projectRoot, root]))
+    mkdirSync(join(path, ".fungi"), { recursive: true });
   // A missing carve-out would be skipped by the existing-path ro-bind loop,
   // allowing Workspace to seed self-attested native-patch cache receipts.
   if (policy.fungiCache !== undefined)
@@ -86,6 +94,15 @@ export function linuxSandboxCommand(
       if (existsSync(path) && statSync(path).isDirectory())
         args.push("--tmpfs", realpathSync(path));
   }
+  // A mask covers only its own logical path: a child that can write the
+  // record's parent could rename that parent away, and the next command would
+  // mask a path that no longer exists. Binding each writable ancestor onto
+  // itself makes it a mountpoint, which rename(2) refuses.
+  for (const path of hiddenRecordParentsInWritable(
+    policy.hidden,
+    policy.writable,
+  ))
+    args.push("--bind", path, path);
   for (const path of policy.hidden) {
     // Host /tmp is already replaced. An external fixture HOME beneath it has
     // no mountpoint in the guest; restoring it would reveal host data.
@@ -120,4 +137,40 @@ export function linuxSandboxCommand(
     args.push("--setenv", "FUNGI_SANDBOX_NETWORK_DISABLED", "1");
   args.push("--chdir", cwd, "--", ...argv);
   return { ...payload, args };
+}
+
+function within(root: string, path: string): boolean {
+  const remainder = relative(root, path);
+  return (
+    remainder !== "" &&
+    !isAbsolute(remainder) &&
+    remainder !== ".." &&
+    !remainder.startsWith(`..${sep}`)
+  );
+}
+
+/** Existing directories strictly between a writable grant and a hidden record, outermost first. */
+function hiddenRecordParentsInWritable(
+  hidden: readonly string[],
+  writable: readonly string[],
+): string[] {
+  const parents = new Set<string>();
+  for (const record of hidden)
+    for (const root of writable) {
+      if (!within(root, record)) continue;
+      const chain: string[] = [];
+      for (let path = dirname(record); within(root, path); path = dirname(path))
+        chain.unshift(path);
+      for (const path of chain) {
+        if (!existsSync(path)) break;
+        // A bind lands on a symlink's target, leaving the link itself movable.
+        if (lstatSync(path).isSymbolicLink())
+          throw new UnsafeSandboxFolder(
+            "Sandbox writable folder reaches a Fungi hidden record through a symlink.",
+          );
+        if (!statSync(path).isDirectory()) break;
+        parents.add(path);
+      }
+    }
+  return [...parents];
 }

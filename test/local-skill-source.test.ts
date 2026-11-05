@@ -27,7 +27,7 @@ async function fixture() {
     project,
     cwd,
     home,
-    source: createLocalSkillSource({ cwd, home }),
+    source: createLocalSkillSource({ cwd, home, hidden: () => [] }),
   };
 }
 async function skill(
@@ -65,9 +65,9 @@ describe("Local SkillSource", () => {
     await skill(home, ".agents/skills", "in-home", "Under home");
     const elsewhere = join(root, "elsewhere");
     const outside = await skill(elsewhere, "", "outside", "Neither root");
-    await mkdir(join(cwd, ".fungi"));
+    await mkdir(join(home, ".fungi"));
     await writeFile(
-      join(cwd, ".fungi/settings.json"),
+      join(home, ".fungi/settings.json"),
       JSON.stringify({ skills: [elsewhere] }),
     );
     const catalog = await source.catalog(signal);
@@ -512,6 +512,7 @@ describe("Local SkillSource", () => {
       cwd,
       home,
       extensions: [{ extensionId: "acme-tools", directory: extension }],
+      hidden: () => [],
     });
     const catalog = await source.catalog(signal);
     expect(
@@ -545,12 +546,13 @@ describe("Local SkillSource", () => {
       "only-ext",
       "From the extension",
     );
-    const without = createLocalSkillSource({ cwd, home });
+    const without = createLocalSkillSource({ cwd, home, hidden: () => [] });
     expect((await without.catalog(signal)).skills).toEqual([]);
     const withFolder = createLocalSkillSource({
       cwd,
       home,
       extensions: [{ extensionId: "acme-tools", directory: extension }],
+      hidden: () => [],
     });
     expect(
       (await withFolder.read("only-ext", undefined, signal)).baseDirectory,

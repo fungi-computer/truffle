@@ -79,8 +79,24 @@ class InvocationBindingTarget extends RpcTarget {
   }
 }
 
+const encoder = new globalThis.TextEncoder();
+
+/** Only the host that started this invocation holds its secret. */
+function fromInvocationHost(request, environment) {
+  const presented = encoder.encode(
+    request.headers.get("x-fungi-invocation-secret") ?? "",
+  );
+  const expected = encoder.encode(environment.INVOCATION_SECRET);
+  return (
+    presented.byteLength === expected.byteLength &&
+    globalThis.crypto.subtle.timingSafeEqual(presented, expected)
+  );
+}
+
 export default {
   async fetch(request, environment) {
+    if (!fromInvocationHost(request, environment))
+      return new globalThis.Response(null, { status: 403 });
     let input;
     try {
       input = sandboxRequestSchema.parse(await request.json());

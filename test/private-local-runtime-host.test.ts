@@ -1792,7 +1792,11 @@ describe("private local instructions and model selection", () => {
     const source = createPrivateLocalInstructionSource(
       await createPrivateInvocationFilesPort(root),
     );
-    const skills = createLocalSkillSource({ cwd: root, home: root });
+    const skills = createLocalSkillSource({
+      cwd: root,
+      home: root,
+      hidden: () => [],
+    });
     const signal = new AbortController().signal;
     const first = await source.load({
       sessionId: "main",

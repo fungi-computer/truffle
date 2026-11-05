@@ -2,14 +2,11 @@ import { readFileSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, relative, sep } from "node:path";
 import {
   protectedSandboxPaths,
+  UnsafeSandboxFolder,
   type LinuxSandboxProfile,
 } from "./private-local-sandbox-policy.js";
 
 const sandboxExecutable = "/usr/bin/sandbox-exec";
-
-export class UnsafeSeatbeltFolder extends Error {
-  override readonly name = "UnsafeSeatbeltFolder";
-}
 
 /**
  * Containment supplies the single command-time profile (including HOME-based
@@ -54,7 +51,7 @@ export function seatbeltCommand(
       hidden.some((path) => covers(root, dirname(path)) || covers(path, root)),
     )
   )
-    throw new UnsafeSeatbeltFolder(
+    throw new UnsafeSandboxFolder(
       "Seatbelt writable folder or temp contains a Fungi hidden record or its parent.",
     );
   const definitions: string[] = [];

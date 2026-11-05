@@ -6,6 +6,7 @@ import {
   sandboxTransportErrno,
 } from "@fungi.computer/mycelium/sandbox-boundary";
 import { nanoid } from "@fungi.computer/cairn";
+import { randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 
@@ -265,9 +266,17 @@ function createInvocationCallbacks(
   });
 }
 
+/**
+ * workerd listens on loopback TCP, which Workspace commands and other local
+ * users share. Only the host holding this invocation's secret may run code
+ * through it and so reach the invocation's bindings.
+ */
+const invocationSecretHeader = "x-fungi-invocation-secret";
+
 function createInvocationMiniflare(
   bundle: string,
   serviceBinding: V4FetchHandler,
+  secret: string,
 ): Miniflare {
   return new Miniflare(
     convertV4MiniflareOptions({
@@ -281,6 +290,7 @@ function createInvocationMiniflare(
       compatibilityDate: "2026-09-02",
       compatibilityFlags: ["nodejs_compat"],
       workerLoaders: { LOADER: {} },
+      bindings: { INVOCATION_SECRET: secret },
       serviceBindings: { INVOCATION: serviceBinding },
     }),
   );
@@ -288,6 +298,7 @@ function createInvocationMiniflare(
 
 async function dispatchInvocation(
   miniflare: Miniflare,
+  secret: string,
   request: SandboxRequest,
   signal: AbortSignal,
 ): Promise<SandboxResult> {
@@ -306,7 +317,10 @@ async function dispatchInvocation(
         url,
         {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: {
+            "content-type": "application/json",
+            [invocationSecretHeader]: secret,
+          },
           agent: false,
           signal,
         },
@@ -407,9 +421,10 @@ async function executeInvocation(
   }
   signal.throwIfAborted();
   const callbacks = createInvocationCallbacks(request);
+  const secret = randomBytes(32).toString("base64url");
   let miniflare: Miniflare;
   try {
-    miniflare = createInvocationMiniflare(bundle, callbacks.fetch);
+    miniflare = createInvocationMiniflare(bundle, callbacks.fetch, secret);
   } catch (rawCause) {
     throw new SandboxCrashed({ rawCause });
   }
@@ -426,7 +441,7 @@ async function executeInvocation(
   let result: SandboxResult;
   try {
     signal.throwIfAborted();
-    result = await dispatchInvocation(miniflare, request, signal);
+    result = await dispatchInvocation(miniflare, secret, request, signal);
   } catch (cause) {
     result = { ok: false, cause: sandboxFailure(cause) };
   } finally {

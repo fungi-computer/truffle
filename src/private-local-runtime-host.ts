@@ -1470,6 +1470,7 @@ export async function createPrivateLocalTools(
         cwd: root,
         home: configRoot.home,
         extensions: installed.skills,
+        hidden: () => sandbox?.hiddenRecords() ?? [],
       }),
     );
     for (const diagnostic of installed.diagnostics)

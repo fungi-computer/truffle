@@ -14,16 +14,18 @@ startup probe as security qualification.
 ## What the adapter does
 
 On Linux, the adapter retains a read-only host /, selected writable folder,
-private /tmp and /run, and known socket masks. For an existing R/.git marker,
-the whole marker and its Git-reported administration and common directories are
-read-only. No writable Git metadata binds or host-created absent markers exist.
-A single hardened rev-parse query, with fsmonitor, untracked cache and optional
-locks disabled, locates linked worktree administration; malformed or non-UTF-8
-answers grant nothing. No nested Git discovery is performed. Agent-created
-repositories are an accepted risk when the user runs git in the folder after the
-Agent's git init. Git writes in Workspace require the later S5 approval escape
-and S6 Always-allow support. Logical and resolved paths share one
-Files/bwrap/Seatbelt protection policy.
+private /tmp and /run, and known socket masks. Host cache grants that overlap
+the project stay read-only, and the project's and folder's `.fungi` are
+read-only in both sandboxed modes. For an existing R/.git marker, the whole
+marker and its Git-reported administration and common directories are read-only.
+No writable Git metadata binds or host-created absent markers exist. A single
+hardened rev-parse query, with fsmonitor, untracked cache and optional locks
+disabled, locates linked worktree administration; malformed or non-UTF-8 answers
+grant nothing. No nested Git discovery is performed. Agent-created repositories
+are an accepted risk when the user runs git in the folder after the Agent's git
+init. Git writes in Workspace require the later S5 approval escape and S6
+Always-allow support. Logical and resolved paths share one Files/bwrap/Seatbelt
+protection policy.
 
 The native staging owner verifies installed bwrap, both seccomp filters and the
 patch helper once, copies their bytes under a private runtime directory, then

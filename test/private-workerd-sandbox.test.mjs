@@ -10,7 +10,7 @@ import {
   WORKERD_ADMISSION_BUDGET_MS,
   WORKERD_TEST_TIMEOUT_MS,
 } from "./fixtures/private-workerd.fixture.mjs";
-/* global AbortController, DOMException, URL, console */
+/* global AbortController, DOMException, URL, console, fetch */
 import { createServer } from "node:http";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -51,6 +51,63 @@ describe("private local workerd Sandbox", () => {
       name,
       message: "guest-owned message",
     });
+  });
+
+  it("refuses code from a local caller that lacks the invocation secret", async () => {
+    // workerd listens on loopback TCP, which Workspace commands share.
+    const listeners = [];
+    const ready = Object.getOwnPropertyDescriptor(Miniflare.prototype, "ready");
+    const spy = vi
+      .spyOn(Miniflare.prototype, "ready", "get")
+      .mockImplementation(function () {
+        const url = ready.get.call(this);
+        listeners.push(url);
+        return url;
+      });
+    let leaked = false;
+    let outsider;
+    try {
+      const value = await createPrivateWorkerdSandbox().execute(
+        {
+          executionId: "outsider-probe",
+          code: "async () => await probe.wait({})",
+          timeoutMs: 10_000,
+          bindings: {
+            probe: {
+              // While this invocation is live, a separate caller tries its listener.
+              wait: async () => {
+                const response = await fetch(
+                  new URL("/execute", await listeners[0]),
+                  {
+                    method: "POST",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({
+                      code: "async () => await probe.leak({})",
+                      timeoutMs: 1000,
+                      bindings: { probe: ["leak"] },
+                      namespacePaths: {},
+                    }),
+                  },
+                );
+                outsider = response.status;
+                await response.body?.cancel();
+                return "done";
+              },
+              leak: async () => {
+                leaked = true;
+                return "host-only";
+              },
+            },
+          },
+        },
+        new AbortController().signal,
+      );
+      expect(value).toBe("done");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(outsider).toBe(403);
+    expect(leaked).toBe(false);
   });
 
   it("retains guest failure before disposal failure", async () => {

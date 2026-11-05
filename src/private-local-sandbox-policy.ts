@@ -87,16 +87,36 @@ function covers(root: string, path: string): boolean {
 }
 
 /**
- * Fungi's credentials and Local service record: every sandboxed mode hides
- * them from commands, and host-side Files operations keep the same boundary.
+ * Everything a sandboxed mode hides from commands: Fungi's credentials and
+ * Local service record, and on Linux every fallback Agent temp base (a
+ * private tmpfs covers it after re-binding the Agent's own temp; Seatbelt's
+ * path denial would also hide that own temp). Host-side Files and skill
+ * reads keep the same boundary.
  */
 export function fungiHiddenRecords(
   host: NodeJS.ProcessEnv,
   /** Pass the real passwd home in production; fixtures supply their own. */
   osHome: string,
+  platform: string,
 ): string[] {
   const home = host.HOME ?? osHome;
-  return [join(home, ".config", "fungi"), join(home, ".fungi", "service")];
+  // A previous service can leave fallback Agent temp behind even when this
+  // Agent has moved to XDG_RUNTIME_DIR. Never expose either host candidate.
+  const fallbackTemporaryBases =
+    platform === "linux"
+      ? [
+          ...new Set(
+            [home, osHome]
+              .map((root) => join(root, ".cache", "fungi", "tmp"))
+              .flatMap(existingDirectory),
+          ),
+        ]
+      : [];
+  return [
+    join(home, ".config", "fungi"),
+    join(home, ".fungi", "service"),
+    ...fallbackTemporaryBases,
+  ];
 }
 
 export function linuxSandboxProfile(
@@ -146,26 +166,24 @@ export function linuxSandboxProfile(
     statSync(socket, { throwIfNoEntry: false })?.isSocket()
       ? socket
       : undefined;
+  // A cache overlapping the project would widen Workspace beyond the Agent
+  // folder, including the host-trusted project .fungi; such a cache stays
+  // read-only rather than refusing an otherwise ordinary layout.
   const writableCaches = [...new Set(caches.flatMap(existingDirectory))].filter(
     (path) =>
       !covers(path, join(home, ".cargo", "bin")) &&
-      !covers(path, join(home, ".local", "bin")),
+      !covers(path, join(home, ".local", "bin")) &&
+      !covers(path, policy.projectRoot) &&
+      !covers(policy.projectRoot, path),
   );
+  const writable =
+    mode === "workspace"
+      ? [...new Set([policy.writableRoot, ...writableCaches])]
+      : [];
   const fungiCache = canonicalPath(join(cache, "fungi"));
-  const protectedFungiCache =
-    mode === "workspace" &&
-    writableCaches.some((path) => covers(path, fungiCache))
-      ? fungiCache
-      : undefined;
-  // A previous service can leave fallback Agent temp behind even when this
-  // Agent has moved to XDG_RUNTIME_DIR. Never expose either host candidate.
-  const fallbackTemporaryBases = [
-    ...new Set(
-      [home, osHome]
-        .map((root) => join(root, ".cache", "fungi", "tmp"))
-        .flatMap(existingDirectory),
-    ),
-  ];
+  const protectedFungiCache = writable.some((path) => covers(path, fungiCache))
+    ? fungiCache
+    : undefined;
   return {
     ...policy,
     readOnly:
@@ -179,16 +197,8 @@ export function linuxSandboxProfile(
     // extension-install risk classification; revisit private-local-exec-rules.ts
     // before widening this set. Guard: ../test/private-local-containment.test.ts,
     // "keeps every captured PATH directory outside Workspace writable roots".
-    writable:
-      mode === "workspace"
-        ? [...new Set([policy.writableRoot, ...writableCaches])]
-        : [],
-    hidden: [
-      ...fungiHiddenRecords(host, osHome),
-      // Linux mounts a private tmpfs over siblings after re-binding our temp.
-      // Seatbelt's path denial would also hide the Agent's own fallback temp.
-      ...(platform === "linux" ? fallbackTemporaryBases : []),
-    ],
+    writable,
+    hidden: fungiHiddenRecords(host, osHome, platform),
     sshAgentSocket: mode === "workspace" ? selectedSocket : undefined,
     sshAgentMask: mode === "read-only" ? selectedSocket : undefined,
   };
@@ -240,6 +250,11 @@ export class UnsafeNativePayload extends Error {
 
 export class UnsafeHostCode extends Error {
   override readonly name = "UnsafeHostCode";
+}
+
+/** A selected folder whose layout a sandboxed command could use to unhide Fungi's records. */
+export class UnsafeSandboxFolder extends Error {
+  override readonly name = "UnsafeSandboxFolder";
 }
 
 /** A symlinked Git marker cannot be protected by a bind on its logical name. */
@@ -548,7 +563,11 @@ export function sandboxPolicy(
     throw new Error("Sandbox folder must be a directory.");
   // Do not create a marker on the host for an absent .git.
   const marker = join(writableRoot, ".git");
-  const readOnly = [join(writableRoot, ".fungi")];
+  // The project .fungi holds host-trusted state such as exec rules; it stays
+  // read-only even when the Agent folder is a subfolder.
+  const readOnly = [
+    ...new Set([join(root, ".fungi"), join(writableRoot, ".fungi")]),
+  ];
   const markerEntry = lstatSync(marker, { throwIfNoEntry: false });
   if (markerEntry === undefined)
     return { projectRoot: root, writableRoot, readOnly };

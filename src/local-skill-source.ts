@@ -1,3 +1,4 @@
+import { constants } from "node:fs";
 import { open, opendir, realpath, stat } from "node:fs/promises";
 import {
   basename,
@@ -25,6 +26,10 @@ const maximumDirectoryEntries = 512;
 const maximumSupportingDepth = 16;
 const maximumDiscoveryDepth = 16;
 const utf8 = new TextEncoder();
+const refusedMessage =
+  "Skill path is outside its folder or covers a sandbox-hidden path";
+
+class SkillSourceError extends Error {}
 const nameSchema = z
   .string()
   .min(1)
@@ -57,25 +62,31 @@ function absent(cause: unknown): boolean {
   return cause instanceof Error && "code" in cause && cause.code === "ENOENT";
 }
 
-function contained(root: string, path: string): string {
+/** Whether `path` is `root` or lies beneath it. */
+function covers(root: string, path: string): boolean {
   const within = relative(root, path);
-  if (
-    isAbsolute(within) ||
-    within === ".." ||
-    within.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`)
-  )
-    throw new Error("Skill path escapes its directory");
+  return (
+    !isAbsolute(within) && within !== ".." && !within.startsWith(`..${sep}`)
+  );
+}
+
+function contained(root: string, path: string): string {
+  if (!covers(root, path)) throw new Error("Skill path escapes its directory");
   return path;
+}
+
+/**
+ * Whether a canonical path lies inside, or is an ancestor of, a path the live
+ * sandbox mode hides from commands. The host reads skills unsandboxed, so it
+ * must not hand the Agent what its commands cannot see.
+ */
+function exposesHidden(hidden: readonly string[], path: string): boolean {
+  return hidden.some((record) => covers(record, path) || covers(path, record));
 }
 
 function inside(root: string, path: string): string | undefined {
   const within = relative(root, path);
-  return within === "" ||
-    isAbsolute(within) ||
-    within === ".." ||
-    within.startsWith(`..${sep}`)
-    ? undefined
-    : within;
+  return within !== "" && covers(root, path) ? within : undefined;
 }
 
 /** The model's view of a skill file: invocation-relative, `~/…`, else absolute. */
@@ -89,12 +100,32 @@ function displayLocation(
   return personal === undefined ? location : join("~", personal);
 }
 
-async function readBounded(path: string, signal: AbortSignal): Promise<string> {
+/**
+ * Read a checked canonical path through a descriptor bound to that check. A
+ * sandboxed command can swap a folder on the path for a symlink between the
+ * check and open, so the leaf is opened without following, the pathname is
+ * re-resolved after open and must still name the object just opened, and the
+ * resolved location must still be admitted (as Files' `openChecked` does).
+ */
+async function readChecked(
+  path: string,
+  admits: (path: string) => boolean,
+  signal: AbortSignal,
+): Promise<string> {
   signal.throwIfAborted();
-  const handle = await open(path, "r");
+  if (!admits(path)) throw new SkillSourceError(refusedMessage);
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
-    if (!(await handle.stat()).isFile())
-      throw new Error("Skill path is not a regular file");
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) throw new Error("Skill path is not a regular file");
+    const current = await realpath(path);
+    const named = current === path ? await stat(current) : undefined;
+    if (
+      named?.dev !== metadata.dev ||
+      named.ino !== metadata.ino ||
+      !admits(current)
+    )
+      throw new SkillSourceError("Skill path changed while it was opened");
     const bytes = Buffer.alloc(maximumFileBytes + 1);
     let size = 0;
     while (size < bytes.length) {
@@ -112,8 +143,6 @@ async function readBounded(path: string, signal: AbortSignal): Promise<string> {
     await handle.close();
   }
 }
-
-class SkillSourceError extends Error {}
 
 function diagnostic(
   path: string,
@@ -158,11 +187,14 @@ function parseSkill(content: string, directory: string) {
   };
 }
 
-async function discoveryRoots(cwd: string): Promise<string[]> {
-  const project = [join(cwd, ".fungi/skills")];
+/** Project layout roots, each owned by the folder that holds it. */
+async function discoveryRoots(
+  cwd: string,
+): Promise<{ path: string; owner: string }[]> {
+  const project = [{ path: join(cwd, ".fungi/skills"), owner: cwd }];
   let ancestor = cwd;
   for (;;) {
-    project.push(join(ancestor, ".agents/skills"));
+    project.push({ path: join(ancestor, ".agents/skills"), owner: ancestor });
     try {
       await stat(join(ancestor, ".git"));
       break;
@@ -180,6 +212,7 @@ async function configuredRoots(
   path: string,
   base: string,
   home: string,
+  hidden: readonly string[],
   signal: AbortSignal,
   diagnostics: SkillDiagnostic[],
 ): Promise<string[]> {
@@ -188,7 +221,13 @@ async function configuredRoots(
   });
   try {
     const settings = settingsSchema.parse(
-      JSON.parse(await readBounded(path, signal)),
+      JSON.parse(
+        await readChecked(
+          await realpath(path),
+          (location) => !exposesHidden(hidden, location),
+          signal,
+        ),
+      ),
     );
     return settings.skills.map((folder) =>
       folder === "~"
@@ -218,6 +257,12 @@ type LabeledRoot = Readonly<{
   origin: SkillOrigin;
   /** A folder someone named (settings or an enabled extension) must exist. */
   named: boolean;
+  /**
+   * The folder this root must canonicalize inside, when its location is
+   * Agent-steerable: a project root stays in the project, a personal default
+   * in home. Owner-named personal and extension folders have none.
+   */
+  owner: string | undefined;
 }>;
 
 function describeOrigin(origin: SkillOrigin): string {
@@ -236,6 +281,7 @@ export type ExtensionSkillFolder = Readonly<{
 async function scanRoots(
   roots: readonly LabeledRoot[],
   displayRoots: Readonly<{ cwd: string; home: string }>,
+  hidden: readonly string[],
   signal: AbortSignal,
   diagnostics: SkillDiagnostic[],
 ): Promise<SkillCatalog> {
@@ -243,7 +289,7 @@ async function scanRoots(
   const owners = new Map<string, SkillOrigin>();
   const paths = new Set<string>();
   const visitedRoots = new Set<string>();
-  for (const { path, origin, named } of roots) {
+  for (const { path, origin, named, owner } of roots) {
     signal.throwIfAborted();
     let root: string;
     try {
@@ -257,6 +303,20 @@ async function scanRoots(
           message: "Skill root is unavailable",
           cause,
         });
+      continue;
+    }
+    // Checking the root once covers its walk: every entry stays inside it.
+    if (
+      (owner !== undefined && !covers(owner, root)) ||
+      exposesHidden(hidden, root)
+    ) {
+      diagnostics.push(
+        diagnostic(
+          path,
+          "invalid",
+          "Skill root resolves outside its owning folder or covers a sandbox-hidden path",
+        ),
+      );
       continue;
     }
     if (visitedRoots.has(root)) continue;
@@ -301,7 +361,11 @@ async function scanRoots(
           if (paths.has(location)) return;
           paths.add(location);
           const { metadata } = parseSkill(
-            await readBounded(location, signal),
+            await readChecked(
+              location,
+              (file) => covers(root, file) && !exposesHidden(hidden, file),
+              signal,
+            ),
             directory,
           );
           if (
@@ -455,9 +519,12 @@ export function describeExtensionSkills(
         path: folder.directory,
         origin: { kind: "extension", extensionId: folder.extensionId },
         named: true,
+        owner: undefined,
       },
     ],
     { cwd: folder.directory, home: folder.directory },
+    // Read before the extension is enabled, so no Agent sandbox applies yet.
+    [],
     signal,
     [],
   );
@@ -476,6 +543,12 @@ export function createLocalSkillSource(
     cwd: string;
     home: string;
     extensions?: readonly ExtensionSkillFolder[];
+    /**
+     * Paths the live sandbox mode hides from commands (the sandbox controls'
+     * `hiddenRecords`, none in Full access). Roots, skills and files inside
+     * or covering one are refused.
+     */
+    hidden: () => readonly string[];
   }>,
 ): SkillSource {
   const cwd = resolve(options.cwd);
@@ -492,6 +565,7 @@ export function createLocalSkillSource(
     }
   };
   const catalog = async (signal: AbortSignal): Promise<SkillCatalog> => {
+    const hidden = options.hidden();
     const displayRoots = {
       cwd: await canonical(cwd),
       home: await canonical(home),
@@ -501,6 +575,7 @@ export function createLocalSkillSource(
       join(cwd, ".fungi/settings.json"),
       cwd,
       home,
+      hidden,
       signal,
       diagnostics,
     );
@@ -508,33 +583,49 @@ export function createLocalSkillSource(
       join(home, ".fungi/settings.json"),
       join(home, ".fungi"),
       home,
+      hidden,
       signal,
       diagnostics,
     );
     const project: SkillOrigin = { kind: "project" };
     const personal: SkillOrigin = { kind: "personal" };
     const roots: readonly LabeledRoot[] = [
-      ...(await discoveryRoots(cwd)).map((path) => ({
+      ...(await Promise.all(
+        (await discoveryRoots(cwd)).map(async ({ path, owner }) => ({
+          path,
+          origin: project,
+          named: false,
+          owner: await canonical(owner),
+        })),
+      )),
+      ...projectExtras.map((path) => ({
         path,
         origin: project,
-        named: false,
+        named: true,
+        owner: displayRoots.cwd,
       })),
-      ...projectExtras.map((path) => ({ path, origin: project, named: true })),
       ...[join(home, ".fungi/skills"), join(home, ".agents/skills")].map(
-        (path) => ({ path, origin: personal, named: false }),
+        (path) => ({
+          path,
+          origin: personal,
+          named: false,
+          owner: displayRoots.home,
+        }),
       ),
       ...personalExtras.map((path) => ({
         path,
         origin: personal,
         named: true,
+        owner: undefined,
       })),
       ...(options.extensions ?? []).map(({ extensionId, directory }) => ({
         path: directory,
         origin: { kind: "extension", extensionId } satisfies SkillOrigin,
         named: true,
+        owner: undefined,
       })),
     ];
-    return scanRoots(roots, displayRoots, signal, diagnostics);
+    return scanRoots(roots, displayRoots, hidden, signal, diagnostics);
   };
   return {
     catalog,
@@ -550,7 +641,14 @@ export function createLocalSkillSource(
         baseDirectory,
         await realpath(join(baseDirectory, selected)),
       );
-      const content = await readBounded(path, signal);
+      const hidden = options.hidden();
+      if (exposesHidden(hidden, baseDirectory)) throw new Error(refusedMessage);
+      const content = await readChecked(
+        path,
+        (location) =>
+          covers(baseDirectory, location) && !exposesHidden(hidden, location),
+        signal,
+      );
       if (selected !== "SKILL.md")
         return {
           name,

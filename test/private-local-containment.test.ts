@@ -51,6 +51,13 @@ function fixture() {
   return project;
 }
 
+/** Host HOME and caches beside, never inside, the Agent project. */
+function hostFixture() {
+  const host = mkdtempSync(join(tmpdir(), "fungi-containment-host-"));
+  fixtures.push(host);
+  return host;
+}
+
 /** Only the process boundary is fake: real admission, policy and argv stay under test. */
 function policyControls(
   input: Parameters<typeof createLocalSandboxControls>[0],
@@ -898,7 +905,7 @@ describe("command-time sandbox policy", () => {
   it("keeps every captured PATH directory outside Workspace writable roots", () => {
     const project = fixture();
     const folder = join(project, "agent");
-    const home = join(project, "fixture-home");
+    const home = join(hostFixture(), "fixture-home");
     const cache = join(home, ".cache");
     const store = join(home, ".local", "share", "pnpm", "store");
     const lookupDirectories = [
@@ -951,7 +958,7 @@ describe("command-time sandbox policy", () => {
   it("grants only existing host cache roots in Workspace, never a project .npmrc or PATH bins", () => {
     const project = fixture();
     const folder = join(project, "agent");
-    const home = join(project, "fixture-home");
+    const home = join(hostFixture(), "fixture-home");
     const cache = join(home, ".cache");
     const store = join(home, ".local", "share", "pnpm", "store");
     mkdirSync(cache, { recursive: true });
@@ -989,9 +996,10 @@ describe("command-time sandbox policy", () => {
   it("protects Fungi's native cache under the host-selected XDG cache grant", () => {
     const project = fixture();
     const folder = join(project, "agent");
-    const home = join(project, "home");
-    const cache = join(project, "external-cache");
-    const link = join(project, "cache-link");
+    const host = hostFixture();
+    const home = join(host, "home");
+    const cache = join(host, "external-cache");
+    const link = join(host, "cache-link");
     mkdirSync(join(cache, "fungi"), { recursive: true });
     symlinkSync(cache, link);
     for (const selected of [cache, link]) {
@@ -1007,12 +1015,46 @@ describe("command-time sandbox policy", () => {
     }
   });
 
+  it("keeps a project's .fungi read-only and drops a cache grant covering the project", () => {
+    const home = realpathSync(hostFixture());
+    const cache = join(home, ".cache");
+    const project = join(cache, "proj");
+    const folder = join(project, "sub");
+    const temp = join(home, "temp");
+    mkdirSync(folder, { recursive: true });
+    mkdirSync(temp);
+    const host = { HOME: home };
+    const profile = linuxSandboxProfile(
+      sandboxPolicy(project, folder),
+      "workspace",
+      temp,
+      host,
+      home,
+    );
+    expect(profile.writable).toEqual([folder]);
+    const args = linuxSandboxCommand(
+      profile,
+      {
+        executable: "/fixture/fungi-bwrap",
+        seccompFilter: new Uint8Array([1]),
+      },
+      folder,
+      ["/usr/bin/true"],
+      host,
+    ).args.join("\0");
+    const fungi = join(project, ".fungi");
+    expect(args).toContain(["--ro-bind", fungi, fungi].join("\0"));
+    for (const path of [cache, project])
+      expect(args).not.toContain(["--bind", path, path].join("\0"));
+  });
+
   it("prepares an absent Fungi cache privately before mounting its writable parent", () => {
     const project = fixture();
     const folder = join(project, "agent");
-    const home = join(project, "home");
-    const cache = join(project, "cache");
-    const link = join(project, "cache-link");
+    const hostRoot = hostFixture();
+    const home = join(hostRoot, "home");
+    const cache = join(hostRoot, "cache");
+    const link = join(hostRoot, "cache-link");
     mkdirSync(cache);
     symlinkSync(cache, link);
     for (const selected of [cache, link]) {
@@ -1323,6 +1365,7 @@ describe("command-time sandbox policy", () => {
     const worktree = join(common, "worktrees", "linked");
     const policy = sandboxPolicy(project, linked);
     expect(policy.readOnly).toEqual([
+      join(project, ".fungi"),
       join(linked, ".fungi"),
       join(linked, ".git"),
       worktree,
@@ -1367,8 +1410,60 @@ describe("command-time sandbox policy", () => {
     git(newline, ["init", "-b", "main"]);
     writeFileSync(join(folder, ".git"), `gitdir: ${join(newline, ".git")}\n`);
     expect(sandboxPolicy(project, folder).readOnly).toEqual([
+      join(project, ".fungi"),
       join(folder, ".fungi"),
       join(folder, ".git"),
     ]);
+  });
+});
+
+describe("hidden records under a writable HOME", () => {
+  function command(project: string, folder: string, home: string) {
+    const host = { HOME: home };
+    return linuxSandboxCommand(
+      linuxSandboxProfile(
+        sandboxPolicy(project, folder),
+        "workspace",
+        join(project, "temp"),
+        host,
+        home,
+      ),
+      {
+        executable: "/fixture/fungi-bwrap",
+        seccompFilter: new Uint8Array([1]),
+      },
+      folder,
+      ["/usr/bin/true"],
+      host,
+    ).args;
+  }
+
+  it("pins the credential record's parent so a command cannot rename it away", () => {
+    const project = fixture();
+    const home = join(project, "agent");
+    mkdirSync(join(project, "temp"));
+    mkdirSync(join(home, ".config", "fungi"), { recursive: true });
+    const args = command(project, home, home).join("\0");
+    const config = join(home, ".config");
+    const pin = ["--bind", config, config].join("\0");
+    const mask = ["--tmpfs", join(config, "fungi")].join("\0");
+    expect(args).toContain(pin);
+    expect(args).toContain(mask);
+    // The parent is a mountpoint before the record is masked beneath it.
+    expect(args.indexOf(pin)).toBeLessThan(args.indexOf(mask));
+    expect(args.indexOf(["--bind", home, home].join("\0"))).toBeLessThan(
+      args.indexOf(pin),
+    );
+  });
+
+  it("refuses a writable HOME whose record parent is a symlink", () => {
+    const project = fixture();
+    const home = join(project, "agent");
+    mkdirSync(join(project, "temp"));
+    mkdirSync(join(project, "dotfiles", "fungi"), { recursive: true });
+    symlinkSync(join(project, "dotfiles"), join(home, ".config"));
+    expect(() => command(project, home, home)).toThrow(
+      /hidden record through a symlink/u,
+    );
   });
 });
