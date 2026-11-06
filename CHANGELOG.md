@@ -1,5 +1,28 @@
 # @fungi.computer/truffle
 
+## 0.8.3
+
+### Patch Changes
+
+- Changes since 0.8.2:
+
+  - fix(local): export the service process options contract
+  - fix(local): keep stall exit independent of bounded evidence capture
+  - fix(local): wait through disappearing macOS service argv
+  - fix(local): preserve evidence and exit when service loop stalls
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/bird-dog@0.3.3
+  - @fungi.computer/lantern@0.4.1
+  - @fungi.computer/shiitake@0.11.1
+  - @fungi.computer/veil@0.6.1
+  - @fungi.computer/graft@0.2.5
+  - @fungi.computer/shiitake-extensions@0.6.6
+  - @fungi.computer/zookeeper@0.0.13
+
 ## 0.8.2
 
 ### Patch Changes

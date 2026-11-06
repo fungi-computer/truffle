@@ -4,6 +4,10 @@ import fs from "node:fs";
 import { join } from "node:path";
 import { localFailureMetadata, logEvent } from "./log-event.js";
 import { z } from "zod";
+import {
+  encodeModelStreamRecord,
+  type LocalModelStreamRecord,
+} from "./private-local-service-trace.js";
 
 export const serviceLogRecordBytes = 32 * 1024;
 const serviceLogFileBytes = 1024 * 1024;
@@ -70,8 +74,11 @@ function existingLogArchive(path: string): fs.Stats | undefined {
  * resource's Option2 latch. Replacing .3 cannot add a fifth file or extra bytes.
  * No retries, asynchronous work, chmod repair or second lifecycle owner.
  */
-function openNativeServiceLogWriter(directory: string): ServiceLogWriter {
-  const path = join(directory, "service.jsonl");
+function openNativeServiceLogWriter(
+  directory: string,
+  name: "service.jsonl" | "service-stream.jsonl" = "service.jsonl",
+): ServiceLogWriter {
+  const path = join(directory, name);
   for (let index = 1; index <= serviceLogBackupFiles; index++) {
     const file = existingLogArchive(`${path}.${String(index)}`);
     if (file !== undefined) privateLogFileSize(file);
@@ -124,6 +131,43 @@ function openNativeServiceLogWriter(directory: string): ServiceLogWriter {
       const written = fs.writeSync(currentDescriptor(), line, null, "utf8");
       if (written !== bytes) throw new Error("Diagnostic log short write");
     },
+    close,
+  };
+}
+
+/** The same checked four-file sink, with a separate fixed name for private provider output. */
+export function createServiceStreamCapture(directory: string) {
+  let writer: ServiceLogWriter | undefined;
+  let failed = false;
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    try {
+      writer?.close();
+    } catch (cause) {
+      failed = true;
+      logEvent("service-stream.close", cause);
+    }
+  };
+  try {
+    writer = openNativeServiceLogWriter(directory, "service-stream.jsonl");
+  } catch (cause) {
+    failed = true;
+    logEvent("service-stream.open", cause);
+  }
+  return {
+    record(record: LocalModelStreamRecord) {
+      if (failed || closed) return;
+      try {
+        writer?.writeLine(encodeModelStreamRecord(record));
+      } catch (cause) {
+        failed = true;
+        close();
+        logEvent("service-stream.write", cause);
+      }
+    },
+    failed: () => failed,
     close,
   };
 }

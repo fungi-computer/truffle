@@ -1,15 +1,5 @@
 import { serviceDirectory } from "./private-local-service-discovery.js";
-import { runPrivateLocalService } from "./private-local-service-listener.js";
-import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
+import { runPrivateLocalServiceProcess } from "./private-local-service-supervisor.js";
 const directory = process.argv[2];
 if (!directory) throw new Error("Local service requires its private directory");
-const root = capturePrivateLocalConfigRoot();
-await runPrivateLocalService(
-  await serviceDirectory(directory),
-  undefined,
-  undefined,
-  undefined,
-  undefined,
-  undefined,
-  root,
-);
+await runPrivateLocalServiceProcess(await serviceDirectory(directory));

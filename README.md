@@ -100,9 +100,69 @@ store is part of this contract.
 
 The candidate policy is one active 1 MiB file plus three 1 MiB backups, not a
 four-backup policy. Disposal must precede the existing owner lease release. No
-inspector, environment debug switch, forced GC, new service supervisor or
-memory-leak fix is implied. The separate 4,096-cycle memory experiment did not
-reproduce the reported sustained growth.
+inspector, environment debug switch, forced GC or memory-leak fix is implied.
+The separate 4,096-cycle memory experiment did not reproduce the reported
+sustained growth.
+
+### Stall evidence
+
+The ordinary service process and bundled CLI run the existing listener in one
+worker. Their main thread runs the watchdog in
+`private-local-service-supervisor.ts`; the listener still owns the same process
+PID, SQLite lease, Agent owners and discovery record. An embedded listener is
+still available directly from its private module for hosts supplying their own
+runtime ports. The `service-process` entry exports
+`runPrivateLocalServiceProcess` and its `LocalServiceProcessOptions` type.
+Options may tighten the stall/startup bounds; a supplied worker and shared
+heartbeat must be provided together.
+
+After readiness, the worker increments a shared heartbeat counter every second.
+The watchdog times changes with its own monotonic clock. Thirty seconds without
+a heartbeat produces `watchdog-exit.json` with the typed `event-loop-stall`
+reason, bound, observed lag, PID and build version. Startup has a separate
+60-second deadline; requested shutdown keeps a 4.5-second outer drain budget.
+The watchdog arms an unconditional exit timer before starting asynchronous
+evidence I/O. Capture has at most 200 ms to finish; the process exits with
+status 1 on completion or budget expiry, without waiting for I/O or worker
+cleanup. This ends a blocked worker without depending on its timers or signals.
+Ordinary SIGTERM still drains the listener and exits normally. The existing
+start/supervisor mechanism owns replacement.
+
+The listener records normalized text, thinking and tool-call deltas before
+forwarding them. Raw events pass through a small Zod output projection: selected
+Responses text, reasoning and function-call argument deltas retain only their
+type, delta and output/content indices. Every unselected field is discarded;
+created/completed response objects and unsupported wire events produce omission
+metadata instead. Response configuration, including echoed instructions, never
+reaches the trace serializer. `service-stream.jsonl` uses the same checked
+native writer as the regular log, with one 1 MiB file and three backups, all
+mode 0600. String fields are bounded before serialization, including raw deltas;
+a large event is never serialized merely to discover its size. Each trace record
+is at most 8 KiB after UTF-8/JSON encoding; larger events get explicit omission
+records. Request IDs join the bounded records without retaining growing
+partial-message copies. No unbounded in-memory trace or IPC queue is introduced.
+These private artifacts contain provider output, including thinking; prompts and
+authentication headers are not recorded by this observer.
+
+On a stall, the watchdog attempts to freeze the last 4 MiB of stream records
+into `watchdog-stream.jsonl`, flush the files, and record whether capture
+succeeded, was empty, or failed within the 200 ms window. A `pending` manifest
+means capture was incomplete when the process exited; it does not promise a
+durable snapshot. A failed or stuck filesystem may leave no evidence at all.
+Incident files are replaced in place, so an interrupted capture can be partial.
+Normal logging after a restart does not overwrite that snapshot. The next
+watchdog incident replaces the two fixed incident files, so incident storage is
+bounded too. A failed capture cannot prevent process exit and is never reported
+as a successful snapshot. This is stream evidence, not a heap snapshot or a fix
+for the unresolved string-growth cause.
+
+`pnpm --dir runtimes/local test:service-watchdog` deliberately blocks the real
+listener's event loop, verifies signal-free status-1 exit and replayable
+provider records, reopens the same service directory, checks normal
+heartbeat/SIGTERM behavior, injects an evidence-write failure, and reuses the
+review's native six-second fsync delay to prove I/O cannot hold exit. The
+ordinary Bun batch includes this test. The Node suite also checks record
+omission and bounded trace rotation.
 
 The diagnostics resource records startup/ready and observed stop reasons and
 owns only its sampler/writer. Both entry paths use the existing listener owner,
@@ -482,6 +542,17 @@ shared refresh and sign-out custody, including competing processes. Bun service
 tests and separate scripts are listed in [package.json](package.json).
 Controlled replies do not prove a live provider login, a published CLI release
 or a hosted Team deployment.
+
+On Linux, after building Truffle's dependency closure, run
+`pnpm --dir runtimes/local soak:stream-memory` for a bounded memory diagnostic.
+It uses a disposable home and project, warms 30 Agent owners, then opens,
+streams a 400 KB faux reply through a slow Session watcher, and closes 150 more
+owners (six concurrently). It asserts completed replies, no unexpected model
+retries, and retained RSS, string, statement and descriptor bounds after each
+round. Its JSON output records the Bun version and warmup/final measurements.
+The external timeout stops the process after ten minutes. This is a short
+retention diagnostic, not proof of day-long stability or an explanation of the
+October 24–25 service stalls.
 
 ## Selected-Team App reads
 

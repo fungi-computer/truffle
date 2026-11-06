@@ -40,6 +40,7 @@ import {
   resolve,
 } from "node:path";
 import { createHash } from "node:crypto";
+import type { LocalModelStreamObserver } from "./private-local-service-trace.js";
 import { z } from "zod";
 import {
   defaultLocalPermissionMode,
@@ -68,7 +69,7 @@ import {
   createAgentControlSource,
   type AgentControlDirectory,
 } from "@fungi.computer/shiitake/agent-control";
-import { defineIdFamily } from "@fungi.computer/cairn";
+import { correlationKey, defineIdFamily } from "@fungi.computer/cairn";
 import { words } from "@fungi.computer/cairn/words";
 import {
   botanicalExtensionsWithSkills,
@@ -244,6 +245,8 @@ export type ExecApprovalDecision = {
 
 /** Inputs for the one private local Agent opener. */
 export type PrivateLocalRuntimeHostOptions = Readonly<{
+  /** Host-owned bounded incident trace; provider output only. */
+  onModelStreamRecord?: LocalModelStreamObserver;
   /** Service-selected host configuration, independent of this Agent's Files root. */
   configRoot?: PrivateLocalConfigRoot;
   /** Verified service copy; the service, not the Agent, closes it. */
@@ -951,6 +954,7 @@ export function createPrivateLocalModelSource(
   defaults?: Readonly<{
     agent?: () => ModelPreference | null;
   }>,
+  onModelStreamRecord?: LocalModelStreamObserver,
 ): ModelSource &
   Readonly<{
     /** The secret-free effective selection the footer and /model show. */
@@ -1185,6 +1189,16 @@ export function createPrivateLocalModelSource(
               ? modelFailure.providerError
               : undefined,
           stream: (selected, context, options) => {
+            const trace =
+              onModelStreamRecord === undefined
+                ? undefined
+                : {
+                    requestId: correlationKey(),
+                    providerId: selected.provider,
+                    modelId: selected.id,
+                  };
+            if (trace !== undefined)
+              onModelStreamRecord?.({ ...trace, event: "start" });
             const startedAt = Date.now();
             modelFailure = undefined;
             let lastPartial: AssistantMessage | undefined;
@@ -1257,11 +1271,19 @@ export function createPrivateLocalModelSource(
                 const requestOptions: PiOptions = {
                   ...rest,
                   fetch: provider.fetch,
-                  onProviderStreamEvent: (data, model) =>
-                    provider.onProviderStreamEvent(
-                      decodeProviderData(data),
+                  onProviderStreamEvent: (data, model) => {
+                    const decoded = decodeProviderData(data);
+                    if (trace !== undefined)
+                      onModelStreamRecord?.({
+                        ...trace,
+                        event: "provider_event",
+                        data: decoded,
+                      });
+                    return provider.onProviderStreamEvent(
+                      decoded,
                       normalizeModel(model),
-                    ),
+                    );
+                  },
                   sessionId: providerCacheKey,
                   transport: options?.transport ?? "auto",
                 };
@@ -1277,8 +1299,22 @@ export function createPrivateLocalModelSource(
                   requestOptions,
                 );
                 for await (const event of upstream) {
+                  if (
+                    trace !== undefined &&
+                    (event.type === "text_delta" ||
+                      event.type === "thinking_delta" ||
+                      event.type === "toolcall_delta")
+                  )
+                    onModelStreamRecord?.({
+                      ...trace,
+                      event: event.type,
+                      delta: event.delta,
+                      contentIndex: event.contentIndex,
+                    });
                   if ("partial" in event) lastPartial = event.partial;
                   if (event.type === "error") {
+                    if (trace !== undefined)
+                      onModelStreamRecord?.({ ...trace, event: "error" });
                     const error = failure(
                       event.reason === "aborted",
                       event.error,
@@ -1320,6 +1356,9 @@ export function createPrivateLocalModelSource(
                   error,
                 });
                 events.end(error);
+              } finally {
+                if (trace !== undefined)
+                  onModelStreamRecord?.({ ...trace, event: "end" });
               }
             })();
             return events;
@@ -2227,6 +2266,7 @@ export async function openPrivateLocalRuntimeHost(
       providerCacheKey,
       input.reasoning,
       { agent: readAgentModel },
+      input.onModelStreamRecord,
     );
     const hostOptions = {
       store,

@@ -64,7 +64,18 @@ async function exitedWithin(
 ): Promise<boolean> {
   const deadline = Date.now() + ms;
   for (;;) {
-    if (!(await isServiceProcess(directory, service))) return true;
+    // macOS argv can disappear before the PID is reaped. Keep observing that
+    // uncertain state; it neither proves exit nor grants signal authority.
+    // Linux's precise start discriminator can prove the original PID was reused.
+    const current = await identifyLocalServiceProcess({
+      ...service,
+      directory,
+    });
+    if (
+      current.kind === "gone" ||
+      (current.kind === "other" && process.platform === "linux")
+    )
+      return true;
     if (Date.now() >= deadline) return false;
     await delay(terminationPollMs);
   }

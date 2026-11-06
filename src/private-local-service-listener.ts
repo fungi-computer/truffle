@@ -1,4 +1,5 @@
 import { localFailureMetadata, logEvent } from "./log-event.js";
+import type { LocalModelStreamObserver } from "./private-local-service-trace.js";
 import { bodyLimit } from "hono/body-limit";
 import { ShiitakeError } from "@fungi.computer/shiitake";
 import { toShiitakeErrorWire } from "@fungi.computer/shiitake/http";
@@ -137,6 +138,8 @@ export async function runPrivateLocalService(
   /** Narrow manifest I/O port, independent of the Agent-runtime opener. */
   readRecoveryManifest?: (path: string) => Promise<string>,
   root: PrivateLocalConfigRoot = capturePrivateLocalConfigRoot(),
+  onModelStreamRecord?: LocalModelStreamObserver,
+  onReady?: () => void,
 ) {
   // Publish the same discriminator in the pointer and the acquired owner row.
   const startedAt = await readOwnProcessStart();
@@ -170,6 +173,7 @@ export async function runPrivateLocalService(
       return native;
     },
     diagnostics.approvalDecision,
+    onModelStreamRecord,
   );
   const prefix = `/service/${serviceId}`;
   const releaseAccountOwner = registerFungiAccountOwner(
@@ -645,6 +649,7 @@ export async function runPrivateLocalService(
     });
     recordWritten = true;
     diagnostics.ready(serviceId);
+    onReady?.();
     process.on("SIGINT", onInterrupt);
     process.on("SIGTERM", onTerminate);
     // Health and shutdown must answer before any saved Agent is reopened.

@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { writeFileSync } from "node:fs";
 import { spawn, type ChildProcess } from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
@@ -25,8 +26,80 @@ describe.skipIf(process.platform === "win32")(
         value: actualPlatform,
       });
       for (const child of children.splice(0)) child.kill("SIGKILL");
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
     });
     const actualPlatform = process.platform;
+
+    it.each(["", "[fixture-service] <defunct>", "[fixture-service]"])(
+      "finishes stop without another signal when argv becomes %j after SIGTERM",
+      async (exitingArgv) => {
+        const directory = await fs.mkdtemp(join(tmpdir(), "fungi-stop-argv-"));
+        try {
+          // Keep native ps execution and the real lease reader. Only process
+          // existence/signals and ps output are controlled; no real PID is used.
+          const database = new DatabaseSync(join(directory, "owner.sqlite"));
+          try {
+            database.exec(
+              "CREATE TABLE service_owner (id INTEGER PRIMARY KEY CHECK (id = 1), pid INTEGER NOT NULL, startedAt TEXT NOT NULL)",
+            );
+            database
+              .prepare("INSERT INTO service_owner VALUES (1, ?, ?)")
+              .run(service.pid, service.startedAt);
+          } finally {
+            database.close();
+          }
+          const output = join(directory, "ps.output");
+          await fs.writeFile(
+            output,
+            `fixture --internal-service ${directory}\n`,
+          );
+          await fs.writeFile(
+            join(directory, "ps"),
+            '#!/bin/sh\nexec /bin/cat "$0.output"\n',
+            { mode: 0o700 },
+          );
+          vi.stubEnv("PATH", directory);
+          Object.defineProperty(process, "platform", {
+            configurable: true,
+            value: "darwin",
+          });
+          let exitPolls: number | undefined;
+          let observedGone = false;
+          const signal = vi
+            .spyOn(process, "kill")
+            .mockImplementation((pid, value) => {
+              expect(pid).toBe(service.pid);
+              if (value === "SIGTERM") {
+                writeFileSync(output, exitingArgv);
+                exitPolls = 0;
+              } else if (value !== 0) {
+                throw new Error("Unexpected terminating signal");
+              } else if (exitPolls !== undefined) {
+                // The first exit poll sees a live PID with disappearing argv;
+                // only the next poll observes reaping. No scheduling race needed.
+                exitPolls += 1;
+                if (exitPolls > 1) {
+                  observedGone = true;
+                  throw Object.assign(new Error("process reaped"), {
+                    code: "ESRCH",
+                  });
+                }
+              }
+              return true;
+            });
+          await expect(
+            terminatePrivateLocalService(directory, service),
+          ).resolves.toBe("stopped");
+          expect(observedGone).toBe(true);
+          expect(signal.mock.calls.filter(([, value]) => value !== 0)).toEqual([
+            [service.pid, "SIGTERM"],
+          ]);
+        } finally {
+          await fs.rm(directory, { recursive: true, force: true });
+        }
+      },
+    );
 
     it("identifies only a process started for this service directory", async () => {
       const directory = await fs.mkdtemp(join(tmpdir(), "fungi-argv-"));

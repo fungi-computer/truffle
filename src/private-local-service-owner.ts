@@ -237,6 +237,9 @@ export function createLocalServiceOwners(
   onExecApprovalDecision: NonNullable<
     Parameters<typeof openPrivateLocalRuntimeHost>[0]["onExecApprovalDecision"]
   > = () => undefined,
+  onModelStreamRecord?: Parameters<
+    typeof openPrivateLocalRuntimeHost
+  >[0]["onModelStreamRecord"],
 ) {
   deferExtensionArchiveNotices(configRoot.home);
   const extensions =
@@ -1074,6 +1077,8 @@ export function createLocalServiceOwners(
         onExecRuleMatch,
         onExecApprovalDecision,
       };
+      if (onModelStreamRecord !== undefined)
+        options = { ...options, onModelStreamRecord };
       if (serviceNative !== undefined)
         options = { ...options, native: serviceNative() };
       if (fungiMcp !== undefined) options = { ...options, fungiMcp };
@@ -1587,6 +1592,8 @@ export function createLocalServiceOwners(
               onExecRuleMatch,
               onExecApprovalDecision,
             };
+            if (onModelStreamRecord !== undefined)
+              options = { ...options, onModelStreamRecord };
             if (serviceNative !== undefined)
               options = { ...options, native: serviceNative() };
             if (model !== undefined)
