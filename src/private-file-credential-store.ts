@@ -65,7 +65,7 @@ const apiKeyCredentialSchema = z
     if (input.env !== undefined) credential.env = input.env;
     return credential;
   });
-export const oauthCredentialSchema = z
+const oauthCredentialSchema = z
   .object({
     type: z.literal("oauth"),
     refresh: credentialStringSchema,

@@ -1,5 +1,58 @@
 # @fungi.computer/truffle
 
+## 0.9.0
+
+### Minor Changes
+
+- Changes since 0.8.3:
+
+  - fix(local): keep the OAuth credential schema private
+  - fix(shiitake): preserve absent host lanes and deterministic alarm proof
+  - fix(shiitake)!: keep delivery independent and join shutdown custody
+  - fix(truffle): remove unused identity error category
+  - fix(durability): give Watchdog delivery and timer readiness
+  - fix(approvals): finish orphan recovery before native admission
+  - fix(local): retain owners after failed idle cleanup
+  - fix(subagents): keep escalation provenance in composer questions
+  - fix(runtime): align attention fixtures and unsafe command inventory
+  - fix(runtime): keep escalation wire facts JSON-safe
+  - fix(questions): prepare host reads before atomic decisions
+  - feat(board): expose a stable headless attention snapshot
+  - fix(runtime): preserve precise goal command and directory types
+  - fix(goals): authorize exact delegator pause resume and clear
+  - fix(local): remind waiting parents twice without escalating silence
+  - fix(cli): remove subscription credential import commands
+  - fix(subagents): retain promotion reasons and join Pi timers
+  - fix(subagents): merge integration and finish active footer counts
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.7.2
+  - @fungi.computer/bird-dog@0.3.4
+  - @fungi.computer/carrier@0.2.2
+  - @fungi.computer/gills@0.2.2
+  - @fungi.computer/mycelium@0.3.5
+  - @fungi.computer/nacre@0.2.1
+  - @fungi.computer/shiitake-extensions@0.6.7
+  - @fungi.computer/shiitake@0.12.0
+  - @fungi.computer/veil@0.6.2
+  - @fungi.computer/watchdog@0.1.1
+  - @fungi.computer/seam@0.2.3
+  - @fungi.computer/graft@0.2.6
+  - @fungi.computer/knapsack@0.4.6
+  - @fungi.computer/zookeeper@0.0.14
+  - @fungi.computer/approvals@0.2.1
+
 ## 0.8.3
 
 ### Patch Changes

@@ -41,6 +41,7 @@ afterEach(async () => {
 type Store = {
   opens: number;
   closes: number;
+  closeFailure?: Error;
   /** What this store's idle read answers; an Error makes the read fail. */
   idle: boolean | Error;
   wakeAt: number | null;
@@ -115,6 +116,7 @@ async function project(count: number) {
       if (due !== undefined) store.executed.push(due);
     }
     routing ??= options.mail;
+    let closing: Promise<void> | undefined;
     const runtime: LocalServiceRuntime = {
       databasePath: path,
       agentId: path.split("/").at(-2) ?? "unknown",
@@ -153,9 +155,12 @@ async function project(count: number) {
               wakeAt: store.scheduled[0] ?? store.wakeAt,
             }),
       close: () => {
-        store.live = false;
-        store.closes += 1;
-        return Promise.resolve();
+        closing ??= Promise.resolve().then(() => {
+          store.closes += 1;
+          if (store.closeFailure !== undefined) throw store.closeFailure;
+          store.live = false;
+        });
+        return closing;
       },
     };
     return Promise.resolve(runtime);
@@ -206,6 +211,41 @@ it("releases N distinct idle Agents after two idle sweeps and forgets them for r
   again.release();
   expect(stores.get(paths[0] ?? "")?.opens).toBe(2);
   await owners.close();
+});
+
+it("keeps a failed idle close owned through shutdown without reopening its store", async () => {
+  const fixture = await project(2);
+  const { owners, paths } = fixture;
+  const [broken, healthy] = paths;
+  const failure = new Error("Runtime drain failed");
+  storeOf(fixture, broken).closeFailure = failure;
+  try {
+    await selectAndLeave(fixture);
+    await owners.sweepIdle();
+    await expect(owners.sweepIdle()).rejects.toBe(failure);
+    expect(storeOf(fixture, broken).live).toBe(true);
+    expect(storeOf(fixture, healthy).live).toBe(false);
+    expect(owners.unfinishedOwners()).toEqual(["local_store_idle0"]);
+    await expect(
+      owners.select({
+        invocationRoot: fixture.root,
+        databasePath: broken,
+        sessionId: "main",
+      }),
+    ).rejects.toBe(failure);
+    await expect(owners.close()).rejects.toSatisfy(
+      (cause: unknown) =>
+        cause instanceof AggregateError && cause.errors.includes(failure),
+    );
+    expect(owners.unfinishedOwners()).toEqual(["local_store_idle0"]);
+    expect(paths.map((path) => storeOf(fixture, path).closes)).toEqual([1, 1]);
+  } finally {
+    // Only this test's own retained close failure is expected here.
+    await owners.close().catch((cause: unknown) => {
+      if (!(cause instanceof AggregateError && cause.errors.includes(failure)))
+        throw cause;
+    });
+  }
 });
 
 it("releases a future-wake Agent and reopens it when due", async () => {

@@ -632,6 +632,7 @@ describe("private local RuntimeHost", () => {
     const firstRun = Promise.withResolvers<undefined>();
     let reconciliations = 0;
     const handle = await runtime.bind({
+      reconcileHost: undefined,
       pendingWork: () => Promise.resolve({ pending: false, nextWakeAt: null }),
       reconcile: () => {
         reconciliations += 1;
@@ -662,6 +663,7 @@ describe("private local RuntimeHost", () => {
     const pendingRuntime = createPrivateLocalRuntimeHost();
     let pendingCalls = 0;
     const pending = await pendingRuntime.bind({
+      reconcileHost: undefined,
       pendingWork: () => Promise.resolve({ pending: false, nextWakeAt: null }),
       reconcile: () => {
         pendingCalls += 1;
@@ -677,6 +679,7 @@ describe("private local RuntimeHost", () => {
     const secondGate = Promise.withResolvers<undefined>();
     let activeCalls = 0;
     const active = await runtime.bind({
+      reconcileHost: undefined,
       pendingWork: () => Promise.resolve({ pending: false, nextWakeAt: null }),
       reconcile: async () => {
         activeCalls += 1;
@@ -729,6 +732,7 @@ describe("private local RuntimeHost", () => {
     let reconciliations = 0;
     let pendingWork = true;
     const handle = await runtime.bind({
+      reconcileHost: undefined,
       reconcile: () => {
         reconciliations += 1;
         return Promise.resolve();
@@ -774,6 +778,7 @@ describe("private local RuntimeHost", () => {
     let nextWakeAt: number | null = Date.now() + 60_000;
     let reconciliations = 0;
     const handle = await runtime.bind({
+      reconcileHost: undefined,
       reconcile: () => {
         reconciliations += 1;
         if (reconciliations === 4) nextWakeAt = null;
@@ -827,6 +832,7 @@ describe("private local RuntimeHost", () => {
     let nextWakeAt: number | null = Date.now() + maximumDelay * 2 + 60_000;
     let reconciliations = 0;
     const handle = await runtime.bind({
+      reconcileHost: undefined,
       reconcile: () => {
         reconciliations += 1;
         if (reconciliations === 2) nextWakeAt = null;
@@ -872,6 +878,7 @@ describe("private local RuntimeHost", () => {
     const runtime = createPrivateLocalRuntimeHost();
     let reconciliations = 0;
     const handle = await runtime.bind({
+      reconcileHost: undefined,
       reconcile: () => {
         reconciliations += 1;
         return Promise.resolve();
@@ -1076,19 +1083,26 @@ describe("private local RuntimeHost", () => {
     },
   );
 
-  // Woodstock schema version 3 separates tool data from model content; the
-  // v0 protocol marker at the current version is what this host opens in place.
+  // Initialize through the real owner so this fixture follows the current
+  // schema while still proving an existing v0 store opens in place.
   it("opens an already marked v0 store without moving its file", async () => {
     const root = await temporaryDirectory("protocol-marked");
     const databasePath = createExistingDatabase(root);
-    const marked = new DatabaseSync(databasePath);
-    marked.exec(
-      "CREATE TABLE woodstock_schema (version INTEGER NOT NULL, protocol TEXT NOT NULL)",
-    );
-    marked.exec(
-      "INSERT INTO woodstock_schema (version, protocol) VALUES (3, 'shiitake.extension/v0')",
-    );
-    marked.close();
+    const initialized = await openPrivateLocalRuntimeHost({
+      invocationRoot: root,
+      databasePath,
+    });
+    await initialized.close();
+    const marked = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      expect(
+        marked.prepare("SELECT protocol FROM woodstock_schema").get(),
+      ).toEqual({
+        protocol: "shiitake.extension/v0",
+      });
+    } finally {
+      marked.close();
+    }
     const before = await stat(databasePath);
     const host = await openPrivateLocalRuntimeHost({
       invocationRoot: root,

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels, type OAuthCredential } from "@earendil-works/pi-ai";
@@ -6,11 +6,7 @@ import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { afterEach, expect, it, vi } from "vitest";
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
-import { CredentialActivationError } from "../src/subscription-activation.js";
-import {
-  prepareSubscriptionIdentity,
-  retainSubscriptionIdentity,
-} from "../src/subscription-identity.js";
+import { retainSubscriptionIdentity } from "../src/subscription-identity.js";
 import {
   acquireSubscriptionTurn,
   registerSubscriptionTurnOwner,
@@ -124,58 +120,4 @@ it.each([
   } finally {
     await owner.release();
   }
-});
-
-it("preparing an OpenAI person identity needs no request and no rewrite", async () => {
-  const { credentialPath, store } = await fixture();
-  await store.modify("openai", () => Promise.resolve(openAICredential()));
-  const before = await readFile(credentialPath, "utf8");
-  const inode = (await stat(credentialPath)).ino;
-  await prepareSubscriptionIdentity("openai", {
-    credentialPath,
-    fetch: () => {
-      throw new Error("OpenAI preparation must not make a request");
-    },
-  });
-  expect((await stat(credentialPath)).ino).toBe(inode);
-  expect((await readFile(credentialPath, "utf8")) === before).toBe(true);
-});
-
-it("preparing an OpenAI credential without a workspace account succeeds on its person", async () => {
-  // Real Sign in with ChatGPT grants may carry no account id; the access
-  // token's issuer and subject are the identity.
-  const { credentialPath, store } = await fixture();
-  await store.modify("openai", () => Promise.resolve(openAICredential()));
-  const before = await readFile(credentialPath, "utf8");
-  await expect(
-    prepareSubscriptionIdentity("openai", { credentialPath }),
-  ).resolves.toBeUndefined();
-  expect((await readFile(credentialPath, "utf8")) === before).toBe(true);
-});
-
-it.each([
-  {
-    name: "a missing access subject",
-    credential: () => openAICredential(openAIAccessToken(undefined)),
-  },
-  {
-    name: "a blank access subject",
-    credential: () => openAICredential(openAIAccessToken("   ")),
-  },
-  {
-    name: "a non-string access subject",
-    credential: () => openAICredential(openAIAccessToken(42)),
-  },
-  {
-    name: "a malformed access token",
-    credential: () => openAICredential("fixture-not-a-jwt"),
-  },
-])("OpenAI preparation fails closed for $name", async ({ credential }) => {
-  const { credentialPath, store } = await fixture();
-  await store.modify("openai", () => Promise.resolve(credential()));
-  const before = await readFile(credentialPath, "utf8");
-  await expect(
-    prepareSubscriptionIdentity("openai", { credentialPath }),
-  ).rejects.toEqual(new CredentialActivationError("identity-unavailable"));
-  expect((await readFile(credentialPath, "utf8")) === before).toBe(true);
 });

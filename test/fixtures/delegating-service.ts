@@ -12,6 +12,7 @@ import { mock } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as nodeHost from "@fungi.computer/shiitake/node";
 import * as mail from "../../dist/private-local-mail.js";
+import * as sqlite from "../../dist/private-sqlite-owner.js";
 
 // Rehearse a restart after the first retry becomes due, without sleeping.
 // This process owns its clock; no live service or persisted row is changed.
@@ -30,7 +31,7 @@ const openingChild = new AsyncLocalStorage<boolean>();
 const childDatabases = new WeakSet<object>();
 const completion = Promise.withResolvers<undefined>();
 const reconciled = Promise.withResolvers<undefined>();
-const realMailRoom = mail.createPrivateLocalMailRoom;
+const realSqliteOwner = sqlite.createPrivateSqliteOwner;
 const realPendingMail = mail.hasPrivateLocalPendingMail;
 const realNodeHost = nodeHost.nodeRuntimeHost;
 let stopping = false;
@@ -43,14 +44,15 @@ if (holdCompletion) {
   process.on("SIGTERM", () => {
     stopping = true;
   });
+  await mock.module("../../dist/private-sqlite-owner.js", () => ({
+    ...sqlite,
+    createPrivateSqliteOwner: (...args: Parameters<typeof realSqliteOwner>) => {
+      if (openingChild.getStore() === true) childDatabases.add(args[0]);
+      return realSqliteOwner(...args);
+    },
+  }));
   await mock.module("../../dist/private-local-mail.js", () => ({
     ...mail,
-    createPrivateLocalMailRoom: (
-      ...args: Parameters<typeof mail.createPrivateLocalMailRoom>
-    ) => {
-      if (openingChild.getStore() === true) childDatabases.add(args[0]);
-      return realMailRoom(...args);
-    },
     hasPrivateLocalPendingMail: async (
       database: Parameters<typeof mail.hasPrivateLocalPendingMail>[0],
     ) => {

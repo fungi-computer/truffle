@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/truffle",
-  "version": "0.8.3",
+  "version": "0.9.0",
   "private": false,
   "description": "Truffle: Fungi's local Agent runtime, bundled into the fungi command",
   "type": "module",

@@ -60,6 +60,7 @@ import * as Schema from "effect/Schema";
 import { selectionSchema } from "./private-local-service-discovery.js";
 import { createShiitakeHttpRoutes } from "@fungi.computer/shiitake/http";
 import { questionContract } from "@fungi.computer/shiitake-extensions/question";
+import { goalContract } from "@fungi.computer/shiitake-extensions/goal";
 import {
   listPrivateLocalAgentStores,
   LocalStoreSchemaError,
@@ -528,7 +529,7 @@ export function createLocalServiceOwners(
   const eventResponses = new Set<() => Promise<void>>();
   /** Stores found idle by the previous sweep. */
   const idleCandidates = new Set<string>();
-  /** Released stores whose runtime is still closing; a reopen waits for it. */
+  /** Evicted stores keep their close, including failure, ahead of any reopen. */
   const releasing = new Map<string, Promise<void>>();
   const released = new WeakSet<LocalServiceRuntime>();
   const openedByStore = new Map<string, Promise<LocalServiceOwner>>();
@@ -924,14 +925,11 @@ export function createLocalServiceOwners(
     roots.delete(databasePath);
     const scheduled = rememberIdleWake(databasePath, wakeAt);
     const opened = openedByStore.get(databasePath);
-    openedByStore.delete(databasePath);
-    if (opened !== undefined) opening.delete(opened);
     const closed = (async () => {
-      try {
-        await runtime.close();
-      } catch (cause) {
-        logEvent("service-owner.release-runtime", cause);
-      }
+      // A failed drain still owns resources: shutdown must observe its failure.
+      await runtime.close();
+      openedByStore.delete(databasePath);
+      if (opened !== undefined) opening.delete(opened);
       if (scheduled !== undefined && !stopping) {
         wakes.set(databasePath, scheduled);
         scheduleWakes();
@@ -939,7 +937,7 @@ export function createLocalServiceOwners(
       await saveRecovery();
     })();
     releasing.set(databasePath, closed);
-    return closed.finally(() => {
+    return closed.then(() => {
       if (releasing.get(databasePath) === closed)
         releasing.delete(databasePath);
     });
@@ -1302,22 +1300,25 @@ export function createLocalServiceOwners(
       throw new Error("Agent is outside this Local project");
     }
     /**
-     * Run one sender-authenticated command on a child's question owner. Which
-     * Agent the item waits on is decided by the child's own store; this door
-     * only states who is calling.
+     * Run a sender-authenticated question/goal command on an active child.
+     * Archive still owns admission: unarchive before answering, escalating or
+     * controlling its goal. The extension owns authority; this door names the caller.
      */
-    async function callQuestionAsSender<Output>(
+    async function callChildAs<Output>(
       target: Readonly<{ agentId: string; sessionId: string }>,
       senderAgentId: string,
       senderSessionId: string,
-      command: "answerAgent" | "escalateAgent",
+      extensionId: string,
+      command: string,
       commandInput: Json,
       output: Schema.Decoder<Output>,
       signal: AbortSignal,
     ): Promise<Output> {
       ensureRunning();
       signal.throwIfAborted();
-      const databasePath = (await targets(signal, "all")).get(target.agentId);
+      const databasePath = (await targets(signal, "active")).get(
+        target.agentId,
+      );
       if (databasePath === undefined)
         return outsideOrArchived(target.agentId, signal);
       const { owner, release } = await admittedOwner(target.agentId, signal);
@@ -1326,7 +1327,7 @@ export function createLocalServiceOwners(
           Schema.decodeUnknownSync(output)(
             await owner
               .getSession(target.sessionId)
-              .extension("botanical-session-question")
+              .extension(extensionId)
               .call(command, commandInput, {
                 agentId: senderAgentId,
                 sessionId: senderSessionId,
@@ -1343,10 +1344,11 @@ export function createLocalServiceOwners(
       senderSessionId: string,
       signal: AbortSignal,
     ): Promise<AgentControlAnswerOutput> {
-      const decoded = await callQuestionAsSender(
+      const decoded = await callChildAs(
         input,
         senderAgentId,
         senderSessionId,
+        questionContract.id,
         "answerAgent",
         {
           askId: input.askId,
@@ -1377,22 +1379,74 @@ export function createLocalServiceOwners(
       senderSessionId: string,
       signal: AbortSignal,
     ): Promise<AgentControlEscalateOutput> {
-      const decoded = await callQuestionAsSender(
+      const commandInput: Json = { askId: input.itemId };
+      if (input.note !== undefined)
+        Object.assign(commandInput, { note: input.note });
+      const decoded = await callChildAs(
         input,
         senderAgentId,
         senderSessionId,
+        questionContract.id,
         "escalateAgent",
-        { askId: input.itemId },
+        commandInput,
         questionContract.commands.escalateAgent.output,
         signal,
       );
-      if (decoded.result === "escalated")
-        return { status: "escalated", to: decoded.to };
+      if (decoded.result === "escalated") {
+        if (decoded.to === "person")
+          return { status: "escalated", to: "person" };
+        const { owner, release } = await admittedOwner(
+          decoded.waitingOn.agentId,
+          signal,
+        );
+        try {
+          // The next parent is not the child's original delegator, so its
+          // ordinary rest report cannot notify them. Admit the handoff here.
+          await admitted(owner, () =>
+            owner
+              .getSession(decoded.waitingOn.sessionId)
+              .send(
+                `${senderAgentId} escalated a question to you: child ${input.agentId}, Session ${input.sessionId}, item ${input.itemId}.${input.note === undefined ? "" : ` Note: ${input.note}`} Read it with agents.read; answer with agents.answer or bubble it up with agents.escalate.`,
+                {
+                  requestId: `escalate:${input.itemId}:${senderAgentId}:${senderSessionId}`,
+                  delivery: "followUp",
+                },
+              ),
+          );
+        } finally {
+          release();
+        }
+        return {
+          status: "escalated",
+          to: "agent",
+          waitingOn: decoded.waitingOn,
+        };
+      }
       if (decoded.result === "closed")
         return { status: "closed", reason: decoded.status };
       if (decoded.result === "refused")
         return { status: "refused", reason: decoded.reason };
       return { status: "not_found" };
+    }
+    async function goalAsDelegator(
+      input: Parameters<NonNullable<LocalAgentControlDirectory["goal"]>>[0],
+      senderAgentId: string,
+      senderSessionId: string,
+      signal: AbortSignal,
+    ): ReturnType<NonNullable<LocalAgentControlDirectory["goal"]>> {
+      const decoded = await callChildAs(
+        input,
+        senderAgentId,
+        senderSessionId,
+        goalContract.id,
+        "controlAgent",
+        { action: input.action, reason: input.reason },
+        goalContract.commands.controlAgent.output,
+        signal,
+      );
+      if (decoded.result === "refused")
+        return { status: "refused", reason: decoded.reason };
+      return { status: decoded.result };
     }
     /**
      * The first command still queued or running on any of an Agent's Sessions,
@@ -1488,6 +1542,7 @@ export function createLocalServiceOwners(
       owner: admittedOwner,
       answer: answerAsSender,
       escalate: escalateAsSender,
+      goal: goalAsDelegator,
       archive: (request, signal) => setArchived(request, true, signal),
       unarchive: (request, signal) => setArchived(request, false, signal),
       list: async (signal, options) => {
@@ -1756,18 +1811,16 @@ export function createLocalServiceOwners(
               const { pending, owner } = result.value;
               try {
                 await owner.runtime.close();
+                opening.delete(pending);
               } catch (cause) {
                 logEvent("service-owner.close-runtime", cause);
                 failures.push(cause);
-              } finally {
-                opening.delete(pending);
               }
             }),
           { concurrency: 4, discard: true },
         ),
       );
       owners.clear();
-      opening.clear();
       pendingOpenings.clear();
       if (failures.length > 0)
         throw new AggregateError(

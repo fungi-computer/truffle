@@ -1,8 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Readable } from "node:stream";
 import { normalizeContext, type OAuthCredential } from "@earendil-works/pi-ai";
 import { decodeJwt, UnsecuredJWT } from "jose";
 import {
@@ -21,7 +20,6 @@ import {
   createPrivateLocalRuntimeHost,
 } from "../src/private-local-runtime-host.js";
 import { createPrivateSqliteOwner } from "../src/private-sqlite-owner.js";
-import { activateSubscriptionCredential } from "../src/subscription-activation.js";
 import { acquireSubscriptionTurn } from "../src/subscription-turn.js";
 
 const fixtureCleanup: (() => Promise<void>)[] = [];
@@ -466,7 +464,7 @@ it.each([
   { providerId: "openai", expire: false, lifetimeMs: 10_000 },
   { providerId: "openai", expire: true, lifetimeMs: 250 },
 ])(
-  "$providerId pins an account across real tool iterations (expired after switching: $expire; lifetime: $lifetimeMs)",
+  "$providerId pins an account across logout and login during tool iterations (expired: $expire; lifetime: $lifetimeMs)",
   async ({ providerId, expire, lifetimeMs }) => {
     const root = await mkdtemp(join(tmpdir(), "fungi-turn-pin-"));
     const credentialPath = join(root, ".config/fungi/credentials.json");
@@ -504,36 +502,22 @@ it.each([
     });
     let refreshes = 0;
     let refreshesAtSwitch = -1;
-    let vaultBefore: Buffer | undefined;
-    const vaultPath = join(root, "foreign-fairy-ring-vault.json");
+    const interaction = {
+      signal: new AbortController().signal,
+      notify() {
+        // The fixture returns its credential directly, without user interaction.
+      },
+      prompt: () => Promise.reject(new Error("Fixture login must not prompt")),
+    };
     const seen: boolean[] = [];
     const steps: FauxResponseStep[] = [
       async (_context, options) => {
         seen.push(options?.apiKey === refreshed);
         const active = await store.read(providerId);
         if (active?.type !== "oauth") throw new Error("missing fixture login");
-        // Fairy Ring's vault is foreign to Fungi. Keep an opaque slot-map copy
-        // and prove the retired account is never rotated behind its back.
-        await writeFile(
-          vaultPath,
-          JSON.stringify({
-            subscription: JSON.stringify({ [providerId]: active }),
-          }),
-        );
-        vaultBefore = await readFile(vaultPath);
         refreshesAtSwitch = refreshes;
-        await activateSubscriptionCredential(
-          providerId,
-          Readable.from([
-            Buffer.from(
-              JSON.stringify({
-                expected: active,
-                credential: second,
-              }),
-            ),
-          ]),
-          { credentialPath },
-        );
+        await models.logout(providerId);
+        await models.login(providerId, "oauth", interaction);
         if (expire) {
           // A real clock and a genuinely expiring token, not fake timers.
           await new Promise((resolve) =>
@@ -561,7 +545,7 @@ it.each([
       auth: {
         oauth: {
           name: "Expiring fake subscription",
-          login: () => Promise.resolve(first),
+          login: () => Promise.resolve(second),
           refresh: (credential) => {
             if (credential.accountId !== first.accountId)
               throw new Error("must not refresh a different account");
@@ -633,10 +617,6 @@ it.each([
       ).toBe(true);
       expect(refreshesAtSwitch).toBeGreaterThan(0);
       expect(refreshes).toBe(refreshesAtSwitch);
-      expect(
-        vaultBefore !== undefined &&
-          (await readFile(vaultPath)).equals(vaultBefore),
-      ).toBe(true);
       const next = await session.send("Next turn", { requestId: "next" });
       await vi.waitFor(
         async () => {

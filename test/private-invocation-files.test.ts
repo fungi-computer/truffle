@@ -144,6 +144,10 @@ describe("private invocation Files port", () => {
         "outside the invocation root",
       );
     }
+    // Filesystem enumeration order is unspecified. The escape fixture must not
+    // be mixed into a success scan that may encounter it before the result cap.
+    // Confinement was asserted above; paging/search now owns only in-root files.
+    await rm(join(root, "escape.txt"));
     await expect(
       direct(root, "read", { path: "page.txt", limit: 4 }),
     ).resolves.toMatchObject({

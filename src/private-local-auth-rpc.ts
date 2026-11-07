@@ -18,7 +18,6 @@ import {
   type LocalAuthResult,
 } from "./auth-cli.js";
 import { openAIIdentityDetailSchema } from "./private-openai-claims.js";
-import { CredentialActivationError } from "./subscription-activation.js";
 import { OpenAIIdentityUnavailable } from "./subscription-identity.js";
 
 const requestSchema = z.object({
@@ -174,11 +173,6 @@ function classifyFailure(
   if (cause instanceof LocalAuthRefusal) return { category: "no-key-entered" };
   if (cause instanceof OpenAIIdentityUnavailable)
     return { category: "identity-unavailable", detail: cause.detail };
-  if (
-    cause instanceof CredentialActivationError &&
-    cause.category === "identity-unavailable"
-  )
-    return { category: "identity-unavailable" };
   if (cause instanceof Error) {
     const tokenRequest = openAITokenRequestFailed.exec(cause.message);
     if (tokenRequest !== null)

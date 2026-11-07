@@ -1952,13 +1952,37 @@ export async function openPrivateLocalRuntimeHost(
                       new Error("Local settlement reads are unavailable"),
                     )
                   : readSettlement(sessionId, commandId),
-              escalate: async (item, receiverSessionId) => {
-                await input.agentControl?.escalate(
-                  item,
-                  agentId,
-                  receiverSessionId,
+              remind: async (item, receiverSessionId, number) => {
+                const directory = input.agentControl;
+                if (directory === undefined)
+                  throw new Error("Agent directory is unavailable");
+                const opened = await directory.open(
+                  item.agentId,
                   new AbortController().signal,
                 );
+                try {
+                  const snapshot = await opened.agent
+                    .session(item.sessionId)
+                    .read({ limit: 1 });
+                  const attention = snapshot.attention.find(
+                    ({ id }) => id === item.itemId,
+                  );
+                  if (
+                    attention?.waitingOn?.agentId !== agentId ||
+                    attention.waitingOn.sessionId !== receiverSessionId
+                  )
+                    return { status: "settled" };
+                  const accepted = await getSession(receiverSessionId).send(
+                    `${item.agentId} still waits on you: ${attention.summary} (item ${item.itemId}, Session ${item.sessionId}). Answer with agents.answer or pass it to your parent with agents.escalate. This is reminder ${String(number)} of 2; leaving it open keeps it waiting on you.`,
+                    {
+                      requestId: `remind:${item.itemId}:${String(number)}`,
+                      delivery: "followUp",
+                    },
+                  );
+                  return { status: "reminded", commandId: accepted.commandId };
+                } finally {
+                  await opened.release();
+                }
               },
             },
           });
@@ -1988,6 +2012,10 @@ export async function openPrivateLocalRuntimeHost(
       home: { kind: "local", id: agentId },
       now: Date.now,
     });
+    // This host has not admitted calls yet; recover every prior owner claim.
+    while (escapeLedger.recoverClaims().length > 0) {
+      // Each bounded batch settles part of the finite orphan set.
+    }
     const execRules = localExecRules(root);
     // An Agent can create .git after opening the Session. That does not make
     // its newly authored config/hooks a protected repository for a grant.
@@ -2275,15 +2303,80 @@ export async function openPrivateLocalRuntimeHost(
       model: modelSource,
       instructions: createPrivateLocalInstructionSource(localTools.port),
       tools: localTools.tools,
+      recipientStatus: async (
+        recipient: import("@fungi.computer/shiitake/extensions").AttentionRecipient,
+      ): Promise<
+        import("@fungi.computer/shiitake/extensions").RecipientStatus
+      > => {
+        const directory = input.agentControl;
+        if (directory === undefined) return "unknown";
+        const signal = new AbortController().signal;
+        try {
+          if (
+            (await directory.list(signal, { archived: true })).some(
+              ({ agentId }) => agentId === recipient.agentId,
+            )
+          )
+            return "archived";
+          const row = (await directory.list(signal)).find(
+            ({ agentId }) => agentId === recipient.agentId,
+          );
+          if (row === undefined) return "absent";
+          if (row.unreadable !== undefined) return "unknown";
+          const opened = await directory.open(recipient.agentId, signal);
+          try {
+            // Core reads an absent Session as empty, not not-found. Its ordinary
+            // list is the existence authority; a bounded incomplete read is unknown.
+            let after: string | undefined;
+            for (let page = 0; page < 256; page += 1) {
+              const result = await opened.agent.listSessions(after);
+              const session = result.sessions.find(
+                ({ sessionId }) => sessionId === recipient.sessionId,
+              );
+              if (session !== undefined)
+                return session.state === "unavailable" ? "unknown" : "present";
+              if (result.next === undefined) return "absent";
+              after = result.next;
+            }
+            return "unknown";
+          } finally {
+            await opened.release();
+          }
+        } catch (cause) {
+          logEvent("recipient.status_unavailable", cause);
+          return "unknown";
+        }
+      },
+      recipientParent: async (
+        recipient: import("@fungi.computer/shiitake/extensions").AttentionRecipient,
+      ) => {
+        if (input.agentControl === undefined)
+          throw new Error("Recipient parent is unavailable");
+        const opened = await input.agentControl.open(
+          recipient.agentId,
+          new AbortController().signal,
+        );
+        try {
+          return (
+            (await opened.agent.session(recipient.sessionId).read({ limit: 1 }))
+              .parent ?? null
+          );
+        } finally {
+          await opened.release();
+        }
+      },
     };
     if (input.mail === undefined) {
       agent = await Shiitake.make(hostOptions);
     } else {
-      const mailRoom = createPrivateLocalMailRoom(database, {
+      const mail = createPrivateLocalMailRoom(store, {
         deliver: input.mail.deliver,
         scheduleWake: runtime.scheduleWake,
       });
-      const host = await makeHost(hostOptions, mailRoom);
+      const host = await makeHost(
+        { ...hostOptions, hostJobs: mail.hostJobs },
+        mail.room,
+      );
       agent = host.agent;
       acceptMail = host.acceptMail;
       readSettlement = host.readSettlement;

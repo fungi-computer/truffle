@@ -7,8 +7,7 @@ import { createPrivateModels } from "../src/local-models.js";
 import { runLocalAuthCli } from "../src/auth-cli.js";
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
 import { capturePrivateLocalConfigRoot } from "../src/private-local-config-root.js";
-import { CredentialActivationError } from "../src/subscription-activation.js";
-import { prepareSubscriptionIdentity } from "../src/subscription-identity.js";
+import { OpenAIIdentityUnavailable } from "../src/subscription-identity.js";
 import { readOpenAIPerson } from "../src/private-openai-claims.js";
 import { fixtureChatGPTProvider } from "./fixture-chatgpt-provider.js";
 import { openAIAccessToken } from "./openai-fixtures.js";
@@ -65,13 +64,13 @@ it.each([
           },
         },
       ).then(
-        () => "completed",
-        (error: unknown) =>
-          error instanceof CredentialActivationError
-            ? error.category
-            : "unexpected",
+        () => true,
+        (error: unknown) => {
+          expect(error).toBeInstanceOf(OpenAIIdentityUnavailable);
+          return false;
+        },
       );
-      expect(outcome).toBe(accepted ? "completed" : "identity-unavailable");
+      expect(outcome).toBe(accepted);
       const saved = await createPrivateCredentialStore(path).read("openai");
       if (accepted) {
         expect(
@@ -83,7 +82,6 @@ it.each([
         });
         expect(Object.hasOwn(saved ?? {}, "accountId")).toBe(false);
         expect(Object.hasOwn(saved ?? {}, "id_token")).toBe(false);
-        await prepareSubscriptionIdentity("openai", { credentialPath: path });
       } else expect(saved === undefined).toBe(true);
     } finally {
       await rm(home, { recursive: true, force: true });

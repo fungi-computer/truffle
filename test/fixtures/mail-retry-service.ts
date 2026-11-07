@@ -1,7 +1,6 @@
 // A real service and workerd sandbox, with only reply transport refused during
 // the first process. The restarted process has the ordinary working transport.
-import { mock } from "bun:test";
-import * as Effect from "effect/Effect";
+import { mock, spyOn } from "bun:test";
 import { createModels } from "@earendil-works/pi-ai";
 import {
   fauxAssistantMessage,
@@ -23,7 +22,27 @@ await mock.module("../../dist/private-local-mail.js", () => ({
     database: Parameters<typeof makeMailRoom>[0],
     options: Parameters<typeof makeMailRoom>[1],
   ) => {
-    const room = makeMailRoom(database, {
+    const transact = database.transactionSync.bind(database);
+    spyOn(database, "transactionSync").mockImplementation((operation) => {
+      const result = transact(operation);
+      if (refused && !reported) {
+        const row = z
+          .object({ pending: z.number() })
+          .parse(
+            database.sql
+              .exec(
+                "SELECT EXISTS(SELECT 1 FROM watchdog_jobs WHERE lane='post' AND state='queued' AND attempt_count=1 AND not_before>0) AS pending",
+              )
+              .one(),
+          );
+        if (row.pending === 1) {
+          reported = true;
+          process.send?.("retry-persisted");
+        }
+      }
+      return result;
+    });
+    return makeMailRoom(database, {
       ...options,
       deliver: (message) => {
         if (phase === "deliver") return options.deliver(message);
@@ -31,20 +50,6 @@ await mock.module("../../dist/private-local-mail.js", () => ({
         return Promise.reject(new Error("Test-owned parent is unreachable"));
       },
     });
-    return {
-      ...room,
-      drainOutbox: () =>
-        room.drainOutbox().pipe(
-          Effect.tap(() =>
-            Effect.sync(() => {
-              if (refused && !reported) {
-                reported = true;
-                process.send?.("retry-persisted");
-              }
-            }),
-          ),
-        ),
-    };
   },
 }));
 const { runPrivateLocalService } =

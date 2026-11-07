@@ -117,8 +117,3 @@ export {
 } from "./private-team-computers.js";
 
 export { runTrackerGitCredential } from "./tracker-git-credential.js";
-export {
-  activateSubscriptionCredential,
-  CredentialActivationError,
-} from "./subscription-activation.js";
-export { prepareSubscriptionIdentity } from "./subscription-identity.js";

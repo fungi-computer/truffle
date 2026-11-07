@@ -10,7 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { PassThrough, Readable } from "node:stream";
+import { PassThrough } from "node:stream";
 import { afterEach, expect, it } from "vitest";
 import { capturePrivateLocalConfigRoot } from "../src/private-local-config-root.js";
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
@@ -18,7 +18,6 @@ import {
   createFungiAccountCredentialStore,
   privateFungiAccountOAuthProvider,
 } from "../src/private-fungi-account.js";
-import { activateSubscriptionCredential } from "../src/subscription-activation.js";
 import { runPrivateLocalWorkerServer } from "../src/private-local-worker-server.js";
 import { runLocalAuthCli, type LocalAuthCliOptions } from "../src/auth-cli.js";
 import { createPrivateModels } from "../src/local-models.js";
@@ -80,25 +79,6 @@ it("keeps delayed OAuth writes and reads in the provider's selected home", async
   expect(await store.read("fungi")).toMatchObject({
     codeVerifier: "synthetic-verifier",
   });
-  await expect(access(b.credentialPath)).rejects.toMatchObject({
-    code: "ENOENT",
-  });
-});
-
-it("selects the activation path before awaiting input that changes ambient HOME", async () => {
-  const { b, store } = await homes();
-  const credential = {
-    type: "oauth",
-    access: "synthetic-access",
-    refresh: "synthetic-refresh",
-    expires: Date.now() + 3_600_000,
-  };
-  function* input() {
-    process.env.HOME = b.home;
-    yield Buffer.from(JSON.stringify({ expected: null, credential }));
-  }
-  await activateSubscriptionCredential("anthropic", Readable.from(input()));
-  expect(await store.read("anthropic")).toEqual(credential);
   await expect(access(b.credentialPath)).rejects.toMatchObject({
     code: "ENOENT",
   });

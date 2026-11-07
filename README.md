@@ -570,25 +570,23 @@ resolves the selected App's published surface on the saved Hub origin, without
 putting an access token in the URL. A later account/Team selection retires this
 client; open a new client for the new selection.
 
-## Subscription credential activation
+## Subscription sign-in
 
-`fungi account use-credential --provider anthropic|openai --from-file -` accepts
-bounded JSON on stdin:
-`{ "expected": <OAuth credential or null>, "credential": <replacement OAuth credential> }`.
-Tokens never travel in arguments or replies. Under the credential store's
-existing refresh lock, the owner compares the expected provider entry
-semantically, preserves every other provider, and atomically persists a 0600
-replacement. A stale comparison fails closed with the fixed `conflict` category.
-Input and filesystem failures expose only `invalid-input` or `store-failure`,
-never parser diagnostics or causes. The machine-readable success is
-`{"ok":true}`; failure also writes a bounded
-`{"ok":false,"error":{"category":"..."}}` reply and exits nonzero.
+To change your Claude or ChatGPT subscription account, log out and log in:
+
+```sh
+fungi logout --provider anthropic
+fungi login --provider anthropic --auth-type oauth
+```
+
+Use `--provider openai` for ChatGPT. Local does not import subscription
+credentials from another account manager.
 
 Fungi remains the credential refresher. Local pins the Anthropic/OpenAI account
 at the accepted turn boundary, including all subsequent tool iterations. Pi
 refreshes that same account under the existing store lock while it remains
 active; refreshed tokens do not change the pinned identity. The next turn picks
-up an activated account without restarting the service.
+up the new login without restarting the service.
 
 Pi's `openai` provider uses the ChatGPT direct-token flow, not the legacy
 `openai-codex` flow. Its credentials contain `clientId` and `scopes`, but do not
@@ -600,24 +598,19 @@ continuity. An already-started refresh is committed under Pi's existing lock
 before Local decides whether the turn can adopt it; refusal or cancellation must
 not discard the rotated refresh token or restore a released pin.
 
-After switching A to B, the current turn may continue using A's still-valid
-token, but never refreshes inactive A. If A expires, its next request ends the
-turn with the typed, redacted `account-switched-during-turn` refusal: retry on
-the next turn using B. Completed tool results remain in the Session. A's durable
-inactive credential belongs to the external vault; Local creates no second
-inactive-credential authority and does not rotate it behind the vault's back.
+After logging out of A and into B, the current turn may continue using A's
+still-valid token, but never refreshes inactive A. If A expires, its next
+request ends the turn with the typed, redacted `account-switched-during-turn`
+refusal: retry on the next turn using B. Completed tool results remain in the
+Session.
 
-For vault capture, `fungi account prepare-credential --provider anthropic`
-enriches a fresh Fungi login with Anthropic's OAuth profile account UUID. OpenAI
-uses unpatched Pi OAuth: Local neither intercepts the code exchange nor reads
-its ID token. After Pi returns a grant, Local requires a usable issuer and
+OpenAI uses unpatched Pi OAuth: Local neither intercepts the code exchange nor
+reads its ID token. After Pi returns a grant, Local requires a usable issuer and
 subject in the access token before storage. No OpenAI workspace `accountId` is
-captured or retained across refresh. Anthropic still retains its profile
-account. `fungi account prepare-credential --provider openai` confirms only the
-access token's issuer and subject, without a request or token change. Failures
-expose `identity-unavailable` and bounded claim names, never token or claim
-values, and preserve the prior entry. A turn detects a different OpenAI person
-by issuer and subject and refuses as `account-switched-during-turn`.
+captured or retained across refresh. Failures expose `identity-unavailable` and
+bounded claim names, never token or claim values, and preserve the prior entry.
+A turn detects a different OpenAI person by issuer and subject and refuses as
+`account-switched-during-turn`.
 
 Auth tests inject a fixture ChatGPT OAuth provider through `createPrivateModels`
 and pass the resulting collection to `runLocalAuthCli`. They do not start Pi's

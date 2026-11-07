@@ -8,7 +8,12 @@ import { BirdDog, type BirdDogMail } from "@fungi.computer/bird-dog";
 import { BirdDogError } from "@fungi.computer/bird-dog/effect";
 import { makeHost, type RuntimeHost } from "@fungi.computer/shiitake";
 import * as Effect from "effect/Effect";
-import { expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
+import {
+  Watchdog,
+  type ConcurrentWatchdogRuntime,
+  type WatchdogExecutor,
+} from "@fungi.computer/watchdog";
 
 import {
   createPrivateLocalMailRoom,
@@ -16,6 +21,36 @@ import {
 } from "../src/private-local-mail.js";
 import { createPrivateSqliteOwner } from "../src/private-sqlite-owner.js";
 import { createPrivateLocalDelegation } from "../src/private-local-delegation.js";
+
+afterEach(() => vi.restoreAllMocks());
+
+/** Exercise Local's real Post executor through the same native Watchdog owner. */
+async function openMail(
+  database: DatabaseSync,
+  options: Parameters<typeof createPrivateLocalMailRoom>[1],
+) {
+  const owner = createPrivateSqliteOwner(database);
+  const mail = createPrivateLocalMailRoom(owner, options);
+  const watchdog: ConcurrentWatchdogRuntime = await Watchdog.make({
+    owner,
+    concurrentLane: "post",
+    execute: (...args: Parameters<WatchdogExecutor>) =>
+      executor.execute(...args),
+    retryPolicy: (job) => executor.retryPolicy(job),
+    isAlive: () => Promise.resolve(false),
+    wake: { recompute: () => Promise.resolve() },
+  });
+  const executor = mail.hostJobs.open({
+    transactional: watchdog.transactional,
+    readJob: watchdog.read,
+    tickConcurrent: watchdog.tickConcurrent,
+  });
+  return {
+    ...mail.room,
+    tick: watchdog.tickConcurrent,
+    wakeState: watchdog.wakeState,
+  };
+}
 
 const parent = {
   kind: "agent",
@@ -74,7 +109,7 @@ it("admits an addressed one-way ancestor notice as ordinary work, not a reply", 
     });
     expect(accepted).toEqual([notice]);
     const mailed: BirdDogMail[] = [];
-    const room = createPrivateLocalMailRoom(database, {
+    const room = await openMail(database, {
       deliver: (mail) => {
         mailed.push(mail);
         return Promise.resolve({ status: "accepted", commandId: "reply" });
@@ -96,7 +131,7 @@ it("admits an addressed one-way ancestor notice as ordinary work, not a reply", 
         content: "Finished the report",
       }),
     );
-    await Effect.runPromise(room.drainOutbox());
+    await room.tick();
     expect(mailed).toEqual([]);
     await expect(
       delegation.receive({
@@ -118,7 +153,7 @@ it("clears a reply from the local outbox when the relay holds custody", async ()
   const root = await mkdtemp(join(tmpdir(), "fungi-local-mail-held-"));
   const database = new DatabaseSync(join(root, "agent.sqlite"));
   const deliveries: BirdDogMail[] = [];
-  const room = createPrivateLocalMailRoom(database, {
+  const room = await openMail(database, {
     deliver: (mail) => {
       deliveries.push(mail);
       return Promise.resolve({
@@ -152,7 +187,7 @@ it("clears a reply from the local outbox when the relay holds custody", async ()
         content: "Child result",
       }),
     );
-    await Effect.runPromise(room.drainOutbox());
+    await room.tick();
 
     expect(deliveries).toHaveLength(1);
     expect(deliveries[0]?.content).toBe("Child result");
@@ -179,10 +214,16 @@ it("replays sessionless acceptance and its notice after the Local owner reopens"
     },
     now: () => 100,
   };
-  const room = createPrivateLocalMailRoom(database, options);
+  const room = createPrivateLocalMailRoom(
+    createPrivateSqliteOwner(database),
+    options,
+  );
   const failingRoom = {
     ...room,
-    postMail: () => Effect.fail(new BirdDogError("injected outbox failure")),
+    room: {
+      ...room.room,
+      postMail: () => Effect.fail(new BirdDogError("injected staging failure")),
+    },
   };
   const runtime: RuntimeHost = {
     bind: () =>
@@ -197,6 +238,7 @@ it("replays sessionless acceptance and its notice after the Local owner reopens"
     makeHost(
       {
         store: createPrivateSqliteOwner(storeDatabase),
+        hostJobs: mailRoom.hostJobs,
         extensions: { roster: [], grants: [] },
         runtime,
         instructions: {
@@ -213,7 +255,7 @@ it("replays sessionless acceptance and its notice after the Local owner reopens"
             }),
         },
       },
-      mailRoom,
+      mailRoom.room,
     );
   const mail: BirdDogMail = {
     key: "sessionless-local-mail",
@@ -245,8 +287,8 @@ it("replays sessionless acceptance and its notice after the Local owner reopens"
     ).toBeUndefined();
     expect(
       database
-        .prepare("SELECT key FROM local_birddog_outbox WHERE key = ?")
-        .get(`outbox:${mail.key}:accepted`),
+        .prepare("SELECT key FROM carrier_post_rows WHERE key = ?")
+        .get(`post:${mail.key}:accepted`),
     ).toBeUndefined();
     await failedHost.agent.close();
     failedHost = undefined;
@@ -274,16 +316,19 @@ it("replays sessionless acceptance and its notice after the Local owner reopens"
     ).toEqual([{ request_id: mail.key }]);
     expect(
       database
-        .prepare("SELECT key FROM local_birddog_outbox WHERE key = ?")
-        .get(`outbox:${mail.key}:accepted`),
-    ).toEqual({ key: `outbox:${mail.key}:accepted` });
+        .prepare("SELECT key FROM carrier_post_rows WHERE key = ?")
+        .get(`post:${mail.key}:accepted`),
+    ).toEqual({ key: `post:${mail.key}:accepted` });
     await host.agent.close();
     host = undefined;
 
     database.close();
     database = new DatabaseSync(path);
-    const reopened = createPrivateLocalMailRoom(database, options);
-    if (reopened.postMail === undefined)
+    const reopened = createPrivateLocalMailRoom(
+      createPrivateSqliteOwner(database),
+      options,
+    );
+    if (reopened.room.postMail === undefined)
       throw new Error("Reopened Local mail room cannot stage mail");
     host = await openHost(database, reopened);
     expect(await host.acceptMail(mail)).toEqual(receipt);
@@ -303,13 +348,14 @@ it("replays sessionless acceptance and its notice after the Local owner reopens"
     ).toEqual([{ request_id: mail.key }]);
     expect(
       database
-        .prepare("SELECT key FROM local_birddog_outbox WHERE key = ?")
-        .all(`outbox:${mail.key}:accepted`),
-    ).toEqual([{ key: `outbox:${mail.key}:accepted` }]);
+        .prepare("SELECT key FROM carrier_post_rows WHERE key = ?")
+        .all(`post:${mail.key}:accepted`),
+    ).toEqual([{ key: `post:${mail.key}:accepted` }]);
     await host.agent.close();
     host = undefined;
-    await Effect.runPromise(reopened.drainOutbox());
-    await Effect.runPromise(reopened.drainOutbox());
+    const delivery = await openMail(database, options);
+    await delivery.tick();
+    await delivery.tick();
     expect(sent).toMatchObject([
       {
         key: `${mail.key}:accepted`,
@@ -360,20 +406,20 @@ it("reopens and forwards a staged acceptance notice from the durable local outbo
     now: () => 100,
   };
   const firstDatabase = new DatabaseSync(path);
-  const first = createPrivateLocalMailRoom(firstDatabase, options);
+  const first = await openMail(firstDatabase, options);
   if (first.postMail === undefined)
     throw new Error("The local mail outbox cannot stage authored mail");
   await Effect.runPromise(first.postMail(notice));
   firstDatabase.close();
 
   const reopenedDatabase = new DatabaseSync(path);
-  const reopened = createPrivateLocalMailRoom(reopenedDatabase, options);
+  const reopened = await openMail(reopenedDatabase, options);
   try {
     if (reopened.postMail === undefined)
       throw new Error("The reopened local mail outbox cannot stage mail");
-    await Effect.runPromise(reopened.postMail(notice));
-    await Effect.runPromise(reopened.drainOutbox());
-    await Effect.runPromise(reopened.drainOutbox());
+    await Effect.runPromise(reopened.postMail({ ...notice, createdAt: 200 }));
+    await reopened.tick();
+    await reopened.tick();
     expect(deliveries).toEqual([notice]);
     expect(await hasPrivateLocalPendingMail(reopenedDatabase)).toBe(false);
   } finally {
@@ -388,12 +434,15 @@ it("reopens a persisted retry and delivers it to the addressed recipient once", 
   const parentDatabase = new DatabaseSync(join(root, "parent.sqlite"));
   const wakeTimes: number[] = [];
   let now = 100;
+  vi.spyOn(Date, "now").mockImplementation(() => now);
   let recipientAvailable = false;
   let parentCommandId: string | undefined;
   let parentReconcile: (() => Promise<void>) | undefined;
   const runtime: RuntimeHost = {
-    bind: ({ reconcile }) => {
-      parentReconcile = reconcile;
+    bind: ({ reconcile, reconcileHost }) => {
+      parentReconcile = async () => {
+        await Promise.all([reconcile(), reconcileHost?.()]);
+      };
       return Promise.resolve({
         commit: (mutation) => mutation(),
         requestWake: () => Promise.resolve(),
@@ -403,12 +452,16 @@ it("reopens a persisted retry and delivers it to the addressed recipient once", 
   };
   const faux = fauxModel([]);
   faux.setResponses([fauxAssistantMessage("Reply received")]);
-  const parentRoom = createPrivateLocalMailRoom(parentDatabase, {
-    deliver: () => Promise.reject(new Error("The parent owes no replies")),
-  });
+  const parentRoom = createPrivateLocalMailRoom(
+    createPrivateSqliteOwner(parentDatabase),
+    {
+      deliver: () => Promise.reject(new Error("The parent owes no replies")),
+    },
+  );
   const parentHost = await makeHost(
     {
       store: createPrivateSqliteOwner(parentDatabase),
+      hostJobs: parentRoom.hostJobs,
       extensions: { roster: [], grants: [] },
       runtime,
       instructions: {
@@ -425,7 +478,7 @@ it("reopens a persisted retry and delivers it to the addressed recipient once", 
           }),
       },
     },
-    parentRoom,
+    parentRoom.room,
   );
   const options = {
     deliver: async (mail: BirdDogMail) => {
@@ -458,31 +511,38 @@ it("reopens a persisted retry and delivers it to the addressed recipient once", 
 
   try {
     const firstDatabase = new DatabaseSync(childPath);
-    const first = createPrivateLocalMailRoom(firstDatabase, options);
+    const first = await openMail(firstDatabase, options);
     await Effect.runPromise(
       first.fanOut({
         job: { ...queued, state: "settled", outcome: "completed" },
         content: "Child result",
       }),
     );
-    await Effect.runPromise(first.drainOutbox());
+    await first.tick();
+    expect(wakeTimes).toContain(100);
+    expect(await first.wakeState(now)).toEqual({
+      pending: false,
+      nextWakeAt: 2_100,
+    });
     firstDatabase.close();
-    expect(wakeTimes).toEqual([100, 2_100]);
 
     now = 101;
     wakeTimes.length = 0;
     const reopenedDatabase = new DatabaseSync(childPath);
-    const reopened = createPrivateLocalMailRoom(reopenedDatabase, options);
-    await Effect.runPromise(reopened.drainOutbox());
-    expect(wakeTimes).toEqual([2_100]);
+    const reopened = await openMail(reopenedDatabase, options);
+    await reopened.tick();
+    expect(await reopened.wakeState(now)).toEqual({
+      pending: false,
+      nextWakeAt: 2_100,
+    });
     expect(
       (await parentHost.agent.session(parent.sessionId).read()).messages,
     ).toEqual([]);
 
     now = 2_100;
     recipientAvailable = true;
-    await Effect.runPromise(reopened.drainOutbox());
-    await Effect.runPromise(reopened.drainOutbox());
+    await reopened.tick();
+    await reopened.tick();
     reopenedDatabase.close();
 
     const session = parentHost.agent.session(parent.sessionId);
@@ -513,14 +573,18 @@ it.each([
 ] as const)(
   "recovers %s persistence failure and keeps %s delivery across both owners reopening",
   async (failureBoundary, outcome) => {
+    let clock = 1_000;
+    vi.spyOn(Date, "now").mockImplementation(() => clock);
     const root = await mkdtemp(join(tmpdir(), "fungi-local-settlement-"));
     const parentPath = join(root, "parent.sqlite");
     let parentDatabase = new DatabaseSync(parentPath);
     const childPath = join(root, "child.sqlite");
     let parentReconcile: (() => Promise<void>) | undefined;
     const parentRuntime: RuntimeHost = {
-      bind: ({ reconcile }) => {
-        parentReconcile = reconcile;
+      bind: ({ reconcile, reconcileHost }) => {
+        parentReconcile = async () => {
+          await Promise.all([reconcile(), reconcileHost?.()]);
+        };
         return Promise.resolve({
           commit: (mutation) => mutation(),
           requestWake: () => Promise.resolve(),
@@ -537,10 +601,18 @@ it.each([
             fauxAssistantMessage("Reply received"),
           ],
     );
-    const openParent = (database: DatabaseSync) =>
-      makeHost(
+    const openParent = (database: DatabaseSync) => {
+      const mail = createPrivateLocalMailRoom(
+        createPrivateSqliteOwner(database),
+        {
+          deliver: () =>
+            Promise.reject(new Error("The parent owes no replies")),
+        },
+      );
+      return makeHost(
         {
           store: createPrivateSqliteOwner(database),
+          hostJobs: mail.hostJobs,
           extensions: { roster: [], grants: [] },
           runtime: parentRuntime,
           instructions: {
@@ -556,32 +628,37 @@ it.each([
               }),
           },
         },
-        createPrivateLocalMailRoom(database, {
-          deliver: () =>
-            Promise.reject(new Error("The parent owes no replies")),
-        }),
+        mail.room,
       );
+    };
     let parentHost = await openParent(parentDatabase);
     let childReconcile: (() => Promise<void>) | undefined;
     let parentCommandId: string | undefined;
     let posts = 0;
     const openChild = async (database: DatabaseSync) => {
-      const room = createPrivateLocalMailRoom(database, {
-        deliver: async (mail) => {
-          expect(mail.to).toEqual(parent);
-          posts += 1;
-          const accepted = await parentHost.acceptMail(mail);
-          parentCommandId = accepted.commandId;
-          return accepted;
+      const room = createPrivateLocalMailRoom(
+        createPrivateSqliteOwner(database),
+        {
+          deliver: async (mail) => {
+            expect(mail.to).toEqual(parent);
+            posts += 1;
+            const accepted = await parentHost.acceptMail(mail);
+            parentCommandId = accepted.commandId;
+            return accepted;
+          },
         },
-      });
+      );
       const host = await makeHost(
         {
           store: createPrivateSqliteOwner(database),
+          hostJobs: room.hostJobs,
           extensions: { roster: [], grants: [] },
           runtime: {
             bind: (input) => {
-              childReconcile = input.reconcile;
+              childReconcile = async () => {
+                await input.reconcile();
+                await input.reconcileHost?.();
+              };
               return Promise.resolve({
                 commit: (mutation) => mutation(),
                 requestWake: () => Promise.resolve(),
@@ -602,7 +679,7 @@ it.each([
               }),
           },
         },
-        room,
+        room.room,
       );
       return host;
     };
@@ -616,8 +693,8 @@ it.each([
             : "Agent reply delivery is unavailable";
         childDatabase.exec(
           failureBoundary === "fan-out"
-            ? "CREATE TRIGGER fail_mail_write BEFORE INSERT ON local_birddog_outbox BEGIN SELECT RAISE(ABORT, 'interrupted'); END"
-            : "CREATE TRIGGER fail_mail_write BEFORE UPDATE ON local_birddog_outbox BEGIN SELECT RAISE(ABORT, 'interrupted'); END",
+            ? "CREATE TRIGGER fail_mail_write BEFORE INSERT ON carrier_post_rows BEGIN SELECT RAISE(ABORT, 'interrupted'); END"
+            : "CREATE TRIGGER fail_mail_write BEFORE UPDATE ON carrier_post_rows WHEN json_extract(NEW.value, '$.state') = 'delivered' BEGIN SELECT RAISE(ABORT, 'interrupted'); END",
         );
         await childHost.acceptMail({
           key: "file-settlement",
@@ -639,7 +716,12 @@ it.each([
         }
         if (childReconcile === undefined)
           throw new Error("missing child reconciliation");
-        await expect(childReconcile()).rejects.toThrow(failureMessage);
+        if (failureBoundary === "fan-out")
+          await expect(childReconcile()).rejects.toThrow(failureMessage);
+        else {
+          await childReconcile();
+          expect(await hasPrivateLocalPendingMail(childDatabase)).toBe(true);
+        }
         expect(
           childDatabase
             .prepare(
@@ -647,11 +729,14 @@ it.each([
             )
             .all(),
         ).toHaveLength(1);
-        await expect(childHost.agent.close()).rejects.toThrow(failureMessage);
+        if (failureBoundary === "fan-out")
+          await expect(childHost.agent.close()).rejects.toThrow(failureMessage);
+        else await childHost.agent.close();
         childDatabase.close();
 
         childDatabase = new DatabaseSync(childPath);
         childDatabase.exec("DROP TRIGGER fail_mail_write");
+        clock += 2_000;
         childHost = await openChild(childDatabase);
         await childReconcile();
         await childReconcile();

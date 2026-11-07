@@ -1,14 +1,19 @@
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
 import {
   BirdDogError,
-  hasPendingDelivery,
+  BirdDogMailSchema,
   make as makeBirdDog,
   type BirdDogEffect,
-  type EffectBirdDogOptions,
 } from "@fungi.computer/bird-dog/effect";
+import { createPost, definePostRoute } from "@fungi.computer/carrier/post";
 import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
 import type { PrivateSqliteDatabase } from "./private-sqlite-owner.js";
-import type { DelegationReceipt } from "@fungi.computer/shiitake";
+import type {
+  DelegationReceipt,
+  ShiitakeOptions,
+  SqliteOwner,
+} from "@fungi.computer/shiitake";
 import { messageAuthor } from "@fungi.computer/agar/agents";
 import { z } from "zod";
 
@@ -18,116 +23,121 @@ export type PrivateLocalMailOptions = Readonly<{
   scheduleWake?: (at: number) => void;
   now?: () => number;
 }>;
-const outboxValue = z.object({ value: z.string() });
-const outboxRows = z.array(
-  z.object({ key: z.string(), value: z.string() }).readonly(),
-);
 
-function storeFailure(cause: unknown): BirdDogError {
-  return new BirdDogError("local mail store is unavailable", { cause });
-}
-
-/** The Agent store's BirdDog outbox rows. */
-function localOutbox(
-  database: PrivateSqliteDatabase,
-): EffectBirdDogOptions["outbox"] {
-  return {
-    read: (key: string) =>
-      Effect.try({
-        try: () => {
-          const statement = database.prepare(
-            "SELECT value FROM local_birddog_outbox WHERE key = ?",
-          );
-          const row = outboxValue.safeParse(statement.get(key));
-          return row.success ? row.data.value : undefined;
-        },
-        catch: storeFailure,
-      }),
-    put: (key, value) =>
-      Effect.try({
-        try: () => {
-          database
-            .prepare(
-              "INSERT INTO local_birddog_outbox (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            )
-            .run(key, value);
-        },
-        catch: storeFailure,
-      }),
-    list: (limit, afterKey) =>
-      Effect.try({
-        try: () =>
-          outboxRows.parse(
-            database
-              .prepare(
-                "SELECT key, value FROM local_birddog_outbox WHERE (? IS NULL OR key > ?) ORDER BY key LIMIT ?",
-              )
-              .all(afterKey ?? null, afterKey ?? null, limit),
-          ),
-        catch: storeFailure,
-      }),
-    delete: (key) =>
-      Effect.try({
-        try: () => {
-          database
-            .prepare("DELETE FROM local_birddog_outbox WHERE key = ?")
-            .run(key);
-        },
-        catch: storeFailure,
-      }),
-  };
-}
-
-/** Whether this Agent's outbox still owes any reply a delivery attempt. */
+/** Pending mail is existing Watchdog work, including retained future retries. */
 export function hasPrivateLocalPendingMail(
   database: PrivateSqliteDatabase,
 ): Promise<boolean> {
-  return Effect.runPromise(hasPendingDelivery(localOutbox(database)));
+  const row = z
+    .object({ pending: z.union([z.literal(0), z.literal(1)]) })
+    .parse(
+      database
+        .prepare(
+          "SELECT EXISTS(SELECT 1 FROM watchdog_jobs WHERE lane='post' AND state IN ('queued','running','completing')) AS pending",
+        )
+        .get(),
+    );
+  return Promise.resolve(row.pending === 1);
 }
 
+/** Local uses Carrier's native Post rows and Shiitake's one delivery lane. */
 export function createPrivateLocalMailRoom(
-  database: PrivateSqliteDatabase,
+  owner: SqliteOwner,
   options: PrivateLocalMailOptions,
-): BirdDogEffect {
-  database.exec(
-    "CREATE TABLE IF NOT EXISTS local_birddog_outbox (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL)",
-  );
-  const room = Effect.runSync(
-    makeBirdDog({
-      outbox: localOutbox(database),
-      post: (mail) =>
-        Effect.tryPromise({
-          try: async () => {
+) {
+  const now = options.now ?? Date.now;
+  const routes = {
+    mail: definePostRoute({
+      addressKind: "local-agent",
+      address: Schema.Struct({ agentId: Schema.String }),
+      event: BirdDogMailSchema,
+      name: ({ agentId }) => agentId,
+      namespace: {
+        getByName: (agentId) => ({
+          deliver: async (envelope) => {
+            const mail = Schema.decodeUnknownSync(BirdDogMailSchema)(
+              envelope.event,
+            );
+            if (mail.to.agentId !== agentId)
+              throw new BirdDogError(
+                "Local mail recipient does not match its address",
+              );
             await options.deliver(mail);
-            return true;
+            return "accepted";
+          },
+        }),
+      },
+    }),
+  };
+  let post: ReturnType<typeof createPost<typeof routes>> | undefined;
+  const runtime = () => {
+    if (post === undefined) throw new BirdDogError("Local Post is not open");
+    return post;
+  };
+  const mailRoom = Effect.runSync(
+    makeBirdDog({
+      now,
+      stage: (mail) =>
+        Effect.try({
+          try: () => {
+            owner.transactionSync(() => {
+              for (const event of mail) {
+                // The first staged letter retains its stable key and createdAt
+                // when a settlement is replayed before its cursor advances.
+                if (runtime().read(event.key) === undefined)
+                  runtime().send({
+                    key: event.key,
+                    kind: "mail",
+                    address: { agentId: event.to.agentId },
+                    event,
+                  });
+              }
+            });
+            if (mail.length > 0) options.scheduleWake?.(now());
           },
           catch: (cause) =>
-            new BirdDogError("local recipient rejected mail", { cause }),
-        }).pipe(
-          Effect.catch((cause) =>
-            Effect.logError(
-              "Local mail recipient rejected delivery",
-              cause,
-            ).pipe(Effect.as(false)),
-          ),
-        ),
-      scheduleWake: (at) => Effect.sync(() => options.scheduleWake?.(at)),
-      now: options.now ?? (() => Date.now()),
+            new BirdDogError("Local mail staging is unavailable", { cause }),
+        }),
     }),
   );
   return {
-    ...room,
-    fanOut: (settlement) => {
-      if (settlement.job.outcome !== "cancelled")
-        return room.fanOut(settlement);
-      const author = messageAuthor(settlement.meta);
-      return room.fanOut({
-        ...settlement,
-        content:
-          author === undefined
-            ? "Work cancelled."
-            : `Work cancelled by ${author.name}.`,
-      });
+    room: {
+      ...mailRoom,
+      fanOut: (settlement) => {
+        if (settlement.job.outcome !== "cancelled")
+          return mailRoom.fanOut(settlement);
+        const author = messageAuthor(settlement.meta);
+        return mailRoom.fanOut({
+          ...settlement,
+          content:
+            author === undefined
+              ? "Work cancelled."
+              : `Work cancelled by ${author.name}.`,
+        });
+      },
     },
-  };
+    hostJobs: {
+      lane: "post",
+      open: (watchdog) => {
+        post = createPost({
+          owner,
+          routes,
+          transactional: watchdog.transactional,
+          now,
+          scheduleWake: (at) => {
+            options.scheduleWake?.(at);
+            return Promise.resolve();
+          },
+        });
+        return {
+          retryPolicy: (job) => runtime().retryPolicy(job),
+          execute: (job, signal, attempt) =>
+            runtime().execute(job, attempt, signal),
+        };
+      },
+    },
+  } satisfies Readonly<{
+    room: BirdDogEffect;
+    hostJobs: NonNullable<ShiitakeOptions["hostJobs"]>;
+  }>;
 }

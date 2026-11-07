@@ -1141,8 +1141,9 @@ function createdBy(
   directory: LocalAgentControlDirectory,
   creator: string,
 ): AgentControlDirectory {
-  return {
-    ...directory,
+  const { goal, ...ordinary } = directory;
+  const result: AgentControlDirectory = {
+    ...ordinary,
     answer: (request, sourceSessionId, signal) =>
       directory.answer(request, creator, sourceSessionId, signal),
     escalate: (request, sourceSessionId, signal) =>
@@ -1167,6 +1168,15 @@ function createdBy(
         signal,
       ),
   };
+  if (goal !== undefined) {
+    const boundGoal: NonNullable<AgentControlDirectory["goal"]> = (
+      request,
+      sourceSessionId,
+      signal,
+    ) => goal(request, creator, sourceSessionId, signal);
+    Object.assign(result, { goal: boundGoal });
+  }
+  return result;
 }
 
 async function createBuiltPrivateLocalTools(
@@ -1228,7 +1238,7 @@ const agentsSchema = z.array(
 );
 
 it("joins real Local control and recovers a committed create after its first Session open fails", async () => {
-  const root = await temporaryDirectory();
+  const root = await realpath(await temporaryDirectory());
   const stores = join(root, ".fungi", "agents");
   const agentPaths = {
     "agent-a": join(stores, "agent-a", "agent.sqlite"),
@@ -1346,9 +1356,13 @@ it("joins real Local control and recovers a committed create after its first Ses
         options.invocationRoot,
         control,
       );
+      const mail = createPrivateLocalMailRoom(store, {
+        deliver: options.mail.deliver,
+      });
       host = await makeHost(
         {
           store,
+          hostJobs: mail.hostJobs,
           extensions: localTools.extensions,
           runtime,
           instructions: {
@@ -1369,7 +1383,7 @@ it("joins real Local control and recovers a committed create after its first Ses
           },
           tools: localTools.tools,
         },
-        createPrivateLocalMailRoom(database, { deliver: options.mail.deliver }),
+        mail.room,
       );
       const agent = host.agent;
       const mailHost = host;

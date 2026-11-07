@@ -1,6 +1,7 @@
 import {
   readStoredAttention,
   readStoredSessionStates,
+  readStoredSessionParent,
 } from "@fungi.computer/shiitake/effect";
 import type {
   SessionAttention,
@@ -42,6 +43,13 @@ export type BoardAgent = Readonly<{
   sessions: readonly SessionSummaryRow[];
   /** Open attention of the conversations `attentionWanted` names. */
   attention: ReadonlyMap<string, readonly SessionAttention[]>;
+  /** Exact parent for each selected Session; null is a root, not a failed read. */
+  parents: ReadonlyMap<
+    string,
+    NonNullable<SessionAttention["waitingOn"]> | null
+  >;
+  /** Person-waiting Sessions on page one beyond the attention-read limit. */
+  waitingNotRead: number;
 }>;
 
 /** Waiting conversations whose attention is read per Agent. */
@@ -136,6 +144,8 @@ export async function readBoardAgent(
         name: agentId,
         sessions: [],
         attention: none,
+        parents: new Map(),
+        waitingNotRead: 0,
         owned: false,
         unreadable: unreadableStoreReason(agentId),
       };
@@ -145,6 +155,8 @@ export async function readBoardAgent(
       name: agentId,
       sessions: [],
       attention: none,
+      parents: new Map(),
+      waitingNotRead: 0,
       owned: false,
       unreadable: "its store could not be read",
     };
@@ -156,12 +168,33 @@ export async function readBoardAgent(
       await Effect.runPromise(readStoredSessionStates(owner))
     ).sessions;
     const attention = new Map<string, readonly SessionAttention[]>();
-    for (const sessionId of attentionWanted(sessions))
+    const parents = new Map<
+      string,
+      NonNullable<SessionAttention["waitingOn"]> | null
+    >();
+    for (const sessionId of attentionWanted(sessions)) {
       attention.set(
         sessionId,
         await Effect.runPromise(readStoredAttention(owner, sessionId)),
       );
-    return { agentId, name, owned, sessions, attention };
+      parents.set(
+        sessionId,
+        await Effect.runPromise(readStoredSessionParent(owner, sessionId)),
+      );
+    }
+    return {
+      agentId,
+      name,
+      owned,
+      sessions,
+      attention,
+      parents,
+      waitingNotRead: Math.max(
+        0,
+        sessions.filter((row) => row.state === "needs_you").length -
+          maximumWaitingPerAgent,
+      ),
+    };
   } catch (cause) {
     logEvent("board-agent-store", cause);
     return {
@@ -170,6 +203,8 @@ export async function readBoardAgent(
       owned,
       sessions: [],
       attention: none,
+      parents: new Map(),
+      waitingNotRead: 0,
       unreadable: "its conversations could not be read",
     };
   } finally {

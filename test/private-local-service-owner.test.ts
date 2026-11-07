@@ -144,6 +144,18 @@ describe("persistent Local service owners", () => {
         effectiveModel: fixtureEffectiveModel,
         ...fixtureModelControls,
         ...fixtureMailControls,
+        setArchived: (archived: boolean) => {
+          const database = new DatabaseSync(databasePath);
+          try {
+            database
+              .prepare(
+                "UPDATE private_local_identity SET archived = ? WHERE singleton = 1",
+              )
+              .run(archived ? 1 : 0);
+          } finally {
+            database.close();
+          }
+        },
         getSession: (sessionId: string) => {
           const unusedSessionOperation = (): never => {
             throw new Error("This answer-routing fixture operation is unused");
@@ -156,24 +168,35 @@ describe("persistent Local service owners", () => {
             send: unusedSessionOperation,
             cancel: unusedSessionOperation,
             latestPending: unusedSessionOperation,
-            extension: () => ({
+            extension: (extensionId) => ({
               call: (
                 command: string,
                 input: Json,
                 caller: ExtensionCommandCallerV0 | undefined,
               ) => {
-                calls.push({ sessionId, command, input, caller });
+                calls.push({ sessionId, extensionId, command, input, caller });
                 return Promise.resolve(
-                  command === "escalateAgent"
-                    ? { result: "escalated", to: "person" }
-                    : {
-                        result: {
-                          result: "accepted",
-                          via: "follow_up",
-                          commandId: "follow-up-1",
+                  command === "controlAgent"
+                    ? {
+                        result: "resumed",
+                        goal: {
+                          revision: "r",
+                          objective: "Build",
+                          state: "active",
+                          startedAt: 1,
+                          pauseCause: null,
                         },
-                        answeredBy: { kind: "agent", agentId: parentAgentId },
-                      },
+                      }
+                    : command === "escalateAgent"
+                      ? { result: "escalated", to: "person" }
+                      : {
+                          result: {
+                            result: "accepted",
+                            via: "follow_up",
+                            commandId: "follow-up-1",
+                          },
+                          answeredBy: { kind: "agent", agentId: parentAgentId },
+                        },
                 );
               },
             }),
@@ -220,16 +243,32 @@ describe("persistent Local service owners", () => {
             agentId: childAgentId,
             sessionId: "child-session",
             itemId: "ask-1",
+            note: "Needs budget",
           },
           parentAgentId,
           "sender-session",
           signal,
         ),
       ).resolves.toEqual({ status: "escalated", to: "person" });
+      if (directory.goal === undefined) throw new Error("Goal control missing");
+      await expect(
+        directory.goal(
+          {
+            agentId: childAgentId,
+            sessionId: "child-session",
+            action: "resume",
+            reason: "Review done",
+          },
+          parentAgentId,
+          "sender-session",
+          signal,
+        ),
+      ).resolves.toEqual({ status: "resumed" });
       const caller = { agentId: parentAgentId, sessionId: "sender-session" };
       expect(calls).toEqual([
         {
           sessionId: "child-session",
+          extensionId: "botanical-session-question",
           command: "answerAgent",
           input: {
             askId: "ask-1",
@@ -240,11 +279,66 @@ describe("persistent Local service owners", () => {
         },
         {
           sessionId: "child-session",
+          extensionId: "botanical-session-question",
           command: "escalateAgent",
-          input: { askId: "ask-1" },
+          input: { askId: "ask-1", note: "Needs budget" },
+          caller,
+        },
+        {
+          sessionId: "child-session",
+          extensionId: "botanical-session-goal",
+          command: "controlAgent",
+          input: { action: "resume", reason: "Review done" },
           caller,
         },
       ]);
+      const childStore = new DatabaseSync(childPath);
+      try {
+        childStore.exec(
+          "UPDATE private_local_identity SET archived = 1 WHERE singleton = 1",
+        );
+      } finally {
+        childStore.close();
+      }
+      await expect(
+        directory.goal(
+          {
+            agentId: childAgentId,
+            sessionId: "child-session",
+            action: "clear",
+            reason: "Archived",
+          },
+          parentAgentId,
+          "sender-session",
+          signal,
+        ),
+      ).rejects.toMatchObject({ reason: "archived" });
+      await expect(
+        directory.answer(input, parentAgentId, "sender-session", signal),
+      ).rejects.toMatchObject({ reason: "archived" });
+      await expect(
+        directory.escalate(
+          {
+            agentId: childAgentId,
+            sessionId: "child-session",
+            itemId: "ask-1",
+          },
+          parentAgentId,
+          "sender-session",
+          signal,
+        ),
+      ).rejects.toMatchObject({ reason: "archived" });
+      expect(calls).toHaveLength(3);
+      await directory.unarchive(
+        {
+          agentId: childAgentId,
+          by: { kind: "agent", agentId: parentAgentId },
+        },
+        signal,
+      );
+      await expect(
+        directory.answer(input, parentAgentId, "sender-session", signal),
+      ).resolves.toMatchObject({ status: "answered" });
     } finally {
       await owners.close();
       await rm(root, { recursive: true, force: true });

@@ -1,5 +1,5 @@
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
-import * as Effect from "effect/Effect";
+import { logEvent } from "./log-event.js";
 import type {
   Accepted,
   CancelResult,
@@ -65,8 +65,8 @@ export function createPrivateLocalDelegation(
       reply?: VerifiedAgentReply,
     ) => Promise<Accepted>;
     /**
-     * What happens to items a child left waiting on this Agent when the work
-     * that was told about them ends. Without it a host leaves them to expire.
+     * Remind this exact Session when a carrying turn settles. Silence and
+     * shutdown never hand an item to a person.
      */
     unattended?: Readonly<{
       /** Exact settled facts of one command of this Agent's own Sessions. */
@@ -74,14 +74,15 @@ export function createPrivateLocalDelegation(
         sessionId: string,
         commandId: string,
       ) => Promise<CommandSettlement | undefined>;
-      /**
-       * Pass one child item on to a person, as this Agent's Session that was
-       * told about it. A child that already moved on answers that and nothing changes.
-       */
-      escalate: (
+      /** Check the child's current item and admit one idempotent reminder if still owed. */
+      remind: (
         item: Readonly<{ agentId: string; sessionId: string; itemId: string }>,
         receiverSessionId: string,
-      ) => Promise<void>;
+        number: number,
+      ) => Promise<
+        | Readonly<{ status: "settled" }>
+        | Readonly<{ status: "reminded"; commandId: string }>
+      >;
     }>;
   }>,
 ) {
@@ -115,44 +116,66 @@ export function createPrivateLocalDelegation(
   }
 
   /**
-   * Items a child left waiting on this Agent, by the reply command that told
-   * it. When the work that carried the reply ends, whatever the Agent neither
-   * answered nor escalated goes to a person, so no waiting item is silent.
+   * One process-local reminder budget per exact child item and receiver. A
+   * duplicate reply never resets it. A restart may lose reminders, not the
+   * durable ask or its presence checks. Above this memory ceiling we stay quiet.
    */
   const unattended = new Map<
     string,
-    Readonly<{
+    {
       sessionId: string;
       child: Readonly<{ agentId: string; sessionId: string }>;
-      items: readonly string[];
-    }>
+      itemId: string;
+      commandId: string;
+      reminders: number;
+    }
   >();
   let poll: ReturnType<typeof setInterval> | undefined;
+  let polling = false;
+  let closed = false;
 
-  /** Escalate the items of every reply whose carrying work has settled. */
+  /** Remind at most twice, watching each reminder's own carrying turn next. */
   async function settleUnattended(): Promise<void> {
     const handling = input.unattended;
-    if (handling === undefined) return;
-    for (const [commandId, entry] of unattended) {
-      const settlement = await handling
-        .readSettlement(entry.sessionId, commandId)
-        .catch((cause: unknown) => {
-          // Not settled as far as anyone can tell; try again on the next poll.
-          Effect.runFork(Effect.logWarning("delegation.settlement", cause));
-          return undefined;
-        });
-      if (settlement === undefined) continue;
-      unattended.delete(commandId);
-      for (const itemId of entry.items)
-        await handling
-          .escalate({ ...entry.child, itemId }, entry.sessionId)
+    if (handling === undefined || polling || closed) return;
+    polling = true;
+    try {
+      for (const [key, entry] of unattended) {
+        if (entry.reminders >= 2) continue;
+        const settlement = await handling
+          .readSettlement(entry.sessionId, entry.commandId)
           .catch((cause: unknown) => {
-            Effect.runFork(Effect.logWarning("delegation.escalate", cause));
+            // Not settled as far as anyone can tell; try again on the next poll.
+            logEvent("delegation.settlement", cause);
+            return undefined;
           });
-    }
-    if (unattended.size === 0 && poll !== undefined) {
-      clearInterval(poll);
-      poll = undefined;
+        // Close or eviction can retire this exact entry while the read is pending.
+        if (settlement === undefined || unattended.get(key) !== entry) continue;
+        // Charge before transport: uncertain delivery must not buy a third
+        // reminder. Exhausted entries retain the budget against duplicate replies.
+        entry.reminders += 1;
+        try {
+          const result = await handling.remind(
+            { ...entry.child, itemId: entry.itemId },
+            entry.sessionId,
+            entry.reminders,
+          );
+          if (unattended.get(key) !== entry) continue;
+          if (result.status === "settled") unattended.delete(key);
+          else entry.commandId = result.commandId;
+        } catch (cause) {
+          logEvent("delegation.remind", cause);
+        }
+      }
+      if (
+        ![...unattended.values()].some((entry) => entry.reminders < 2) &&
+        poll !== undefined
+      ) {
+        clearInterval(poll);
+        poll = undefined;
+      }
+    } finally {
+      polling = false;
     }
   }
 
@@ -162,29 +185,42 @@ export function createPrivateLocalDelegation(
     reply: VerifiedAgentReply,
   ): void {
     if (
+      closed ||
       input.unattended === undefined ||
       reply.outcome === "undeliverable" ||
       reply.waitingOnYou === undefined
     )
       return;
     if (receiverSessionId === undefined) return;
-    unattended.set(accepted.commandId, {
-      sessionId: receiverSessionId,
-      child: { agentId: reply.agentId, sessionId: reply.sessionId },
-      items: reply.waitingOnYou.map(({ itemId }) => itemId),
-    });
+    for (const { itemId } of reply.waitingOnYou) {
+      const key = JSON.stringify([
+        reply.agentId,
+        reply.sessionId,
+        itemId,
+        receiverSessionId,
+      ]);
+      if (unattended.has(key) || unattended.size >= 4096) continue;
+      unattended.set(key, {
+        sessionId: receiverSessionId,
+        child: { agentId: reply.agentId, sessionId: reply.sessionId },
+        itemId,
+        commandId: accepted.commandId,
+        reminders: 0,
+      });
+    }
     poll ??= setInterval(() => {
       void settleUnattended();
     }, 1_000);
     poll.unref();
   }
 
-  /** Escalate what is owed now and stop watching; the Agent is closing. */
-  async function close(): Promise<void> {
-    await settleUnattended();
+  /** Stop watching without admitting or escalating anything on shutdown. */
+  function close(): Promise<void> {
+    closed = true;
     unattended.clear();
     if (poll !== undefined) clearInterval(poll);
     poll = undefined;
+    return Promise.resolve();
   }
 
   /** Send with one caller-owned identity; follow-up and steer replies return here. */

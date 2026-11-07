@@ -46,7 +46,7 @@ export type LocalArchiveRequest = Readonly<{
  */
 export type LocalAgentControlDirectory = Omit<
   AgentControlDirectory,
-  "create" | "list" | "archive" | "unarchive" | "answer" | "escalate"
+  "create" | "list" | "archive" | "unarchive" | "answer" | "escalate" | "goal"
 > &
   Readonly<{
     list: (
@@ -69,6 +69,12 @@ export type LocalAgentControlDirectory = Omit<
       senderSessionId: string,
       signal: AbortSignal,
     ) => ReturnType<NonNullable<AgentControlDirectory["escalate"]>>;
+    goal?: (
+      input: Parameters<NonNullable<AgentControlDirectory["goal"]>>[0],
+      senderAgentId: string,
+      senderSessionId: string,
+      signal: AbortSignal,
+    ) => ReturnType<NonNullable<AgentControlDirectory["goal"]>>;
     archive: (input: LocalArchiveRequest, signal: AbortSignal) => Promise<void>;
     unarchive: (
       input: LocalArchiveRequest,
@@ -90,10 +96,11 @@ export function createPrivateLocalAgentControl(
 ) {
   const conversations = createConversationAgents(input.storage);
   function bound(parentSessionId: string | undefined): AgentControlDirectory {
-    const { create, archive, unarchive, answer, escalate } = input.directory;
+    const { create, archive, unarchive, answer, escalate, goal, ...ordinary } =
+      input.directory;
     const by: LocalArchiver = { kind: "agent", agentId: input.agentId };
-    return {
-      ...input.directory,
+    const result: AgentControlDirectory = {
+      ...ordinary,
       archive: ({ agentId }, signal) => archive({ agentId, by }, signal),
       unarchive: ({ agentId }, signal) => unarchive({ agentId, by }, signal),
       create: async (request, signal) => {
@@ -124,6 +131,20 @@ export function createPrivateLocalAgentControl(
             ? Promise.resolve({ status: "refused", reason: "not_sender" })
             : escalate(request, input.agentId, parentSessionId, signal),
     };
+    if (goal !== undefined)
+      Object.assign(result, {
+        goal: (
+          request: Parameters<typeof goal>[0],
+          sourceSessionId: string,
+          signal: AbortSignal,
+        ) =>
+          parentSessionId === undefined
+            ? Promise.resolve({ status: "refused", reason: "no_provenance" })
+            : sourceSessionId !== parentSessionId
+              ? Promise.resolve({ status: "refused", reason: "not_sender" })
+              : goal(request, input.agentId, parentSessionId, signal),
+      });
+    return result;
   }
   const control: CapabilitySource = conversations.control(bound);
   return {

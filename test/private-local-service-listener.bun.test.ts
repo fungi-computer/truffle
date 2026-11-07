@@ -1,6 +1,13 @@
 import { logEvent } from "../src/log-event.js";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import { z } from "zod";
@@ -22,6 +29,8 @@ import {
 import { createPrivateLocalServiceManager } from "../src/private-local-service.js";
 import { runPrivateLocalService } from "../src/private-local-service-listener.js";
 import { createPrivateLocalServiceShutdown } from "../src/private-local-service-listener.js";
+import { createLocalServiceOwners } from "../src/private-local-service-owner.js";
+import { capturePrivateLocalConfigRoot } from "../src/private-local-config-root.js";
 import { unusedExtensions } from "./fixtures/unused-extensions.js";
 import {
   fixtureEffectiveModel,
@@ -37,8 +46,6 @@ import { createPrivateLocalRuntimeHost } from "../src/private-local-runtime-host
 import { openPrivateLocalRuntimeHost } from "../src/private-local-runtime-host.js";
 import type { OAuthCredential } from "@earendil-works/pi-ai";
 import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
-import { Readable } from "node:stream";
-import { activateSubscriptionCredential } from "../src/subscription-activation.js";
 import { createPrivateModels } from "../src/local-models.js";
 import { LocalStoreSchemaError } from "../src/private-local-session-discovery.js";
 
@@ -151,8 +158,8 @@ it(
   20_000,
 );
 
-it("a running service uses an atomically activated subscription on the next turn without restart", async () => {
-  const root = await syntheticProject("fungi-service-credential-cas-");
+it("a running service uses a new subscription login on the next turn without restart", async () => {
+  const root = await syntheticProject("fungi-service-login-");
   const directory = await serviceDirectory(join(root, "service"));
   const credentialPath = join(root, ".config/fungi/credentials.json");
   const databasePath = join(root, "agent.sqlite");
@@ -164,10 +171,11 @@ it("a running service uses an atomically activated subscription on the next turn
     expires: Date.now() + 3_600_000,
   } satisfies OAuthCredential;
   const next = { ...first, access: "fake-service-next" };
+  let loginCredential = first;
   const models = createPrivateModels(credentialPath);
   const faux = fauxProvider({
     provider: "anthropic",
-    models: [{ id: "cas-fixture", name: "CAS fixture" }],
+    models: [{ id: "login-fixture", name: "Login fixture" }],
   });
   const seen: boolean[] = [];
   faux.setResponses([
@@ -185,7 +193,7 @@ it("a running service uses an atomically activated subscription on the next turn
     auth: {
       oauth: {
         name: "Fake Fungi subscription login",
-        login: () => Promise.resolve(first),
+        login: () => Promise.resolve(loginCredential),
         refresh: () => {
           throw new Error("unexpired fixture must not refresh");
         },
@@ -193,7 +201,7 @@ it("a running service uses an atomically activated subscription on the next turn
       },
     },
   });
-  await models.login("anthropic", "oauth", {
+  const interaction = {
     signal: new AbortController().signal,
     notify() {
       throw new Error("fake login emits no notifications");
@@ -201,13 +209,14 @@ it("a running service uses an atomically activated subscription on the next turn
     prompt() {
       throw new Error("fake login needs no prompt");
     },
-  });
+  };
+  await models.login("anthropic", "oauth", interaction);
   const running = runPrivateLocalService(directory, (options) =>
     openPrivateLocalRuntimeHost(
       {
         ...options,
         providerId: "anthropic",
-        modelId: "cas-fixture",
+        modelId: "login-fixture",
       },
       models,
     ),
@@ -260,16 +269,12 @@ it("a running service uses an atomically activated subscription on the next turn
         await sleep(10);
       assert.equal(seen.length, count);
     }
-    await turn("before-activation", 1);
+    await turn("before-login", 1);
     const before = await manager.status();
-    await activateSubscriptionCredential(
-      "anthropic",
-      Readable.from([
-        Buffer.from(JSON.stringify({ expected: first, credential: next })),
-      ]),
-      { credentialPath },
-    );
-    await turn("after-activation", 2);
+    await models.logout("anthropic");
+    loginCredential = next;
+    await models.login("anthropic", "oauth", interaction);
+    await turn("after-login", 2);
     assert.deepEqual(seen, [true, true]);
     assert.deepEqual(await manager.status(), before);
   } finally {
@@ -788,11 +793,46 @@ describe("private Local service listener", () => {
     }
   });
 
-  it("preserves listener discovery and ownership when owner drain rejects", async () => {
+  it("preserves listener discovery and ownership when an idle owner drain rejects", async () => {
+    const root = await realpath(await syntheticProject("fungi-idle-drain-"));
+    const databasePath = join(root, "agent.sqlite");
+    await writeFile(databasePath, "fixture");
+    await writeFile(
+      join(root, "owners.json"),
+      JSON.stringify([{ invocationRoot: root, databasePath }]),
+    );
     const calls: string[] = [];
     const failure = new Error("owner close failed");
+    let closing: Promise<void> | undefined;
+    const owners = createLocalServiceOwners(
+      () =>
+        Promise.resolve({
+          databasePath,
+          agentId: "idle-owner",
+          name: "Idle owner",
+          getSession: () => {
+            throw new Error("Unexpected Session access");
+          },
+          listSessions: () =>
+            Promise.resolve({ sessions: [], next: undefined }),
+          createSession: () => Promise.resolve("main"),
+          deleteSession: () => Promise.resolve(false),
+          extensions: unusedExtensions,
+          effectiveModel: fixtureEffectiveModel,
+          ...fixtureModelControls,
+          ...fixtureMailControls,
+          bindSessionPath: () => true,
+          close: () => (closing ??= Promise.reject(failure)),
+        }),
+      root,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      capturePrivateLocalConfigRoot(root),
+    );
     const shutdown = createPrivateLocalServiceShutdown({
-      closeOwners: () => Promise.reject(failure),
+      closeOwners: owners.close,
       closeServer: () => {
         calls.push("server");
         return Promise.resolve();
@@ -807,11 +847,32 @@ describe("private Local service listener", () => {
       },
     });
 
-    await assert.rejects(shutdown.finish(), (error) => error === failure);
-    expect(shutdown.isDraining()).toBe(true);
-    expect(calls).toEqual([]);
-    await assert.rejects(shutdown.finish(), (error) => error === failure);
-    expect(calls).toEqual([]);
+    try {
+      await owners.restore();
+      await owners.sweepIdle();
+      await assert.rejects(owners.sweepIdle(), (error) => error === failure);
+      await assert.rejects(
+        shutdown.finish(),
+        (error) =>
+          error instanceof AggregateError && error.errors.includes(failure),
+      );
+      expect(shutdown.isDraining()).toBe(true);
+      expect(calls).toEqual([]);
+      await assert.rejects(
+        shutdown.finish(),
+        /Local service owners failed to close/u,
+      );
+      expect(calls).toEqual([]);
+    } finally {
+      // Only this test's own retained close failure is expected here.
+      await owners.close().catch((cause: unknown) => {
+        if (!(
+          cause instanceof AggregateError && cause.errors.includes(failure)
+        ))
+          throw cause;
+      });
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("keeps status alive and stop pending until runtime owners finish closing", async () => {

@@ -48,8 +48,6 @@ export const fungiAccountCommandHelp = `Usage: fungi account [--json]
        fungi account teams [--json]
        fungi account use-team <team-id>
        fungi account balance [--json]
-       fungi account prepare-credential --provider anthropic|openai
-       fungi account use-credential --provider anthropic|openai --from-file -
 
 Read the signed-in Fungi account without exposing its credentials. The plain
 command shows the Hub and the Team that pays for models; teams lists your

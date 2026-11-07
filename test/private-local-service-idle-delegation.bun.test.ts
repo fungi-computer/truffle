@@ -15,6 +15,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import * as Schema from "effect/Schema";
 import { z } from "zod";
 
 import {
@@ -27,6 +28,12 @@ import {
   resolvePrivateLocalCreateStore,
 } from "../src/private-local-runtime-host.js";
 import { createLocalServiceOwners } from "../src/private-local-service-owner.js";
+
+const decodeOwners = Schema.decodeUnknownSync(
+  Schema.fromJsonString(
+    Schema.Array(Schema.Struct({ databasePath: Schema.String })),
+  ),
+);
 
 const fixture = join(import.meta.dir, "fixtures", "delegating-service.ts");
 
@@ -93,11 +100,9 @@ it("orderly shutdown ends event observers before saving recovery", async () => {
     // Keep the real response open: a client's local EventSource.close() does
     // not acknowledge server cancellation. No command or mail is pending.
     await owners.close();
-    const saved = z
-      .array(z.object({ databasePath: z.string() }))
-      .parse(
-        JSON.parse(await readFile(join(directory, "owners.json"), "utf8")),
-      );
+    const saved = decodeOwners(
+      await readFile(join(directory, "owners.json"), "utf8"),
+    );
     expect(saved.map((value) => value.databasePath)).toEqual([]);
     // The service ended its observer without waiting for the client to cancel.
     while (!(await reader.read()).done) {
@@ -158,12 +163,9 @@ it.skipIf(process.platform !== "linux")(
       throw new Error("The delegating service did not start");
     };
     const listed = async () =>
-      z
-        .array(z.object({ databasePath: z.string() }))
-        .parse(
-          JSON.parse(await readFile(join(directory, "owners.json"), "utf8")),
-        )
-        .map(({ databasePath }) => databasePath);
+      decodeOwners(await readFile(join(directory, "owners.json"), "utf8")).map(
+        ({ databasePath }) => databasePath,
+      );
     try {
       const first = await start(3_600_000);
       const manager = createPrivateLocalServiceManager({ directory });
@@ -321,11 +323,9 @@ it.skipIf(process.platform !== "linux")(
       // during the idle observation (old order) or during close (fixed order).
       first.kill("SIGTERM");
       expect(await first.exited).toBe(0);
-      const owners = z
-        .array(z.object({ databasePath: z.string() }))
-        .parse(
-          JSON.parse(await readFile(join(directory, "owners.json"), "utf8")),
-        );
+      const owners = decodeOwners(
+        await readFile(join(directory, "owners.json"), "utf8"),
+      );
       expect(owners.map(({ databasePath }) => databasePath)).toContain(
         child.databasePath,
       );
@@ -335,18 +335,30 @@ it.skipIf(process.platform !== "linux")(
       const database = new DatabaseSync(child.databasePath);
       try {
         const row = z
-          .object({ value: z.string() })
-          .parse(
-            database.prepare("SELECT value FROM local_birddog_outbox").get(),
-          );
-        const pending = z
           .object({
-            mail: z.object({ content: z.literal("Child result") }),
-            attempts: z.literal(1),
-            nextAttemptAt: z.number().int().positive(),
+            value: z.string(),
+            attempt_count: z.literal(1),
+            not_before: z.number().int().positive(),
           })
-          .parse(JSON.parse(row.value));
-        retryDueAt = pending.nextAttemptAt;
+          .parse(
+            database
+              .prepare(
+                "SELECT p.value,w.attempt_count,w.not_before FROM carrier_post_rows p JOIN watchdog_jobs w ON w.job_id=json_extract(p.value,'$.jobId') WHERE json_extract(p.value,'$.state')='pending'",
+              )
+              .get(),
+          );
+        Schema.decodeUnknownSync(
+          Schema.fromJsonString(
+            Schema.Struct({
+              envelope: Schema.Struct({
+                event: Schema.Struct({
+                  content: Schema.Literal("Child result"),
+                }),
+              }),
+            }),
+          ),
+        )(row.value);
+        retryDueAt = row.not_before;
       } finally {
         database.close();
       }
