@@ -2,7 +2,7 @@ import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UnsecuredJWT } from "jose";
-import { expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 import { createPrivateModels } from "../src/local-models.js";
 import { runLocalAuthCli } from "../src/auth-cli.js";
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
@@ -22,6 +22,13 @@ async function metadata(path: string) {
     },
   );
 }
+
+// The guard below proves login writes nothing outside its explicit path. It
+// watches a home only this test owns: the shared test HOME is written by other
+// files running in parallel, which made this assertion flaky.
+afterEach(() => {
+  vi.unstubAllEnvs();
+});
 
 it.each([
   {
@@ -43,6 +50,8 @@ it.each([
 ])(
   "ChatGPT login uses only $name at our provider seam",
   async ({ access, accepted }) => {
+    const owned = await mkdtemp(join(tmpdir(), "fungi-fixture-home-"));
+    vi.stubEnv("HOME", owned);
     const real = capturePrivateLocalConfigRoot().credentialPath;
     const paths = [real, real + ".device-id"];
     const before = await Promise.all(paths.map(metadata));
@@ -86,6 +95,7 @@ it.each([
     } finally {
       await rm(home, { recursive: true, force: true });
       expect(await Promise.all(paths.map(metadata))).toEqual(before);
+      await rm(owned, { recursive: true, force: true });
     }
   },
 );

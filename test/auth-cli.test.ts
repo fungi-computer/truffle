@@ -246,6 +246,57 @@ describe("Local auth CLI", () => {
     expect(login.mock.calls[0]?.[3]?.agentName).toBe("Shiitake");
   });
 
+  it("defaults Claude's login to copy-code over SSH, where a browser redirect cannot arrive", async () => {
+    vi.stubEnv("SSH_CONNECTION", "192.168.5.2 50000 192.168.5.15 22");
+    try {
+      const chosen: string[] = [];
+      const providerLogin = vi.fn(
+        async (auth: AuthInteraction): Promise<OAuthCredential> => {
+          chosen.push(
+            await auth.prompt({
+              message: "Select Anthropic login method:",
+              options: [
+                { id: "browser", label: "Browser login (default)" },
+                { id: "copy_code", label: "Copy code login (headless)" },
+              ],
+              type: "select",
+            }),
+          );
+          return oauthCredential();
+        },
+      );
+      const login = vi.fn<AuthModels["login"]>((_id, _type, auth) =>
+        providerLogin(auth),
+      );
+      const interaction: AuthInteraction = {
+        prompt: vi.fn(() => Promise.reject(new Error("no prompt expected"))),
+        notify: vi.fn(),
+      };
+      const models: AuthModels = {
+        getProviders: () => [
+          provider("anthropic", {
+            oauth: {
+              name: "Anthropic",
+              login: providerLogin,
+              refresh: vi.fn(),
+              toAuth: vi.fn(),
+            },
+          }),
+        ],
+        checkAuth: vi.fn(),
+        login,
+        logout: vi.fn(),
+      };
+      await runLocalAuthCli(
+        ["login", "--provider", "anthropic", "--auth-type", "oauth"],
+        options(models, interaction),
+      );
+      expect(chosen).toEqual(["copy_code"]);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("stamps the resolved provider's display name onto an auth_url notice", async () => {
     const notified: unknown[] = [];
     const providerLogin = vi.fn((auth: AuthInteraction) => {

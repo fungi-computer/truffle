@@ -1,5 +1,38 @@
 # @fungi.computer/truffle
 
+## 0.10.0
+
+### Minor Changes
+
+- Changes since 0.9.1:
+
+  - fix(tui): sign-in that works inside fungi vm
+  - feat(local): start fresh Agents on Fungi Luna when signed in to Fungi
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.8.0
+  - @fungi.computer/cordyceps@0.4.1
+  - @fungi.computer/mycelium@0.3.7
+  - @fungi.computer/shiitake@0.12.2
+  - @fungi.computer/watchdog@0.1.3
+  - @fungi.computer/nacre@0.2.3
+  - @fungi.computer/knapsack@0.4.8
+  - @fungi.computer/shiitake-extensions@0.6.9
+  - @fungi.computer/veil@0.6.4
+  - @fungi.computer/graft@0.2.8
+  - @fungi.computer/zookeeper@0.0.16
+  - @fungi.computer/lantern@0.4.2
+  - @fungi.computer/approvals@0.2.3
+  - @fungi.computer/bird-dog@0.3.6
+  - @fungi.computer/carrier@0.2.4
+  - @fungi.computer/seam@0.2.5
+
 ## 0.9.1
 
 ### Patch Changes

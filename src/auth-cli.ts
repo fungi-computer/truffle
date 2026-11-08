@@ -304,12 +304,22 @@ async function login(
       : authType === "oauth" && provider.id === "anthropic"
         ? "Claude for Shiitake"
         : provider.name;
+  // Over SSH (including fungi vm, which reaches its Lima VM over SSH) a browser
+  // redirect to this machine's localhost cannot arrive; Claude's copy-code
+  // login works anywhere, so it is the default there.
+  const method =
+    command.method ??
+    (provider.id === "anthropic" &&
+    authType === "oauth" &&
+    process.env.SSH_CONNECTION !== undefined
+      ? "copy_code"
+      : undefined);
   const interaction = interactionFor(
     signal,
     input,
     output,
     supplied,
-    command.method,
+    method,
     signInLabel,
   );
   // Sign in with ChatGPT needs a stable installation UUID in its authorize

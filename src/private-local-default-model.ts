@@ -33,12 +33,22 @@ async function offeredCatalog(
   return models.getModels(providerId);
 }
 
-/** The provider registry and its auth owner determine the available fallback. */
+/**
+ * A fresh Agent starts on Fungi's own default model (the Hub catalog marks
+ * Luna) when the member is signed in to Fungi. Without a Fungi account it
+ * falls back to the first other signed-in provider's catalog default, so a
+ * BYOK-only user still starts on a model they can run.
+ */
 export async function defaultLocalModel(
   models: Models,
   signal: AbortSignal,
 ): Promise<ModelPreference | null> {
-  for (const provider of models.getProviders()) {
+  const providers = models.getProviders();
+  const ordered = [
+    ...providers.filter(({ id }) => id === "fungi"),
+    ...providers.filter(({ id }) => id !== "fungi"),
+  ];
+  for (const provider of ordered) {
     const catalog = await offeredCatalog(models, provider.id, signal);
     const model =
       catalog.find((entry) => "default" in entry && entry.default === true) ??

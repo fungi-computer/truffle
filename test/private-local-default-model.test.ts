@@ -6,7 +6,10 @@ import { afterEach, expect, it, vi } from "vitest";
 import { ShiitakeError } from "@fungi.computer/shiitake";
 
 import { createPrivateModels } from "../src/local-models.js";
-import { listOfferedLocalModels } from "../src/private-local-default-model.js";
+import {
+  defaultLocalModel,
+  listOfferedLocalModels,
+} from "../src/private-local-default-model.js";
 import { createPrivateLocalModelSource } from "../src/private-local-runtime-host.js";
 
 const temporaryDirectories: string[] = [];
@@ -55,4 +58,43 @@ it("refuses an unregistered model with a typed model refusal", async () => {
     boundary: "model",
     cause: "rejected",
   });
+});
+
+async function signedIn(providers: readonly string[]) {
+  const directory = await mkdtemp(join(tmpdir(), "fungi-local-default-"));
+  temporaryDirectories.push(directory);
+  const models = createPrivateModels(join(directory, "credentials.json"));
+  const [openai] = models.getModels("openai");
+  if (openai === undefined) throw new Error("Missing the OpenAI catalog");
+  // The Fungi catalog arrives from the Hub; its default row is Luna.
+  const fungi = [
+    { ...openai, id: "@fungi/sol", provider: "fungi" },
+    { ...openai, id: "@fungi/luna", provider: "fungi", default: true },
+  ];
+  const getModels = models.getModels.bind(models);
+  vi.spyOn(models, "getModels").mockImplementation((provider) =>
+    provider === "fungi" ? fungi : getModels(provider),
+  );
+  vi.spyOn(models, "checkAuth").mockImplementation((provider) =>
+    Promise.resolve(
+      providers.includes(provider)
+        ? { type: "api_key", source: "fixture" }
+        : undefined,
+    ),
+  );
+  return models;
+}
+
+it("starts a fresh Agent on Fungi Luna when the member is signed in to Fungi", async () => {
+  const models = await signedIn(["anthropic", "fungi"]);
+  expect(await defaultLocalModel(models, new AbortController().signal)).toEqual(
+    { providerId: "fungi", modelId: "@fungi/luna" },
+  );
+});
+
+it("falls back to another signed-in provider without a Fungi account", async () => {
+  const models = await signedIn(["openai"]);
+  expect(
+    await defaultLocalModel(models, new AbortController().signal),
+  ).toMatchObject({ providerId: "openai" });
 });

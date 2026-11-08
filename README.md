@@ -1,35 +1,81 @@
-# Local runtime
+# Truffle (`@fungi.computer/truffle`)
 
-This private runtime hosts Agents and saved Sessions on the same user's machine.
-The Fungi terminal consumes it through a persistent local service. It owns
-SQLite storage, model credentials, project Files and shell operations, not
-terminal rendering. It is an internal workspace, not a standalone npm
-installation path.
+Truffle is the local runtime behind Spore's `fungi` command. It runs Shiitake
+Agents and their saved Sessions on your own machine as a background service, and
+owns their SQLite storage, model credentials, project files and shell tools. The
+terminal and editor clients are only views onto it.
 
-## Source setup
+## Use it
 
-Use a configured repository checkout with the pinned Node, Bun and pnpm tools.
-Local runs its own host build of the native `apply_patch` engine, which
-[`@fungi.computer/cordyceps`](../../packages/cordyceps/README.md#native-patch-engine)
-owns; Cordyceps' build prerequisites apply. Run from the repository root:
+Install Spore; it bundles Truffle:
 
 ```sh
-pnpm turbo:run run build --filter=@fungi.computer/truffle
-pnpm --filter @fungi.computer/truffle test
+npm install -g @fungi.computer/spore
+fungi
 ```
 
-The build places the engine in `native/bin` through Cordyceps'
-`fungi-apply-patch-build` and Local's dependency closure, then the tests run its
-unit and native patch tests. They do not sign in to a provider or start a
-customer Agent. Build outputs and test fixtures are disposable. Without a built
-engine, Local offers no `apply_patch` tool.
+Truffle is published so Spore can depend on it. Its entry points are the
+contract between Spore's clients and the local service, not a separate product
+to embed.
 
-Sandbox policy assertions run in `test:unit` without launching a sandbox: they
-exercise the real admission and command renderer with a deterministic startup
-probe. Native sandbox qualification lives in `test/*.native.test.ts`, selected
-by `test:sandbox:native` through `test:merge`, with one file worker. It retains
-the real bwrap/Seatbelt startup, Git write-refusal, child and delegation proofs;
-`test:merge` also runs the platform sandbox matrix and native patch suite.
+## Subscription sign-in
+
+To change your Claude or ChatGPT subscription account, log out and log in:
+
+```sh
+fungi logout --provider anthropic
+fungi login --provider anthropic --auth-type oauth
+```
+
+Use `--provider openai` for ChatGPT. Local does not import subscription
+credentials from another account manager.
+
+Fungi remains the credential refresher. Local pins the Anthropic/OpenAI account
+at the accepted turn boundary, including all subsequent tool iterations. Pi
+refreshes that same account under the existing store lock while it remains
+active; refreshed tokens do not change the pinned identity. The next turn picks
+up the new login without restarting the service.
+
+Pi's `openai` provider uses the ChatGPT direct-token flow, not the legacy
+`openai-codex` flow. Its credentials contain `clientId` and `scopes`, but do not
+add `accountId`. Local decodes the access token with `jose`; only its issuer and
+person `sub` identify the OpenAI subscription. Same-person refreshes are
+adopted; a different issuer or subject is not. Workspace metadata is not
+identity. An OpenAI grant without a provable person cannot establish turn
+continuity. An already-started refresh is committed under Pi's existing lock
+before Local decides whether the turn can adopt it; refusal or cancellation must
+not discard the rotated refresh token or restore a released pin.
+
+After logging out of A and into B, the current turn may continue using A's
+still-valid token, but never refreshes inactive A. If A expires, its next
+request ends the turn with the typed, redacted `account-switched-during-turn`
+refusal: retry on the next turn using B. Completed tool results remain in the
+Session.
+
+OpenAI uses unpatched Pi OAuth: Local neither intercepts the code exchange nor
+reads its ID token. After Pi returns a grant, Local requires a usable issuer and
+subject in the access token before storage. No OpenAI workspace `accountId` is
+captured or retained across refresh. Failures expose `identity-unavailable` and
+bounded claim names, never token or claim values, and preserve the prior entry.
+A turn detects a different OpenAI person by issuer and subject and refuses as
+`account-switched-during-turn`.
+
+Auth tests inject a fixture ChatGPT OAuth provider through `createPrivateModels`
+and pass the resulting collection to `runLocalAuthCli`. They do not start Pi's
+callback server or bind an OAuth port. Explicit temporary credential paths and
+real-file size/mtime guards prevent touching the person's credentials. After
+building Truffle's dependencies,
+`pnpm --dir runtimes/local proof:unpatched-login` packs Truffle with npm and
+signs in through that fixture in an external npm consumer using registry pi-ai
+1.3.0. This qualifies the local seam and stored person identity, not a live
+OpenAI authorization.
+
+A provider HTTP refusal is reported as `provider_rejected` with its status code
+only, never the response body. Use Fungi's ordinary login flow in a private
+temporary HOME for additional accounts. External vault managers must reconcile
+the live credential before switching and treat activation conflicts as failures,
+not overwrite permission. This contract does not authorize a live import, login
+change or cutover.
 
 ## Host and Session lifetime
 
@@ -471,9 +517,10 @@ login and locked refresh to MCP and models. `fungi login --provider fungi` opens
 browser sign-in and selects a current Team for model billing. The Local model
 picker refreshes that Team's live hosted catalog. A fresh Local Agent defaults
 to Fungi's catalog default, with `@fungi/luna` as the initial selection before
-the catalog is available. A saved Session override takes precedence; signing in
-does not replace it. The project MCP endpoint and the model's selected Team are
-independent. Switching one does not rewrite the other.
+the catalog is available. Without a Fungi sign-in it starts on the first other
+signed-in provider's catalog default instead. A saved Session override takes
+precedence; signing in does not replace it. The project MCP endpoint and the
+model's selected Team are independent. Switching one does not rewrite the other.
 
 `fungi logout` and Pi logout share Local's sign-out owner: it attempts every
 Computer detach before clearing the credential, then retries unconfirmed OAuth
@@ -513,7 +560,48 @@ ordinary Fungi login. Nonempty additional directories and supplied MCP servers
 are rejected. The admitted directory owns authorization, and closing a client
 lease retains durable Session data.
 
-## Check this runtime
+## Selected-Team App reads
+
+`openLocalTeamApps` from `@fungi.computer/truffle/apps` opens the saved
+account's selected Team. Its `read`, `requestGill`, `surfaceUrl` and
+`openSession` operations keep credentials inside Local and recheck account
+selection around reads. Gill requests resolve current directory selectors and
+declared actions through the ordinary admitted App door. Hosted Session
+transport uses the Local OAuth door and the same Team/resource capability rule
+as browser Sessions. Closing a Session client releases observation; it does not
+cancel durable work.
+
+The directory grammar lives in `@fungi.computer/nacre/app-directory`. UI handoff
+resolves the selected App's published surface on the saved Hub origin, without
+putting an access token in the URL. A later account/Team selection retires this
+client; open a new client for the new selection.
+
+## Contribute
+
+Use a configured repository checkout with the pinned Node, Bun and pnpm tools.
+Local runs its own host build of the native `apply_patch` engine, which
+[`@fungi.computer/cordyceps`](../../packages/cordyceps/README.md#native-patch-engine)
+owns; Cordyceps' build prerequisites apply. Run from the repository root:
+
+```sh
+pnpm turbo:run run build --filter=@fungi.computer/truffle
+pnpm --filter @fungi.computer/truffle test
+```
+
+The build places the engine in `native/bin` through Cordyceps'
+`fungi-apply-patch-build` and Local's dependency closure, then the tests run its
+unit and native patch tests. They do not sign in to a provider or start a
+customer Agent. Build outputs and test fixtures are disposable. Without a built
+engine, Local offers no `apply_patch` tool.
+
+Sandbox policy assertions run in `test:unit` without launching a sandbox: they
+exercise the real admission and command renderer with a deterministic startup
+probe. Native sandbox qualification lives in `test/*.native.test.ts`, selected
+by `test:sandbox:native` through `test:merge`, with one file worker. It retains
+the real bwrap/Seatbelt startup, Git write-refusal, child and delegation proofs;
+`test:merge` also runs the platform sandbox matrix and native patch suite.
+
+### Check this runtime
 
 From the repository root:
 
@@ -554,77 +642,4 @@ The external timeout stops the process after ten minutes. This is a short
 retention diagnostic, not proof of day-long stability or an explanation of the
 October 24–25 service stalls.
 
-## Selected-Team App reads
-
-`openLocalTeamApps` from `@fungi.computer/truffle/apps` opens the saved
-account's selected Team. Its `read`, `requestGill`, `surfaceUrl` and
-`openSession` operations keep credentials inside Local and recheck account
-selection around reads. Gill requests resolve current directory selectors and
-declared actions through the ordinary admitted App door. Hosted Session
-transport uses the Local OAuth door and the same Team/resource capability rule
-as browser Sessions. Closing a Session client releases observation; it does not
-cancel durable work.
-
-The directory grammar lives in `@fungi.computer/nacre/app-directory`. UI handoff
-resolves the selected App's published surface on the saved Hub origin, without
-putting an access token in the URL. A later account/Team selection retires this
-client; open a new client for the new selection.
-
-## Subscription sign-in
-
-To change your Claude or ChatGPT subscription account, log out and log in:
-
-```sh
-fungi logout --provider anthropic
-fungi login --provider anthropic --auth-type oauth
-```
-
-Use `--provider openai` for ChatGPT. Local does not import subscription
-credentials from another account manager.
-
-Fungi remains the credential refresher. Local pins the Anthropic/OpenAI account
-at the accepted turn boundary, including all subsequent tool iterations. Pi
-refreshes that same account under the existing store lock while it remains
-active; refreshed tokens do not change the pinned identity. The next turn picks
-up the new login without restarting the service.
-
-Pi's `openai` provider uses the ChatGPT direct-token flow, not the legacy
-`openai-codex` flow. Its credentials contain `clientId` and `scopes`, but do not
-add `accountId`. Local decodes the access token with `jose`; only its issuer and
-person `sub` identify the OpenAI subscription. Same-person refreshes are
-adopted; a different issuer or subject is not. Workspace metadata is not
-identity. An OpenAI grant without a provable person cannot establish turn
-continuity. An already-started refresh is committed under Pi's existing lock
-before Local decides whether the turn can adopt it; refusal or cancellation must
-not discard the rotated refresh token or restore a released pin.
-
-After logging out of A and into B, the current turn may continue using A's
-still-valid token, but never refreshes inactive A. If A expires, its next
-request ends the turn with the typed, redacted `account-switched-during-turn`
-refusal: retry on the next turn using B. Completed tool results remain in the
-Session.
-
-OpenAI uses unpatched Pi OAuth: Local neither intercepts the code exchange nor
-reads its ID token. After Pi returns a grant, Local requires a usable issuer and
-subject in the access token before storage. No OpenAI workspace `accountId` is
-captured or retained across refresh. Failures expose `identity-unavailable` and
-bounded claim names, never token or claim values, and preserve the prior entry.
-A turn detects a different OpenAI person by issuer and subject and refuses as
-`account-switched-during-turn`.
-
-Auth tests inject a fixture ChatGPT OAuth provider through `createPrivateModels`
-and pass the resulting collection to `runLocalAuthCli`. They do not start Pi's
-callback server or bind an OAuth port. Explicit temporary credential paths and
-real-file size/mtime guards prevent touching the person's credentials. After
-building Truffle's dependencies,
-`pnpm --dir runtimes/local proof:unpatched-login` packs Truffle with npm and
-signs in through that fixture in an external npm consumer using registry pi-ai
-1.3.0. This qualifies the local seam and stored person identity, not a live
-OpenAI authorization.
-
-A provider HTTP refusal is reported as `provider_rejected` with its status code
-only, never the response body. Use Fungi's ordinary login flow in a private
-temporary HOME for additional accounts. External vault managers must reconcile
-the live credential before switching and treat activation conflicts as failures,
-not overwrite permission. This contract does not authorize a live import, login
-change or cutover.
+See [`LICENSE`](LICENSE).
