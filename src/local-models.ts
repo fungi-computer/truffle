@@ -18,11 +18,6 @@ import { retainSubscriptionIdentity } from "./subscription-identity.js";
 import { registerSubscriptionTurnOwner } from "./subscription-turn.js";
 import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 
-/** Register Pi's standalone OAuth modules on the same instance Local uses. */
-export function registerPrivateBundledModelOAuthFlows(): void {
-  registerBunOAuthFlows();
-}
-
 /** Local credentials belong to the one person who owns this machine. */
 const allowedHere = (providerId: string, method: "api_key" | "subscription") =>
   loginAllowed(
@@ -55,6 +50,10 @@ export function createPrivateModels(
   credentialPath: string = capturePrivateLocalConfigRoot().credentialPath,
   providerOptions: { providers?: readonly Provider[] } = {},
 ): MutableModels {
+  // Pi loads OAuth flows through relative imports that a bundle (the CLI, or
+  // the separately bundled service worker) does not contain. Register its
+  // static loaders wherever Local builds a model collection.
+  registerBunOAuthFlows();
   const options = { credentialPath };
   const credentials = createFungiAccountCredentialStore(options);
   const models = createModels({ credentials });

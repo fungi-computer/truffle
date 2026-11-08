@@ -18,7 +18,6 @@ export type {
 export type { PrivateCredentialStore } from "./private-file-credential-store.js";
 export {
   createPrivateModels,
-  registerPrivateBundledModelOAuthFlows,
   listPrivateModels,
   type PrivateLocalModelChoice,
 } from "./local-models.js";

@@ -1,5 +1,31 @@
 # @fungi.computer/truffle
 
+## 0.9.1
+
+### Patch Changes
+
+- Changes since 0.9.0:
+
+  - fix(local): register Pi's OAuth flows wherever Local builds models
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/mycelium@0.3.6
+  - @fungi.computer/shiitake@0.12.1
+  - @fungi.computer/watchdog@0.1.2
+  - @fungi.computer/knapsack@0.4.7
+  - @fungi.computer/shiitake-extensions@0.6.8
+  - @fungi.computer/veil@0.6.3
+  - @fungi.computer/graft@0.2.7
+  - @fungi.computer/zookeeper@0.0.15
+  - @fungi.computer/agar@0.7.3
+  - @fungi.computer/approvals@0.2.2
+  - @fungi.computer/bird-dog@0.3.5
+  - @fungi.computer/carrier@0.2.3
+  - @fungi.computer/seam@0.2.4
+  - @fungi.computer/nacre@0.2.2
+
 ## 0.9.0
 
 ### Minor Changes
