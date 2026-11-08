@@ -1,5 +1,14 @@
 # @fungi.computer/truffle
 
+## 0.10.2
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/cordyceps@0.4.2
+  - @fungi.computer/nacre@0.4.0
+
 ## 0.10.1
 
 ### Patch Changes
