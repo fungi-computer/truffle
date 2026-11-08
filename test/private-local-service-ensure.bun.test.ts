@@ -113,13 +113,14 @@ async function installedPrefix() {
       stderr: "inherit",
     });
     children.push(child);
-    for (let attempt = 0; attempt < 200; attempt += 1) {
-      if (await Bun.file(ready).exists()) return child;
+    // Wait for the client's own signal; the test's declared bound limits it.
+    // A fixed 5 s poll budget inside a 30 s test failed on a loaded box.
+    while (!(await Bun.file(ready).exists())) {
       if (child.exitCode !== null)
         throw new Error("Installed fixture client exited before admission");
       await sleep(25);
     }
-    throw new Error("Installed fixture client did not capture its identity");
+    return child;
   };
   return { cli, env, install, client };
 }
@@ -186,13 +187,14 @@ async function startOtherService(
     stderr: "inherit",
   });
   children.push(child);
-  for (let attempt = 0; attempt < 200; attempt += 1) {
+  for (;;) {
     const registration = await readServiceRegistration(directory);
     if (registration !== undefined && registration.kind !== "unidentified")
       return { child, registration };
+    if (child.exitCode !== null)
+      throw new Error("The other service exited before it registered");
     await sleep(25);
   }
-  throw new Error("The other service did not register");
 }
 
 describe("every client start ensures a service of its own build", () => {
