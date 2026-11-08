@@ -289,6 +289,9 @@ function createInvocationMiniflare(
       ],
       compatibilityDate: "2026-09-02",
       compatibilityFlags: ["nodejs_compat"],
+      // Miniflare otherwise fetches request.cf data and caches it as
+      // .wrangler/cache/cf.json in the current folder: the user's project.
+      cf: false,
       workerLoaders: { LOADER: {} },
       bindings: { INVOCATION_SECRET: secret },
       serviceBindings: { INVOCATION: serviceBinding },

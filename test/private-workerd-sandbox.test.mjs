@@ -12,7 +12,8 @@ import {
 } from "./fixtures/private-workerd.fixture.mjs";
 /* global AbortController, DOMException, URL, console, fetch */
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
@@ -471,6 +472,59 @@ describe("private local workerd Sandbox", () => {
       await closeRuntime(runtime, lease);
     }
   });
+
+  it(
+    "leaves no Miniflare cf cache in the folder it runs from",
+    async () => {
+      const folder = await mkdtemp(join(tmpdir(), "fungi-workerd-cwd-"));
+      try {
+        const url = (specifier) =>
+          JSON.stringify(import.meta.resolve(specifier));
+        const local = JSON.stringify(
+          new URL("../dist/index.js", import.meta.url).href,
+        );
+        // One real execution, run from a folder standing in for a project.
+        await writeFile(
+          join(folder, "run.mjs"),
+          `import * as Effect from ${url("effect/Effect")};
+import * as Stream from ${url("effect/Stream")};
+import { Mycelium } from ${url("@fungi.computer/mycelium")};
+import { createPrivateWorkerdSandbox } from ${local};
+const runtime = await Mycelium.make({ sandbox: createPrivateWorkerdSandbox() });
+const lease = await runtime.acquire();
+try {
+  const prepared = await Effect.runPromise(lease.executeTool.prepare({
+    type: "toolCall", id: "cwd-proof", name: "execute", arguments: { code: "() => 1" },
+  }));
+  await Effect.runPromise(Stream.runDrain(prepared.execute()));
+} finally {
+  await lease.release();
+  await runtime.close();
+}
+`,
+        );
+        // Miniflare skips its cf fetch when NODE_ENV is "test", as under vitest.
+        const env = { ...process.env };
+        delete env.NODE_ENV;
+        await new Promise((resolve, reject) => {
+          execFile(
+            process.execPath,
+            ["run.mjs"],
+            { cwd: folder, env },
+            (error) => {
+              if (error === null) resolve(undefined);
+              else reject(error);
+            },
+          );
+        });
+        await expect(stat(join(folder, ".wrangler"))).rejects.toThrow();
+        await expect(stat(join(folder, "node_modules"))).rejects.toThrow();
+      } finally {
+        await rm(folder, { recursive: true, force: true });
+      }
+    },
+    WORKERD_TEST_TIMEOUT_MS,
+  );
 
   it("denies guest fetch without an outgoing network binding", async () => {
     const runtime = await openRuntime({

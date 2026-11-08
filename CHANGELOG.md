@@ -1,5 +1,27 @@
 # @fungi.computer/truffle
 
+## 0.10.1
+
+### Patch Changes
+
+- Changes since 0.10.0:
+
+  - fix(tui): quiet fungi vm output, plain failures, no project litter
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.9.0
+  - @fungi.computer/gills@0.3.0
+  - @fungi.computer/nacre@0.3.0
+  - @fungi.computer/shiitake@0.12.3
+  - @fungi.computer/shiitake-extensions@0.6.10
+  - @fungi.computer/graft@0.2.9
+  - @fungi.computer/zookeeper@0.0.17
+  - @fungi.computer/mycelium@0.3.8
+  - @fungi.computer/knapsack@0.4.9
+  - @fungi.computer/veil@0.6.5
+
 ## 0.10.0
 
 ### Minor Changes
