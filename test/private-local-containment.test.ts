@@ -1048,6 +1048,46 @@ describe("command-time sandbox policy", () => {
       expect(args).not.toContain(["--bind", path, path].join("\0"));
   });
 
+  it("re-exposes single payload files read-only after the private /tmp", () => {
+    const project = fixture();
+    const folder = join(project, "agent");
+    mkdirSync(folder, { recursive: true });
+    const home = realpathSync(hostFixture());
+    const payload = join(project, "computerd.cjs");
+    writeFileSync(payload, "");
+    const profile = linuxSandboxProfile(
+      sandboxPolicy(project, folder),
+      "workspace",
+      folder,
+      { HOME: home },
+      home,
+    );
+    const run = (files: readonly string[]) =>
+      linuxSandboxCommand(
+        profile,
+        {
+          executable: "/fixture/fungi-bwrap",
+          seccompFilter: new Uint8Array([1]),
+        },
+        folder,
+        ["/usr/bin/true"],
+        { HOME: home },
+        undefined,
+        files,
+      ).args;
+    const args = run([payload]);
+    const exposed = args.findIndex(
+      (arg, index) =>
+        arg === "--ro-bind" &&
+        args[index + 1] === payload &&
+        args[index + 2] === payload,
+    );
+    expect(exposed).toBeGreaterThan(args.indexOf("/tmp"));
+    expect(() => run([folder])).toThrow(
+      "Local sandbox payload must be a regular file",
+    );
+  });
+
   it("prepares an absent Fungi cache privately before mounting its writable parent", () => {
     const project = fixture();
     const folder = join(project, "agent");

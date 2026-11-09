@@ -366,7 +366,11 @@ export async function startLocalComputerd(
   });
   let launch;
   try {
-    launch = sandbox.launch(options.root, [node, computerdBundle]);
+    // A project under /tmp has its node_modules behind the private /tmp.
+    launch = sandbox.launch(options.root, [node, computerdBundle], undefined, [
+      computerdBundle,
+      loopbackPreload,
+    ]);
     if (launch === undefined)
       throw new Error("Computerd requires a Workspace sandbox");
   } catch (cause) {

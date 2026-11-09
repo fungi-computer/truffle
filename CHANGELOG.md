@@ -1,5 +1,13 @@
 # @fungi.computer/truffle
 
+## 0.10.7
+
+### Patch Changes
+
+- Changes since 0.10.6:
+
+  - fix(truffle): start the local Computer for a project under /tmp
+
 ## 0.10.6
 
 ### Patch Changes

@@ -49,6 +49,7 @@ export type LocalSandbox = Readonly<{
     cwd: string,
     argv: readonly [string, ...string[]],
     readOnlyHelperFile?: string,
+    readOnlyFiles?: readonly string[],
   ): SandboxCommand;
   close(): void;
 }>;
@@ -133,7 +134,7 @@ export function establishLocalSandbox(
       platform === "linux" ? "/tmp" : input.temporaryDirectory;
     let closed = false;
     const sandbox: LocalSandbox = {
-      command: (cwd, argv, readOnlyHelperFile) => {
+      command: (cwd, argv, readOnlyHelperFile, readOnlyFiles) => {
         if (closed)
           throw new LocalSandboxUnavailable({
             kind: "startup-refused",
@@ -177,6 +178,7 @@ export function establishLocalSandbox(
                   stagedArgv,
                   undefined,
                   stagedHelper,
+                  readOnlyFiles,
                 )
               : seatbeltCommand(profile, stagedArgv);
           let environment: SandboxCommand["environment"] = {

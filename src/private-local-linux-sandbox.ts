@@ -20,6 +20,7 @@ export function linuxSandboxCommand(
   argv: readonly [string, ...string[]],
   host: NodeJS.ProcessEnv = process.env,
   readOnlyHelperFile?: string,
+  readOnlyFiles: readonly string[] = [],
 ) {
   const root = policy.writableRoot;
   // Bind sources must exist. Only the trusted host prepares the reserved paths.
@@ -128,6 +129,14 @@ export function linuxSandboxCommand(
     if (!statSync(readOnlyHelperFile).isFile())
       throw new Error("Local native helper must be a regular file");
     args.push("--ro-bind", readOnlyHelperFile, readOnlyHelperFile);
+  }
+  // The launcher's own payload files (computerd's bundle and preload), which
+  // the private /tmp hides when the project lives under /tmp. Each is one
+  // regular file, read-only; its siblings stay hidden.
+  for (const file of readOnlyFiles) {
+    if (!statSync(file).isFile())
+      throw new Error("Local sandbox payload must be a regular file");
+    args.push("--ro-bind", file, file);
   }
   // R is a bind mount: let sandboxed Git reads discover a parent repository
   // when the selected folder has no .git of its own.

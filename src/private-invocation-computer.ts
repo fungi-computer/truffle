@@ -51,6 +51,8 @@ export type LocalSandboxLaunch = (
   cwd: string,
   argv: readonly [string, ...string[]],
   readOnlyHelperFile?: string,
+  /** Single payload files to expose read-only, such as computerd's bundle. */
+  readOnlyFiles?: readonly string[],
 ) => SandboxCommand | undefined;
 
 const maximumStreamBytes = 64 * 1_024;

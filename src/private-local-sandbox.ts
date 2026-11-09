@@ -244,13 +244,19 @@ export function createLocalSandboxControls(
     cwd: string,
     argv: readonly [string, ...string[]],
     readOnlyHelperFile?: string,
+    readOnlyFiles?: readonly string[],
   ): SandboxCommand | undefined {
     assertFolder();
     if (input.mode() === "full-access") return undefined;
     prepareSandbox(input.mode() === "read-only" ? "read-only" : "workspace");
     if (sandbox !== undefined) {
       try {
-        const command = sandbox.command(cwd, argv, readOnlyHelperFile);
+        const command = sandbox.command(
+          cwd,
+          argv,
+          readOnlyHelperFile,
+          readOnlyFiles,
+        );
         unavailable = undefined;
         return command;
       } catch (cause) {
