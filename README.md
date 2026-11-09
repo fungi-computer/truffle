@@ -643,3 +643,14 @@ retention diagnostic, not proof of day-long stability or an explanation of the
 October 24–25 service stalls.
 
 See [`LICENSE`](LICENSE).
+
+### Local Computer attachment CLI
+
+`fungi-local-computer attach` reads one JSON object from stdin containing
+`endpoint`, `computer`, `computerId`, `folderPath`, `credentialPath`, and
+`ownerKey`. It uses the same attachment and sandbox owners as
+`fungi computer attach`, emits `{"kind":"online"}` on stdout when connected, and
+stays alive until SIGINT/SIGTERM. Startup failure emits `{"kind":"no_runtime"}`
+and exits nonzero without printing credentials or provider diagnostics. The
+owner key stays in memory. Oyster invokes this published binary at runtime, with
+no package dependency on Truffle.

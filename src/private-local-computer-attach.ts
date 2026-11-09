@@ -40,6 +40,8 @@ const requestIds = defineIdFamily({
 
 export type ControlOptions = Readonly<{
   credentialPath?: string;
+  /** In-memory owner key for a programmatic standalone attachment. Never persisted. */
+  ownerKey?: string;
   fetch?: FetchLike;
 }>;
 
@@ -147,7 +149,9 @@ async function control<T extends z.ZodType>(
       ...options,
       authProvider:
         host.authentication === "oyster-key"
-          ? oysterMcpKeyAuth(host.endpoint, options)
+          ? options.ownerKey === undefined
+            ? oysterMcpKeyAuth(host.endpoint, options)
+            : { token: () => Promise.resolve(options.ownerKey) }
           : undefined,
     },
   );
@@ -217,7 +221,13 @@ export type PrivateLocalComputerAttachResult =
 /** Attach `folderPath` to a Computer, or return the existing attachment. */
 export async function attachPrivateLocalComputer(
   rawEndpoint: string | URL,
-  input: Readonly<{ computer: string; folderPath: string; hostLabel?: string }>,
+  input: Readonly<{
+    computer: string;
+    /** An already selected Computer; omit to resolve a CLI name from inventory. */
+    computerId?: string;
+    folderPath: string;
+    hostLabel?: string;
+  }>,
   controlOptions: ControlOptions = {},
 ): Promise<PrivateLocalComputerAttachResult> {
   const options = {
@@ -231,15 +241,19 @@ export async function attachPrivateLocalComputer(
   if (!(await stat(rootPath)).isDirectory())
     throw new Error("The folder to attach is not a directory");
   await host.requireLogin(options);
+  const selected = input.computerId ?? input.computer;
   let record = (await host.read(options)).find((candidate) =>
-    sameComputer(candidate, input.computer),
+    sameComputer(candidate, selected),
   );
   if (record !== undefined && record.rootPath !== rootPath)
     throw new Error(
       `This machine is already attached to ${record.computerName} with another folder; run fungi computer detach first`,
     );
   if (record === undefined) {
-    const computer = await findComputer(host, input.computer, options);
+    const computer =
+      input.computerId === undefined
+        ? await findComputer(host, input.computer, options)
+        : { computerId: input.computerId, name: input.computer };
     if (computer === undefined) return { kind: "not-found" };
     const pending: AttachedRecord = {
       requestId: requestIds.attach.generate(),

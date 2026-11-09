@@ -1,13 +1,14 @@
 {
   "name": "@fungi.computer/truffle",
-  "version": "0.10.5",
+  "version": "0.10.6",
   "private": false,
   "description": "Truffle: Fungi's local Agent runtime, bundled into the fungi command",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "fungi-local-auth": "./dist/auth-cli.js"
+    "fungi-local-auth": "./dist/auth-cli.js",
+    "fungi-local-computer": "./dist/computer-cli.js"
   },
   "exports": {
     ".": {
@@ -100,7 +101,8 @@
     "proof:unpatched-login": "node scripts/prove-unpatched-login.mjs",
     "proof:sqlite-close": "bun test ./test/private-local-sqlite-close.bun.test.ts",
     "test:service-watchdog": "bash ../../tooling/proof-runner/hermetic-host.sh -- bun test ./test/private-local-service-watchdog.bun.test.ts",
-    "build:service-worker": "esbuild src/private-local-service-worker.mjs --outfile=dist/private-local-service-worker.mjs --bundle --format=esm --platform=node --conditions=bun --target=es2024 --external:bun --external:bun:* --external:miniflare --external:@napi-rs/keyring --metafile=dist/internal/service-worker-metafile.json --log-level=warning"
+    "build:service-worker": "esbuild src/private-local-service-worker.mjs --outfile=dist/private-local-service-worker.mjs --bundle --format=esm --platform=node --conditions=bun --target=es2024 --external:bun --external:bun:* --external:miniflare --external:@napi-rs/keyring --metafile=dist/internal/service-worker-metafile.json --log-level=warning",
+    "test:computerd-sandbox": "bash ../../tooling/proof-runner/hermetic-host.sh -- node test/computerd-sandbox.native.mjs"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "1.7.0",

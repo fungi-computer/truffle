@@ -1,5 +1,8 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
+import { homedir } from "node:os";
+import { Writable } from "node:stream";
+import { createLocalSandboxControls } from "./private-local-sandbox.js";
 import { fileURLToPath } from "node:url";
 import { dirname, posix, relative, resolve, sep } from "node:path";
 import process from "node:process";
@@ -355,26 +358,58 @@ export async function startLocalComputerd(
     startTimeoutMs?: number;
   }>,
 ): Promise<LocalComputerd> {
+  const node = options.node ?? resolveComputerdNode();
+  const sandbox = createLocalSandboxControls({
+    project: options.root,
+    folder: ".",
+    mode: () => "workspace",
+  });
+  let launch;
+  try {
+    launch = sandbox.launch(options.root, [node, computerdBundle]);
+    if (launch === undefined)
+      throw new Error("Computerd requires a Workspace sandbox");
+  } catch (cause) {
+    sandbox.close();
+    throw cause;
+  }
   const environment = {
+    ...launch.environment,
     PORT: "0",
     MOUNT_POINT: options.root,
     FUSE_MOUNT: "shim",
-    HOME: options.root,
+    HOME: homedir(),
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
     LANG: process.env.LANG ?? "C.UTF-8",
     TERM: "xterm-256color",
     NODE_OPTIONS: `--require ${JSON.stringify(loopbackPreload)}`,
     NODE_NO_WARNINGS: "1",
   } satisfies Record<string, string>;
-  const child: ChildProcess = spawn(
-    options.node ?? resolveComputerdNode(),
-    [computerdBundle],
-    {
-      cwd: options.root,
-      env: environment,
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
+  const child: ChildProcess = spawn(launch.executable, launch.args, {
+    cwd: options.root,
+    env: environment,
+    stdio: [
+      "ignore",
+      "pipe",
+      "pipe",
+      ...(launch.seccompFilter === undefined ? [] : ["pipe" as const]),
+    ],
+  });
+  if (launch.seccompFilter !== undefined) {
+    const filter = child.stdio[3];
+    if (!(filter instanceof Writable)) {
+      child.kill("SIGKILL");
+      sandbox.close();
+      throw new Error("Computerd sandbox filter input is unavailable");
+    }
+    filter.on("error", () => {
+      child.kill("SIGKILL");
+    });
+    filter.end(launch.seccompFilter);
+  }
+  child.once("close", () => {
+    sandbox.close();
+  });
   const port = await new Promise<number>((resolvePort, reject) => {
     let output = "";
     const timer = setTimeout(() => {
@@ -390,6 +425,10 @@ export async function startLocalComputerd(
     };
     child.stdout?.on("data", read);
     child.stderr?.on("data", read);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
     child.once("exit", (code) => {
       clearTimeout(timer);
       reject(

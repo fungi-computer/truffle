@@ -1,5 +1,23 @@
 # @fungi.computer/truffle
 
+## 0.10.6
+
+### Patch Changes
+
+- Changes since 0.10.5:
+
+  - fix(oyster): attach trial Computers through the runtime CLI
+  - fix(oyster): run trial Computers in a workspace sandbox
+
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.9.1
+  - @fungi.computer/nacre@0.4.4
+  - @fungi.computer/shiitake@0.12.4
+  - @fungi.computer/graft@0.2.10
+  - @fungi.computer/shiitake-extensions@0.6.11
+  - @fungi.computer/zookeeper@0.0.18
+
 ## 0.10.5
 
 ### Patch Changes
