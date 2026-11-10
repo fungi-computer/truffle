@@ -91,6 +91,7 @@ export function establishLocalSandbox(
     mode: Exclude<LocalPermissionMode, "full-access">;
     temporaryDirectory: string;
     platform?: string;
+    loopbackListener?: boolean;
   }>,
   staging?: NativePayloadStaging,
   /** Host startup probe; a Linux command-generation test can supply its own runner. */
@@ -180,7 +181,7 @@ export function establishLocalSandbox(
                   stagedHelper,
                   readOnlyFiles,
                 )
-              : seatbeltCommand(profile, stagedArgv);
+              : seatbeltCommand(profile, stagedArgv, input.loopbackListener);
           let environment: SandboxCommand["environment"] = {
             TMPDIR: environmentTmp,
           };

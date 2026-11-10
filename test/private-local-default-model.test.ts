@@ -3,6 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 
+import {
+  resolveAgentStartupModel,
+  resolveLocalStartupChoice,
+} from "../src/private-local-startup-model.js";
+
 import { ShiitakeError } from "@fungi.computer/shiitake";
 
 import { createPrivateModels } from "../src/local-models.js";
@@ -60,7 +65,10 @@ it("refuses an unregistered model with a typed model refusal", async () => {
   });
 });
 
-async function signedIn(providers: readonly string[]) {
+async function signedIn(
+  providers: readonly string[],
+  type: "api_key" | "oauth" = "api_key",
+) {
   const directory = await mkdtemp(join(tmpdir(), "fungi-local-default-"));
   temporaryDirectories.push(directory);
   const models = createPrivateModels(join(directory, "credentials.json"));
@@ -77,9 +85,7 @@ async function signedIn(providers: readonly string[]) {
   );
   vi.spyOn(models, "checkAuth").mockImplementation((provider) =>
     Promise.resolve(
-      providers.includes(provider)
-        ? { type: "api_key", source: "fixture" }
-        : undefined,
+      providers.includes(provider) ? { type, source: "fixture" } : undefined,
     ),
   );
   return models;
@@ -97,4 +103,62 @@ it("falls back to another signed-in provider without a Fungi account", async () 
   expect(
     await defaultLocalModel(models, new AbortController().signal),
   ).toMatchObject({ providerId: "openai" });
+});
+
+for (const [providerId, modelId] of [
+  ["openai", "gpt-6.1-sol"],
+  ["anthropic", "claude-opus-5-5"],
+] as const) {
+  it(`starts fresh ${providerId} subscription chats on ${modelId} with medium thinking`, async () => {
+    const models = await signedIn([providerId], "oauth");
+    expect(
+      await resolveAgentStartupModel({
+        models,
+        databasePath: undefined,
+        signal: new AbortController().signal,
+      }),
+    ).toEqual({
+      providerId,
+      modelId,
+      reasoning: "medium",
+      source: "available",
+    });
+  });
+}
+
+it("preserves explicit session and agent choices ahead of subscription defaults", async () => {
+  const models = await signedIn(["openai"], "oauth");
+  const agent = {
+    providerId: "openai",
+    modelId: "gpt-6-luna",
+    reasoning: "low",
+  } as const;
+  const session = {
+    providerId: "anthropic",
+    modelId: "claude-sonnet-4-6",
+    reasoning: "high",
+  } as const;
+  const checkAuth = vi.spyOn(models, "checkAuth");
+  const signal = new AbortController().signal;
+  expect(
+    await resolveLocalStartupChoice({ models, session, agent, signal }),
+  ).toEqual({ preference: session, source: "session" });
+  expect(
+    await resolveLocalStartupChoice({ models, session: null, agent, signal }),
+  ).toEqual({ preference: agent, source: "agent" });
+  expect(checkAuth).not.toHaveBeenCalled();
+});
+
+it("keeps the OpenAI catalog default for API-key auth", async () => {
+  const models = await signedIn(["openai"]);
+  const catalog = models.getModels("openai");
+  const expected =
+    catalog.find((model) => "default" in model && model.default === true) ??
+    catalog[0];
+  expect(await defaultLocalModel(models, new AbortController().signal)).toEqual(
+    {
+      providerId: "openai",
+      modelId: expected?.id,
+    },
+  );
 });

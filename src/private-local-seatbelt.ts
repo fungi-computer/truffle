@@ -38,6 +38,7 @@ function covers(root: string, path: string): boolean {
 export function seatbeltCommand(
   policy: SeatbeltPolicy,
   argv: readonly [string, ...string[]],
+  loopbackListener = false,
 ) {
   const hidden = protectedSandboxPaths(policy.hidden);
   const roots =
@@ -120,6 +121,12 @@ export function seatbeltCommand(
   );
   const profile = [
     base,
+    ...(loopbackListener
+      ? [
+          '(allow network-bind (local ip "localhost:*"))',
+          '(allow network-inbound (local ip "localhost:*"))',
+        ]
+      : []),
     "(allow file-read*)",
     ...hiddenRules,
     `(allow file-write* ${grants.join(" ")})`,

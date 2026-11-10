@@ -363,6 +363,7 @@ export async function startLocalComputerd(
     project: options.root,
     folder: ".",
     mode: () => "workspace",
+    loopbackListener: true,
   });
   let launch;
   try {

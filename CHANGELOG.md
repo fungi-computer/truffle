@@ -1,5 +1,14 @@
 # @fungi.computer/truffle
 
+## 0.10.8
+
+### Patch Changes
+
+- Changes since 0.10.7:
+
+  - fix(tui): use subscription defaults and show login recovery
+  - fix(shed): start the trial command runner on macOS
+
 ## 0.10.7
 
 ### Patch Changes

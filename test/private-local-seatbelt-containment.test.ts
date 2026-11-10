@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { establishLocalSandbox } from "../src/private-local-containment.js";
+import { createLocalSandboxControls } from "../src/private-local-sandbox.js";
 
 const roots: string[] = [];
 afterEach(() => {
@@ -73,5 +74,35 @@ it("refuses macOS Workspace folders that can rename hidden HOME records", () => 
       expect(admission.reason.kind).toBe("folder");
       expect(admission.reason.message).toMatch(/hidden record or its parent/u);
     }
+  }
+});
+
+it("starts macOS commands without a native patch helper, but still verifies the helper before patching", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "fungi-mac-command-")));
+  roots.push(root);
+  const project = join(root, "computer");
+  mkdirSync(project);
+  const readNativePatchSource = vi.fn(() => {
+    throw new Error("missing native helper");
+  });
+  const controls = createLocalSandboxControls({
+    project,
+    folder: ".",
+    mode: () => "workspace",
+    platform: "darwin",
+    readNativePatchSource,
+    runProbe: () => spawnSync("/usr/bin/true", [], { encoding: "utf8" }),
+  });
+  try {
+    expect(
+      controls.launch(project, ["/bin/sh", "-c", "echo hello"])?.executable,
+    ).toBe("/usr/bin/sandbox-exec");
+    expect(readNativePatchSource).not.toHaveBeenCalled();
+    expect(() =>
+      controls.launch(project, ["/native/patch"], "/native/patch"),
+    ).toThrow();
+    expect(readNativePatchSource).toHaveBeenCalledOnce();
+  } finally {
+    controls.close();
   }
 });

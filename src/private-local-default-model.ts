@@ -1,4 +1,4 @@
-import type { Api, Model, Models } from "@earendil-works/pi-ai";
+import type { Api, AuthCheck, Model, Models } from "@earendil-works/pi-ai";
 import type { ModelPreference } from "@fungi.computer/shiitake/model-preference";
 import { logEvent } from "./log-event.js";
 
@@ -10,17 +10,20 @@ async function offeredCatalog(
   models: Models,
   providerId: string,
   signal: AbortSignal,
-): Promise<readonly Model<Api>[]> {
+): Promise<
+  Readonly<{ catalog: readonly Model<Api>[]; auth: AuthCheck }> | undefined
+> {
   signal.throwIfAborted();
+  let auth: AuthCheck | undefined;
   try {
-    if ((await models.checkAuth(providerId, { signal })) === undefined)
-      return [];
+    auth = await models.checkAuth(providerId, { signal });
+    if (auth === undefined) return undefined;
   } catch (cause) {
     // A provider whose login cannot be resolved offers no models here.
     // Explicit selections report their own safe, provider-specific refusal.
     signal.throwIfAborted();
     logEvent("model-default.check-auth", cause);
-    return [];
+    return undefined;
   }
   if (models.getModels(providerId).length === 0) {
     const refreshed = await models.refresh({
@@ -28,16 +31,16 @@ async function offeredCatalog(
       signal,
     });
     signal.throwIfAborted();
-    if (refreshed.aborted || refreshed.errors.has(providerId)) return [];
+    if (refreshed.aborted || refreshed.errors.has(providerId)) return undefined;
   }
-  return models.getModels(providerId);
+  return { catalog: models.getModels(providerId), auth };
 }
 
 /**
  * A fresh Agent starts on Fungi's own default model (the Hub catalog marks
  * Luna) when the member is signed in to Fungi. Without a Fungi account it
- * falls back to the first other signed-in provider's catalog default, so a
- * BYOK-only user still starts on a model they can run.
+ * uses Sol for ChatGPT subscriptions and Opus for Claude subscriptions. API
+ * keys and other providers keep their catalog default.
  */
 export async function defaultLocalModel(
   models: Models,
@@ -49,8 +52,19 @@ export async function defaultLocalModel(
     ...providers.filter(({ id }) => id !== "fungi"),
   ];
   for (const provider of ordered) {
-    const catalog = await offeredCatalog(models, provider.id, signal);
+    const offered = await offeredCatalog(models, provider.id, signal);
+    if (offered === undefined) continue;
+    const { catalog, auth } = offered;
+    const subscriptionDefault =
+      auth.type !== "oauth"
+        ? undefined
+        : provider.id === "openai"
+          ? "gpt-6.1-sol"
+          : provider.id === "anthropic"
+            ? "claude-opus-5-5"
+            : undefined;
     const model =
+      catalog.find((entry) => entry.id === subscriptionDefault) ??
       catalog.find((entry) => "default" in entry && entry.default === true) ??
       catalog[0];
     if (model !== undefined)
@@ -65,8 +79,10 @@ export async function listOfferedLocalModels(
   signal: AbortSignal,
 ): Promise<readonly OfferedLocalModel[]> {
   const offered: OfferedLocalModel[] = [];
-  for (const provider of models.getProviders())
-    for (const model of await offeredCatalog(models, provider.id, signal))
+  for (const provider of models.getProviders()) {
+    const available = await offeredCatalog(models, provider.id, signal);
+    for (const model of available?.catalog ?? [])
       offered.push({ address: `${provider.id}/${model.id}`, name: model.name });
+  }
   return offered;
 }

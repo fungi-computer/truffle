@@ -70,6 +70,8 @@ export function createLocalSandboxControls(
     mode(): LocalPermissionMode;
     defaultReason?: z.output<typeof sandboxUnavailableReasonSchema> | undefined;
     platform?: string;
+    /** Computerd's RPC listener; ordinary Agent commands keep networking denied on macOS. */
+    loopbackListener?: boolean;
     readNativePatchSource?: NativeSourceReader;
     native?: NativePayloadStaging | undefined;
     /** Test-only hook for inspecting probe launches without native execution. */
@@ -117,9 +119,9 @@ export function createLocalSandboxControls(
       : agentSandboxTemporaryDirectory(temporaryOwner, input.project);
   const platform =
     input.platform === undefined ? {} : { platform: input.platform };
-  const supportedPlatform =
-    (input.platform ?? process.platform) === "linux" ||
-    (input.platform ?? process.platform) === "darwin";
+  // Seatbelt commands need no native helper. Linux needs bubblewrap at startup;
+  // either platform verifies the patch helper when a Files patch requests it.
+  const needsNativeSandbox = (input.platform ?? process.platform) === "linux";
   const ownNative = () => {
     try {
       return createNativePayloadStaging(
@@ -142,7 +144,7 @@ export function createLocalSandboxControls(
   let initial: ReturnType<typeof establishLocalSandbox> | undefined;
   try {
     if (mode !== "full-access") {
-      native = supportedPlatform ? (input.native ?? ownNative()) : undefined;
+      native = input.native ?? (needsNativeSandbox ? ownNative() : undefined);
       admitNative(native);
       nativeAdmitted = native !== undefined;
       initial = establishLocalSandbox(
@@ -154,6 +156,7 @@ export function createLocalSandboxControls(
             temporaryDirectory ??
             agentSandboxTemporaryDirectory(temporaryOwner, input.project),
           ...platform,
+          loopbackListener: input.loopbackListener === true,
         },
         native,
         input.runProbe,
@@ -211,7 +214,7 @@ export function createLocalSandboxControls(
       assertHostCode();
       hostCodeAdmitted = true;
     }
-    native ??= input.native ?? ownNative();
+    native ??= input.native ?? (needsNativeSandbox ? ownNative() : undefined);
     if (!nativeAdmitted) {
       admitNative(native);
       nativeAdmitted = true;
@@ -227,6 +230,7 @@ export function createLocalSandboxControls(
         mode: nextMode,
         temporaryDirectory,
         ...platform,
+        loopbackListener: input.loopbackListener === true,
       },
       native,
       input.runProbe,
@@ -248,6 +252,16 @@ export function createLocalSandboxControls(
   ): SandboxCommand | undefined {
     assertFolder();
     if (input.mode() === "full-access") return undefined;
+    if (readOnlyHelperFile !== undefined && native === undefined) {
+      if (!hostCodeAdmitted) {
+        assertHostCode();
+        hostCodeAdmitted = true;
+      }
+      native = ownNative();
+      nativeAdmitted = false;
+      sandbox?.close();
+      sandbox = undefined;
+    }
     prepareSandbox(input.mode() === "read-only" ? "read-only" : "workspace");
     if (sandbox !== undefined) {
       try {

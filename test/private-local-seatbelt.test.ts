@@ -59,6 +59,20 @@ function seatbeltProfile(
 }
 
 describe("Seatbelt command policy", () => {
+  it("admits only the Computer's loopback listener when requested", () => {
+    const policy = seatbeltProfile(fixture(), "workspace");
+    const command = ["/usr/bin/true"] as const;
+    expect(seatbeltCommand(policy, command).args[1]).not.toContain(
+      "(allow network-",
+    );
+    const profile = seatbeltCommand(policy, command, true).args[1];
+    expect(profile).toContain('(allow network-bind (local ip "localhost:*"))');
+    expect(profile).toContain(
+      '(allow network-inbound (local ip "localhost:*"))',
+    );
+    expect(profile).not.toContain("(allow network-outbound");
+  });
+
   it("protects the entire Git marker supplied by the real policy builder", () => {
     const { projectRoot, writableRoot, temporaryDirectory } = fixture();
     execFileSync("git", ["init", "-q", writableRoot], {
