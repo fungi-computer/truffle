@@ -1,5 +1,12 @@
 # @fungi.computer/truffle
 
+## 0.10.12
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/graft@0.2.12
+
 ## 0.10.11
 
 ### Patch Changes
