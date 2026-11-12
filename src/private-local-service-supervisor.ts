@@ -1,7 +1,8 @@
 import { Worker } from "node:worker_threads";
 import { Buffer } from "node:buffer";
 import { constants } from "node:fs";
-import { open, type FileHandle } from "node:fs/promises";
+import { open, readdir, type FileHandle } from "node:fs/promises";
+import { totalmem } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
 import { privateLocalServiceVersion } from "./private-local-service-discovery.js";
@@ -15,13 +16,28 @@ const workerDigest = z
   .regex(/^(?:source|[a-f0-9]{64})$/u)
   .parse(process.env.FUNGI_SERVICE_WORKER_DIGEST ?? "source");
 
+const mebibyte = 1024 * 1024;
+/** The ordinary service holds about 250 MiB; a Local runaway reached 36 GiB. */
+const defaultRssLimitBytes = Math.min(4096 * mebibyte, totalmem() / 2);
+/** Exit code for a runaway-memory restart; 1 stays the stall and drain code. */
+const privateLocalServiceRssExitCode = 75;
 const policySchema = z.strictObject({
   stallMs: z.number().int().min(50).max(30_000).default(30_000),
   startupMs: z.number().int().min(50).max(60_000).default(60_000),
+  /** Process resident size above which a sustained excess ends the service. */
+  rssLimitBytes: z
+    .number()
+    .int()
+    .min(64 * mebibyte)
+    .default(Math.floor(defaultRssLimitBytes)),
+  /** How long RSS must stay over the limit; a brief spike is not a runaway. */
+  rssSustainMs: z.number().int().min(50).max(600_000).default(60_000),
 });
+const rssSampleLimit = 32;
 const captureBudgetMs = 200;
 type WatchdogReason =
-  "event-loop-stall" | "startup-timeout" | "shutdown-timeout";
+  "event-loop-stall" | "startup-timeout" | "shutdown-timeout" | "rss-bound";
+type RssSample = Readonly<{ atMs: number; rss: number }>;
 type Capture =
   | Readonly<{ state: "pending" }>
   | Readonly<{
@@ -32,6 +48,8 @@ type Capture =
 export type LocalServiceProcessOptions = Readonly<{
   stallMs?: number;
   startupMs?: number;
+  rssLimitBytes?: number;
+  rssSustainMs?: number;
 }> &
   (
     | Readonly<{ worker: Worker; heartbeat: SharedArrayBuffer }>
@@ -59,6 +77,21 @@ async function writePrivateEvidence(path: string, text: string): Promise<void> {
   } finally {
     await file.close();
   }
+}
+
+/** Open descriptors of this process, or undefined where no fd directory exists. */
+async function countOpenFds(): Promise<number | undefined> {
+  for (const path of ["/proc/self/fd", "/dev/fd"]) {
+    try {
+      return (await readdir(path)).length;
+    } catch (cause) {
+      if (cause instanceof Error && "code" in cause && cause.code === "ENOENT")
+        continue;
+      logEvent("service-watchdog.fd-count", cause);
+      return undefined;
+    }
+  }
+  return undefined;
 }
 
 /** Freeze a bounded tail under a name that normal post-restart logging never overwrites. */
@@ -103,6 +136,8 @@ export async function runPrivateLocalServiceProcess(
   const policy = policySchema.parse({
     stallMs: options.stallMs,
     startupMs: options.startupMs,
+    rssLimitBytes: options.rssLimitBytes,
+    rssSustainMs: options.rssSustainMs,
   });
   const heartbeat = options.heartbeat ?? new SharedArrayBuffer(24);
   if (heartbeat.byteLength !== 24)
@@ -122,6 +157,10 @@ export async function runPrivateLocalServiceProcess(
   let observedBeat = 0n;
   let lastProgressAt = started;
   let shuttingDownAt: bigint | undefined;
+  // Newest samples, about one per second, kept for the RSS incident record.
+  const rssSamples: RssSample[] = [];
+  let lastSampleAt: bigint | undefined;
+  let overSince: bigint | undefined;
   const version = privateLocalServiceVersion();
   const stop = (signal: "SIGINT" | "SIGTERM") => {
     shuttingDownAt ??= process.hrtime.bigint();
@@ -139,9 +178,10 @@ export async function runPrivateLocalServiceProcess(
     boundMs: number,
   ): void => {
     clearInterval(timer);
+    const code = reason === "rss-bound" ? privateLocalServiceRssExitCode : 1;
     // Arm before starting evidence work. No I/O completion or worker cleanup
     // can postpone this exit; 200 ms also fits inside the shutdown grace.
-    setTimeout(() => process.exit(1), captureBudgetMs);
+    setTimeout(() => process.exit(code), captureBudgetMs);
     const preserve = async () => {
       const base = {
         source: "local-service",
@@ -154,6 +194,10 @@ export async function runPrivateLocalServiceProcess(
         lagMs,
         boundMs,
         captureBudgetMs,
+        rssLimitBytes: policy.rssLimitBytes,
+        rssSamples,
+        openFds: await countOpenFds(),
+        uptimeMs: Math.round(process.uptime() * 1000),
       };
       const manifest = join(directory, "watchdog-exit.json");
       const write = async (capture: Capture) => {
@@ -190,11 +234,11 @@ export async function runPrivateLocalServiceProcess(
     };
     void preserve().then(
       () => {
-        process.exit(1);
+        process.exit(code);
       },
       (cause: unknown) => {
         logEvent("service-watchdog.evidence", cause);
-        process.exit(1);
+        process.exit(code);
       },
     );
   };
@@ -218,6 +262,24 @@ export async function runPrivateLocalServiceProcess(
             if (drainingMs > 4500) exit("shutdown-timeout", drainingMs, 4500);
             return;
           }
+          const rss = process.memoryUsage.rss();
+          if (
+            lastSampleAt === undefined ||
+            now - lastSampleAt >= 1_000_000_000n
+          ) {
+            lastSampleAt = now;
+            rssSamples.push({
+              atMs: Math.round(Number(now - started) / 1e6),
+              rss,
+            });
+            if (rssSamples.length > rssSampleLimit) rssSamples.shift();
+          }
+          if (rss > policy.rssLimitBytes) {
+            overSince ??= now;
+            const overMs = Number(now - overSince) / 1e6;
+            if (overMs >= policy.rssSustainMs)
+              exit("rss-bound", overMs, policy.rssSustainMs);
+          } else overSince = undefined;
           const last = Atomics.load(state, 0);
           if (last !== observedBeat) {
             observedBeat = last;

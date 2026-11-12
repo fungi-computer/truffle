@@ -202,6 +202,15 @@ bounded too. A failed capture cannot prevent process exit and is never reported
 as a successful snapshot. This is stream evidence, not a heap snapshot or a fix
 for the unresolved string-growth cause.
 
+The same main-thread watchdog bounds memory. It samples process RSS about once a
+second; when RSS stays above `rssLimitBytes` for `rssSustainMs` (defaults: the
+smaller of 4 GiB and half the machine's memory, sustained 60 seconds) it writes
+`watchdog-exit.json` with the `rss-bound` reason, the limit, the last 32 RSS
+samples, the open descriptor count and the uptime, then exits with status 75 (1
+remains the stall code). Nothing supervises the service as a daemon: the next
+client request restarts it through the ordinary start path, so a runaway can
+only repeat after another sustained minute over the bound.
+
 `pnpm --dir runtimes/local test:service-watchdog` deliberately blocks the real
 listener's event loop, verifies signal-free status-1 exit and replayable
 provider records, reopens the same service directory, checks normal

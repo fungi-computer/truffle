@@ -451,3 +451,89 @@ it.runIf(process.platform === "linux")(
     }
   },
 );
+
+// spore-v1-05: an Agent-created Git layout must never make the next command's
+// preparation fail. Protection covers the selected folder's own marker only, so
+// nested layouts are inert data and the folder's own .git stays read-only.
+it.runIf(process.platform === "linux")(
+  "runs a sandboxed command although the Agent made a nested .git/hooks file",
+  () => {
+    const project = fixture();
+    const folder = join(project, "agent");
+    const controls = createLocalSandboxControls({
+      project,
+      folder: "agent",
+      mode: () => "workspace",
+    });
+    try {
+      // After readiness, as an Agent would: sub/.git/hooks is a regular file.
+      mkdirSync(join(folder, "sub", ".git"), { recursive: true });
+      writeFileSync(join(folder, "sub", ".git", "hooks"), "agent file\n");
+      const result = runContained(
+        controls.launch(join(folder, "sub"), ["/usr/bin/true"]),
+        project,
+        join(folder, "sub"),
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(readFileSync(join(folder, "sub", ".git", "hooks"), "utf8")).toBe(
+        "agent file\n",
+      );
+    } finally {
+      controls.close();
+    }
+  },
+  60_000,
+);
+
+// spore-v1-06: a layout of many long-named nested .git directories once pushed
+// the startup probe's argv past E2BIG, which an optional launch took as leave
+// to run bare. The count is reproduction evidence, not a product limit.
+it.runIf(process.platform === "linux")(
+  "keeps a newly started sandbox sandboxed under 1,500 long-named nested .git directories",
+  () => {
+    const project = fixture();
+    const folder = join(project, "agent");
+    for (let index = 0; index < 1_500; index += 1)
+      mkdirSync(
+        join(folder, `${"nested-".repeat(14)}${String(index)}`, ".git"),
+        { recursive: true },
+      );
+    const policy = sandboxPolicy(project, folder);
+    const command = linuxSandboxCommand(
+      linuxSandboxProfile(
+        policy,
+        "workspace",
+        folder,
+        process.env,
+        userInfo().homedir,
+      ),
+      {
+        executable: "/fixture/fungi-bwrap",
+        seccompFilter: new Uint8Array([1]),
+      },
+      folder,
+      ["/usr/bin/true"],
+    );
+    expect(command.args.length).toBeLessThan(200);
+    // Startup before and after a restart with the layout in place: a real
+    // sandbox each time, never a refusal-turned-bare launch.
+    for (const startup of ["first start", "restart"]) {
+      const controls = createLocalSandboxControls({
+        project,
+        folder: "agent",
+        mode: () => "workspace",
+      });
+      try {
+        const result = runContained(
+          controls.launch(folder, ["/usr/bin/true"]),
+          project,
+          folder,
+        );
+        expect(result.status, `${startup}: ${result.stderr}`).toBe(0);
+      } finally {
+        controls.close();
+      }
+    }
+  },
+  120_000,
+);

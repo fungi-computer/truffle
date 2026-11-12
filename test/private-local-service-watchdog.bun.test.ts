@@ -157,6 +157,66 @@ test("an endless service-loop stall preserves typed evidence and exits without a
   });
 }, 30_000);
 
+test("sustained runaway RSS preserves evidence and exits with the distinct restart code", async () => {
+  const area = await mkdtemp(join(tmpdir(), "fungi-watchdog-rss-"));
+  const directory = join(area, "service");
+  await mkdir(directory, { mode: 0o700 });
+  // 64 MiB is the policy minimum; a starting Bun listener passes it, so the
+  // service may exit before it is ready to publish its record.
+  const limit = 64 * 1024 * 1024;
+  const child = spawn([process.execPath, fixture.pathname, directory], {
+    env: {
+      ...process.env,
+      HOME: directory,
+      FIXTURE_RSS_LIMIT_BYTES: String(limit),
+    },
+    stdout: "ignore",
+    stderr: "inherit",
+  });
+  try {
+    const exit = await Promise.race([
+      child.exited,
+      Bun.sleep(5_000).then(() => "still-running"),
+    ]);
+    expect(exit).toBe(75);
+    expect(child.signalCode).toBeNull();
+    const evidence = z
+      .object({
+        event: z.literal("watchdog-exit"),
+        reason: z.literal("rss-bound"),
+        pid: z.literal(child.pid),
+        rssLimitBytes: z.literal(limit),
+        boundMs: z.literal(400),
+        lagMs: z.number().min(400),
+        openFds: z.number().int().positive(),
+        uptimeMs: z.number().positive(),
+        rssSamples: z
+          .array(
+            z.object({
+              atMs: z.number().nonnegative(),
+              rss: z.number().positive(),
+            }),
+          )
+          .min(1)
+          .max(32),
+      })
+      .parse(
+        JSON.parse(
+          await readFile(join(directory, "watchdog-exit.json"), "utf8"),
+        ),
+      );
+    expect(
+      Math.max(...evidence.rssSamples.map((sample) => sample.rss)),
+    ).toBeGreaterThan(limit);
+  } finally {
+    if (child.exitCode === null) {
+      child.kill("SIGKILL");
+      await child.exited;
+    }
+    await rm(area, { recursive: true, force: true });
+  }
+}, 20_000);
+
 test("a live service outlasts the stall bound and SIGTERM drains normally without a false incident", async () => {
   await withService(async ({ child, record }, directory) => {
     await Bun.sleep(750);

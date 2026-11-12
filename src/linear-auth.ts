@@ -24,7 +24,7 @@ const defaultAuthUrlInstructions =
 /** Pi owns provider flows and credentials; Clack owns only their presentation. */
 export function linearAuthInteraction(
   interactive: boolean,
-  cli = new Cli({ brand: "fungi-local-auth", interactive }),
+  cli = new Cli({ brand: "fungi", interactive }),
 ): AuthInteraction {
   return {
     async prompt(prompt) {

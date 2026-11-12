@@ -51,6 +51,35 @@ it("lists models only from signed-in providers as provider/model addresses", asy
   );
 });
 
+it.each(["anthropic", "openai"])(
+  "defaults an API-key %s login to a mid-priced model, not the first or dearest",
+  async (providerId) => {
+    const directory = await mkdtemp(join(tmpdir(), "fungi-local-default-"));
+    temporaryDirectories.push(directory);
+    const models = createPrivateModels(join(directory, "credentials.json"));
+    vi.spyOn(models, "checkAuth").mockImplementation((provider) =>
+      Promise.resolve(
+        provider === providerId
+          ? { type: "api_key", source: "API_KEY" }
+          : undefined,
+      ),
+    );
+
+    const chosen = await defaultLocalModel(
+      models,
+      new AbortController().signal,
+    );
+
+    const catalog = models.getModels(providerId);
+    const outputPrices = catalog.map(({ cost }) => cost.output);
+    const price = catalog.find(({ id }) => id === chosen?.modelId)?.cost.output;
+    expect(chosen?.providerId).toBe(providerId);
+    expect(chosen?.modelId).not.toBe(catalog[0]?.id);
+    expect(price).toBeLessThan(Math.max(...outputPrices));
+    expect(price).toBeGreaterThan(Math.min(...outputPrices));
+  },
+);
+
 it("refuses an unregistered model with a typed model refusal", async () => {
   const directory = await mkdtemp(join(tmpdir(), "fungi-local-offered-"));
   temporaryDirectories.push(directory);
@@ -147,18 +176,4 @@ it("preserves explicit session and agent choices ahead of subscription defaults"
     await resolveLocalStartupChoice({ models, session: null, agent, signal }),
   ).toEqual({ preference: agent, source: "agent" });
   expect(checkAuth).not.toHaveBeenCalled();
-});
-
-it("keeps the OpenAI catalog default for API-key auth", async () => {
-  const models = await signedIn(["openai"]);
-  const catalog = models.getModels("openai");
-  const expected =
-    catalog.find((model) => "default" in model && model.default === true) ??
-    catalog[0];
-  expect(await defaultLocalModel(models, new AbortController().signal)).toEqual(
-    {
-      providerId: "openai",
-      modelId: expected?.id,
-    },
-  );
 });

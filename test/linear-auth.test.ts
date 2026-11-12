@@ -26,7 +26,7 @@ function harness(interactive: boolean) {
   output.on("data", (chunk: Buffer) => {
     transcript += chunk.toString();
   });
-  const cli = new Cli({ brand: "fungi-local-auth", output, interactive });
+  const cli = new Cli({ brand: "fungi", output, interactive });
   return { cli, transcript: () => transcript };
 }
 

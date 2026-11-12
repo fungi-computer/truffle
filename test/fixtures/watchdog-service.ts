@@ -22,6 +22,11 @@ if (isMainThread) {
     heartbeat,
     stallMs: 200,
     startupMs: 10_000,
+    // Set only by the runaway-memory test; the stall tests keep the default.
+    rssLimitBytes: Number(
+      process.env.FIXTURE_RSS_LIMIT_BYTES ?? Number.MAX_SAFE_INTEGER,
+    ),
+    rssSustainMs: 400,
   });
 } else {
   await runLocalServiceWorker((directory, observe, ready) => {

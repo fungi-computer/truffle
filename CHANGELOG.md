@@ -1,5 +1,24 @@
 # @fungi.computer/truffle
 
+## 0.10.17
+
+### Patch Changes
+
+- Changes since 0.10.16:
+
+  - fix(local): exit the service for a restart when RSS stays over a typed bound
+  - fix(local): default API-key Anthropic and OpenAI users to a mid-tier model
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.10.1
+  - @fungi.computer/shiitake-extensions@0.6.14
+  - @fungi.computer/shiitake@0.14.0
+  - @fungi.computer/nacre@0.5.3
+  - @fungi.computer/graft@0.2.14
+  - @fungi.computer/zookeeper@0.0.21
+
 ## 0.10.16
 
 ### Patch Changes

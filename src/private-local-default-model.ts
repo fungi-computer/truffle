@@ -37,10 +37,31 @@ async function offeredCatalog(
 }
 
 /**
+ * A provider that names no default gets its mid-tier model: the roomiest, then
+ * newest, catalog entry at the median of the distinct output prices, never the
+ * first or the dearest.
+ */
+function midTierModel(catalog: readonly Model<Api>[]): Model<Api> | undefined {
+  const prices = [...new Set(catalog.map((entry) => entry.cost.output))].sort(
+    (a, b) => a - b,
+  );
+  const median = prices[Math.floor((prices.length - 1) / 2)];
+  return catalog
+    .filter((entry) => entry.cost.output === median)
+    .reduce<Model<Api> | undefined>(
+      (best, entry) =>
+        best === undefined || entry.contextWindow >= best.contextWindow
+          ? entry
+          : best,
+      undefined,
+    );
+}
+
+/**
  * A fresh Agent starts on Fungi's own default model (the Hub catalog marks
  * Luna) when the member is signed in to Fungi. Without a Fungi account it
  * uses Sol for ChatGPT subscriptions and Opus for Claude subscriptions. API
- * keys and other providers keep their catalog default.
+ * keys and other providers keep their catalog default, else their mid-tier model.
  */
 export async function defaultLocalModel(
   models: Models,
@@ -66,7 +87,7 @@ export async function defaultLocalModel(
     const model =
       catalog.find((entry) => entry.id === subscriptionDefault) ??
       catalog.find((entry) => "default" in entry && entry.default === true) ??
-      catalog[0];
+      midTierModel(catalog);
     if (model !== undefined)
       return { providerId: provider.id, modelId: model.id };
   }

@@ -82,7 +82,7 @@ type LoginHost = Readonly<{
 }>;
 
 function usage(): string {
-  return "Usage: fungi-local-auth <login|status|logout> [--provider <id>] [--auth-type oauth|api_key] [--method <id>]";
+  return "Usage: fungi <login|status|logout> [--provider <id>] [--auth-type oauth|api_key] [--method <id>]";
 }
 
 function parseAuthType(value: string | undefined): AuthType | undefined {
@@ -135,7 +135,7 @@ function terminalInteraction(
   output: NodeJS.WritableStream,
 ): AuthInteraction {
   const cli = new Cli({
-    brand: "fungi-local-auth",
+    brand: "fungi",
     input: input instanceof Readable ? input : Readable.from(input),
     output:
       output instanceof Writable
@@ -559,18 +559,4 @@ export async function runLocalAuthCli(
     signals.removeListener("SIGINT", abort);
     signals.removeListener("SIGTERM", abort);
   }
-}
-
-if (import.meta.main) {
-  const cli = new Cli({ brand: "fungi-local-auth" });
-  if (cli.interactive) cli.welcome("Provider login for your local agents.");
-  runLocalAuthCli(process.argv.slice(2), {
-    interaction: linearAuthInteraction(cli.interactive, cli),
-  }).catch((cause: unknown) => {
-    // Provider messages can contain credentials; keep the diagnostic bounded.
-    process.stderr.write(
-      `Local authentication command failed (${cause instanceof Error ? cause.name : "NonError"}).\n`,
-    );
-    process.exitCode = 1;
-  });
 }

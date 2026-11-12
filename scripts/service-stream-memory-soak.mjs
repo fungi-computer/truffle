@@ -63,6 +63,7 @@ async function sample(round) {
     strings: heap.objectTypeCounts.string ?? 0,
     statements: heap.objectTypeCounts.SQLStatement ?? 0,
     fds: (await readdir("/proc/self/fd")).length,
+    threads: (await readdir("/proc/self/task")).length,
     elapsedMs: Math.round(performance.now() - started),
   };
   console.log(JSON.stringify({ event: "retained-memory", ...value }));
