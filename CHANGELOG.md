@@ -1,5 +1,12 @@
 # @fungi.computer/truffle
 
+## 0.10.14
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/nacre@0.5.1
+
 ## 0.10.13
 
 ### Patch Changes
