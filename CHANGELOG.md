@@ -1,5 +1,12 @@
 # @fungi.computer/truffle
 
+## 0.10.16
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/veil@0.7.0
+
 ## 0.10.15
 
 ### Patch Changes
