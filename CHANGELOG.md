@@ -1,5 +1,34 @@
 # @fungi.computer/truffle
 
+## 0.11.0
+
+### Minor Changes
+
+- Changes since 0.10.19:
+
+  - feat(oyster): let an Agent use skills left on its Computer
+  - fix(local): record command process groups on macOS with a ps start-time
+    reader
+  - fix(local): release the fungi acp route when its editor signals it to exit
+  - fix(local): keep the process group record type private
+  - fix(local): end recorded command process groups after a killed service
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.12.1
+  - @fungi.computer/nacre@0.6.0
+  - @fungi.computer/shiitake-extensions@0.8.0
+  - @fungi.computer/shiitake@0.15.0
+  - @fungi.computer/mycelium@0.3.10
+  - @fungi.computer/graft@0.2.17
+  - @fungi.computer/zookeeper@0.0.24
+  - @fungi.computer/knapsack@0.4.11
+  - @fungi.computer/veil@0.7.2
+
 ## 0.10.19
 
 ### Patch Changes

@@ -76,6 +76,7 @@ import type {
   PrivateLocalServiceManager,
   PrivateLocalServiceStopResult,
 } from "./private-local-service-contract.js";
+import { reapOrphanedProcessGroups } from "./private-local-process-groups.js";
 import { terminatePrivateLocalService } from "./private-local-service-termination.js";
 import { readServiceLeaseOwner } from "./private-local-service-lease.js";
 import { privateLocalEffectiveModelSchema } from "./private-local-effective-model.js";
@@ -336,6 +337,8 @@ export function createPrivateLocalServiceManager(
         `The Fungi lease owner in ${directory} does not match service.json; retry after the owner registers itself. No process was signalled.`,
       );
     const outcome = await terminatePrivateLocalService(directory, owner);
+    // A SIGKILLed service never ran its owner drain; end its command groups.
+    await reapOrphanedProcessGroups(root.home, owner);
     // A killed process cannot remove its own record or lifetime lock.
     await removeOwnedServiceRecord(directory, lifecycle.serviceId);
     await clearAbandonedServiceOwner(directory);

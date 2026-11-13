@@ -9,54 +9,30 @@ import {
   resolve,
   sep,
 } from "node:path";
-import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import type {
   SkillCatalog,
-  SkillDescription,
   SkillDiagnostic,
   SkillOrigin,
   SkillSource,
 } from "@fungi.computer/shiitake-extensions/skills/source";
+import {
+  admitSkill,
+  maximumDirectoryEntries,
+  maximumDiscoveryDepth,
+  maximumFileBytes,
+  maximumSupportingDepth,
+  newSkillAdmission,
+  parseSkill,
+  skillCatalogOf,
+  skillDiagnostic as diagnostic,
+  skillExplanation as explanation,
+  skillFileSchema as fileSchema,
+  SkillSourceError,
+} from "@fungi.computer/shiitake-extensions/skills/discovery";
 
-const maximumSkillCount = 64;
-const maximumCatalogBytes = 16_000;
-const maximumFileBytes = 128 * 1_024;
-const maximumDirectoryEntries = 512;
-const maximumSupportingDepth = 16;
-const maximumDiscoveryDepth = 16;
-const utf8 = new TextEncoder();
 const refusedMessage =
   "Skill path is outside its folder or covers a sandbox-hidden path";
-
-class SkillSourceError extends Error {}
-const nameSchema = z
-  .string()
-  .min(1)
-  .max(64)
-  .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u);
-const frontmatterSchema = z.object({
-  name: z.string().optional(),
-  description: z.string().optional(),
-  "disable-model-invocation": z
-    .unknown()
-    .default(false)
-    .transform((value) => value === true),
-});
-const fileSchema = z
-  .string()
-  .min(1)
-  .max(4_096)
-  .refine(
-    (file) =>
-      !isAbsolute(file) &&
-      !file.includes("\\") &&
-      !file.includes("\0") &&
-      file
-        .split("/")
-        .every((part) => part !== "" && part !== "." && part !== ".."),
-    "Skill file must remain a relative path inside its skill directory",
-  );
 
 function absent(cause: unknown): boolean {
   return cause instanceof Error && "code" in cause && cause.code === "ENOENT";
@@ -144,49 +120,6 @@ async function readChecked(
   }
 }
 
-function diagnostic(
-  path: string,
-  reason: SkillDiagnostic["reason"],
-  message: string,
-  cause: unknown = new Error(message),
-): SkillDiagnostic {
-  return { path, reason, message, cause };
-}
-
-function explanation(cause: unknown, fallback: string): string {
-  return cause instanceof SkillSourceError ? cause.message : fallback;
-}
-
-function parseSkill(content: string, directory: string) {
-  const normalized = content.replace(/\r\n?/gu, "\n");
-  const match = /^---\n([\s\S]*?)\n---(?:\n|$)/u.exec(normalized);
-  if (!match) throw new SkillSourceError("SKILL.md requires YAML frontmatter");
-  let frontmatter: unknown;
-  try {
-    frontmatter = parseYaml(match[1] ?? "");
-  } catch (cause) {
-    throw new SkillSourceError("Skill frontmatter is not valid YAML", {
-      cause,
-    });
-  }
-  const result = frontmatterSchema.safeParse(frontmatter);
-  if (!result.success)
-    throw new SkillSourceError("Skill frontmatter has invalid field types", {
-      cause: result.error,
-    });
-  const metadata = result.data;
-  if (metadata.description === undefined || metadata.description.trim() === "")
-    throw new SkillSourceError("description is required");
-  const name =
-    metadata.name === ""
-      ? basename(directory)
-      : (metadata.name ?? basename(directory));
-  return {
-    metadata: { ...metadata, name, description: metadata.description },
-    body: normalized.slice(match[0].length),
-  };
-}
-
 /** Project layout roots, each owned by the folder that holds it. */
 async function discoveryRoots(
   cwd: string,
@@ -265,12 +198,6 @@ type LabeledRoot = Readonly<{
   owner: string | undefined;
 }>;
 
-function describeOrigin(origin: SkillOrigin): string {
-  return origin.kind === "extension"
-    ? `extension ${origin.extensionId}`
-    : origin.kind;
-}
-
 /** An enabled extension's skills folder, as the extension owner reports it. */
 export type ExtensionSkillFolder = Readonly<{
   extensionId: string;
@@ -285,8 +212,7 @@ async function scanRoots(
   signal: AbortSignal,
   diagnostics: SkillDiagnostic[],
 ): Promise<SkillCatalog> {
-  const skills: SkillDescription[] = [];
-  const owners = new Map<string, SkillOrigin>();
+  const state = newSkillAdmission(diagnostics);
   const paths = new Set<string>();
   const visitedRoots = new Set<string>();
   for (const { path, origin, named, owner } of roots) {
@@ -366,71 +292,16 @@ async function scanRoots(
               (file) => covers(root, file) && !exposesHidden(hidden, file),
               signal,
             ),
-            directory,
+            basename(directory),
           );
-          if (
-            !nameSchema.safeParse(metadata.name).success ||
-            metadata.name !== basename(directory)
-          )
-            diagnostics.push(
-              diagnostic(
-                skillPath,
-                "warning",
-                "Skill name should match its directory, use lowercase letters, digits and single hyphens, and be at most 64 characters",
-              ),
-            );
-          if (metadata.description.length > 1_024)
-            diagnostics.push(
-              diagnostic(
-                skillPath,
-                "warning",
-                "Skill description exceeds the recommended 1024 characters",
-              ),
-            );
-          const winner = owners.get(metadata.name);
-          if (winner !== undefined) {
-            diagnostics.push(
-              diagnostic(
-                skillPath,
-                "collision",
-                `${describeOrigin(winner)} skill ${metadata.name} wins over ${describeOrigin(origin)}`,
-              ),
-            );
-            return;
-          }
-          owners.set(metadata.name, origin);
-          if (metadata["disable-model-invocation"]) {
-            diagnostics.push(
-              diagnostic(
-                skillPath,
-                "skipped",
-                "Skill disables model invocation",
-              ),
-            );
-            return;
-          }
-          const skill = {
-            name: metadata.name,
-            description: metadata.description,
+          admitSkill(state, {
+            metadata,
+            directoryName: basename(directory),
+            skillPath,
             location,
             displayLocation: displayLocation(location, displayRoots),
             origin,
-          };
-          if (
-            skills.length >= maximumSkillCount ||
-            utf8.encode(JSON.stringify([...skills, skill])).byteLength >
-              maximumCatalogBytes
-          ) {
-            diagnostics.push(
-              diagnostic(
-                skillPath,
-                "bound",
-                "Skill catalog exceeds its 64-skill or 16 KB bound",
-              ),
-            );
-            return;
-          }
-          skills.push(skill);
+          });
         } catch (cause) {
           signal.throwIfAborted();
           diagnostics.push({
@@ -504,7 +375,7 @@ async function scanRoots(
       });
     }
   }
-  return { skills, diagnostics };
+  return skillCatalogOf(state);
 }
 
 /** What an extension's skills folder offers, for the install prompt. */
@@ -657,7 +528,7 @@ export function createLocalSkillSource(
           baseDirectory,
           supportingFiles: [],
         };
-      const parsed = parseSkill(content, baseDirectory);
+      const parsed = parseSkill(content, basename(baseDirectory));
       if (parsed.metadata["disable-model-invocation"])
         throw new Error(`Hidden skill: ${name}`);
       const supportingFiles: string[] = [];

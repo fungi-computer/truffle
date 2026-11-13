@@ -198,3 +198,109 @@ it.skipIf(process.platform !== "linux")(
   },
   60_000,
 );
+
+const acpFixture = join(import.meta.dir, "fixtures", "acp-stdio-process.ts");
+const acpResponse = z.looseObject({ id: z.number().optional() });
+
+/** An editor leaves by signal or by closing stdin; either frees its route. */
+for (const departure of ["SIGTERM", "SIGHUP", "stdin-eof"] as const)
+  it.skipIf(process.platform !== "linux")(
+    `fungi acp releases its service route when its editor leaves by ${departure}`,
+    async () => {
+      const home = await mkdtemp(join(tmpdir(), "fungi-acp-route-"));
+      const directory = await serviceDirectory(join(home, ".fungi", "service"));
+      const project = join(home, "project");
+      await mkdir(project);
+      const children: Subprocess[] = [];
+      try {
+        const service = spawn([process.execPath, fixture, directory, "20"], {
+          cwd: home,
+          env: { PATH: process.env.PATH, HOME: home },
+          stdout: "inherit",
+          stderr: "inherit",
+        });
+        children.push(service);
+        for (let attempt = 0; attempt < 400; attempt += 1) {
+          if ((await readServiceRecord(directory))?.pid === service.pid) break;
+          await Bun.sleep(25);
+        }
+        const acp = spawn(
+          [
+            process.execPath,
+            acpFixture,
+            directory,
+            project,
+            join(home, "route"),
+          ],
+          {
+            cwd: home,
+            env: { PATH: process.env.PATH, HOME: home },
+            stdin: "pipe",
+            stdout: "pipe",
+            stderr: "inherit",
+          },
+        );
+        children.push(acp);
+        const lines = acp.stdout.pipeThrough(new TextDecoderStream());
+        const reader = lines.getReader();
+        let buffered = "";
+        const reply = async (id: number) => {
+          for (;;) {
+            for (const line of buffered.split("\n")) {
+              if (line.trim() === "") continue;
+              const message = acpResponse.safeParse(JSON.parse(line));
+              if (message.success && message.data.id === id) return;
+            }
+            const next = await reader.read();
+            if (next.done) throw new Error("ACP exited before replying");
+            buffered += next.value;
+          }
+        };
+        await acp.stdin.write(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "initialize",
+            params: { protocolVersion: 1 },
+          }) + "\n",
+        );
+        await reply(1);
+        await acp.stdin.write(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 2,
+            method: "session/new",
+            params: { cwd: project, mcpServers: [] },
+          }) + "\n",
+        );
+        await reply(2);
+        // The editor's route keeps its Agent owned while it is connected, even
+        // across several idle sweeps.
+        const routeFile = join(home, "route");
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          if (await Bun.file(routeFile).exists()) break;
+          await Bun.sleep(20);
+        }
+        const route = await Bun.file(routeFile).text();
+        const routed = async () =>
+          (await fetch(`${route}/sandbox`)).status !== 404;
+        // The editor's route exists while it is connected.
+        expect(await routed()).toBe(true);
+        if (departure === "stdin-eof") await acp.stdin.end();
+        else acp.kill(departure);
+        await acp.exited;
+        // Its route is gone; one leaked per closed editor before.
+        expect(await routed()).toBe(false);
+        service.kill("SIGTERM");
+        expect(await service.exited).toBe(0);
+      } finally {
+        for (const child of children)
+          if (child.exitCode === null) {
+            child.kill("SIGKILL");
+            await child.exited;
+          }
+        await rm(home, { recursive: true, force: true });
+      }
+    },
+    60_000,
+  );

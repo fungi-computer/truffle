@@ -510,7 +510,8 @@ describe("local Computer background processes", () => {
         const started = resultSchema.parse(
           await call({ operation: "start", stdin, ...spec }),
         );
-        expect(started.process.state).toBe("running");
+        // Whether the child has already exited when start replies is a race;
+        // the wait below is the proof.
         const finished = resultSchema.parse(
           await call({
             operation: "wait",
@@ -837,7 +838,7 @@ describe("local Computer background processes", () => {
       { operation: "kill", id: first.id },
       invocation(),
     );
-    await expect(start(computer, "true")).resolves.toMatchObject({
+    await expect(start(computer, "sleep 60")).resolves.toMatchObject({
       state: "running",
     });
   }, 30_000);

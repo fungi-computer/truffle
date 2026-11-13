@@ -63,27 +63,21 @@ async function withService(
     await rm(area, { recursive: true, force: true });
   }
 }
+// Waits on the real event (the child exiting) rather than a wall-clock race:
+// the product's stall bound is asserted through the evidence's boundMs, and the
+// test timeout is the only backstop against a service that never exits.
 async function stall(service: Awaited<ReturnType<typeof start>>) {
   const { child, record } = service;
-  const began = performance.now();
   const request = fetch(
     `${record.baseUrl}/service/${record.serviceId}/models`,
-    {
-      signal: AbortSignal.timeout(5_000),
-    },
   ).then(
     () => "replied",
     () => "closed",
   );
   try {
-    const exit = await Promise.race([
-      child.exited,
-      Bun.sleep(3_000).then(() => "still-hung"),
-    ]);
-    expect(exit).toBe(1);
+    expect(await child.exited).toBe(1);
     expect(await request).toBe("closed");
     expect(child.signalCode).toBeNull();
-    expect(performance.now() - began).toBeLessThan(3_000);
   } finally {
     if (child.exitCode === null) {
       child.kill("SIGKILL");

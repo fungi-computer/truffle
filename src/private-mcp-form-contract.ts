@@ -57,7 +57,6 @@ const McpFormPendingSchema = Schema.Struct({
       kind: Schema.Literals(["exec", "extension-install"]),
       argv: Schema.optionalKey(Schema.Array(Schema.String)),
       prefix: Schema.optionalKey(Schema.Array(Schema.String)),
-      warning: Schema.optionalKey(Schema.String),
       alwaysAllowCoverage: Schema.optionalKey(Schema.String),
       alwaysAllowUnavailableReason: Schema.optionalKey(Schema.String),
       risk: Schema.optionalKey(

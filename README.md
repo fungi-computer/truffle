@@ -211,6 +211,16 @@ remains the stall code). Nothing supervises the service as a daemon: the next
 client request restarts it through the ordinary start path, so a runaway can
 only repeat after another sustained minute over the bound.
 
+Every command the service starts is also recorded as a process group
+(`<home>/.fungi/process-groups/<id>.json`: group id, leader start time, owning
+service pid and start time). A graceful stop ends commands through the owner
+drain. After a SIGKILL, watchdog exit or crash, `fungi stop` and the next
+service start SIGKILL the recorded groups of dead owners. A record whose leader
+PID now has a different start time is skipped, and a live owner's groups are
+never touched. Linux reads `/proc` start ticks; macOS reads `ps -o lstart=`
+(one-second resolution, used only for these records, not as service signal
+authority); other platforms record nothing.
+
 `pnpm --dir runtimes/local test:service-watchdog` deliberately blocks the real
 listener's event loop, verifies signal-free status-1 exit and replayable
 provider records, reopens the same service directory, checks normal

@@ -20,8 +20,13 @@ import {
   privateLocalExecEnvironment,
   privateLocalExecEnvironmentInput,
 } from "./private-local-exec-environment.js";
+import {
+  removeProcessGroupRecord,
+  writeProcessGroupRecord,
+} from "./private-local-process-groups.js";
 import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import { Writable } from "node:stream";
+import { logEvent } from "./log-event.js";
 import type { SandboxCommand } from "./private-local-containment.js";
 import type { LocalSandboxLaunch } from "./private-invocation-computer.js";
 import type { InvocationContext } from "@fungi.computer/mycelium";
@@ -510,6 +515,17 @@ class ManagedProcess {
     return signalled;
   }
 
+  /** Persist the group so a stop or restart after a crash can still end it. */
+  async recordGroup(home: string) {
+    if (this.#groupId === undefined) return;
+    await writeProcessGroupRecord(home, this.id, this.#groupId);
+    void this.closed
+      .then(() => removeProcessGroupRecord(home, this.id))
+      .catch((cause: unknown) => {
+        logEvent("computer-process.group-record", cause);
+      });
+  }
+
   /** Synchronous last resort while the host process itself exits. */
   killNow() {
     if (this.running && this.#groupId !== undefined)
@@ -649,6 +665,7 @@ export function createPrivateLocalComputerProcesses(
           launch,
         );
         records.set(started.id, started);
+        await started.recordGroup(home);
         return started.snapshot();
       },
       status: (id) => find(id).snapshot(),

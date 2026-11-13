@@ -49,6 +49,7 @@ import { privateLocalExecPathSchema } from "./private-local-exec-path.js";
 import { listPrivateModels } from "./local-models.js";
 import { privateSqliteFailureCode } from "./private-sqlite-owner.js";
 import type { PrivateLocalEffectiveModel } from "./private-local-effective-model.js";
+import { reapOrphanedProcessGroups } from "./private-local-process-groups.js";
 import { openPrivateLocalBunServer } from "./private-bun-shiitake-host.js";
 import { readOwnProcessStart } from "./private-local-process-identity.js";
 import {
@@ -144,6 +145,8 @@ export async function runPrivateLocalService(
   // Publish the same discriminator in the pointer and the acquired owner row.
   const startedAt = await readOwnProcessStart();
   const release = await acquireServiceLock(directory, "owner");
+  // A crashed predecessor never ran its drain; its command groups are orphans.
+  await reapOrphanedProcessGroups(root.home);
   const serviceId = localServiceIds.service.generate();
   const version = privateLocalServiceVersion();
   const jsc = await import("bun:jsc");

@@ -195,5 +195,19 @@ export async function runPrivateLocalAcpStdio(
   const input = options.input ?? stdinByteStream();
   const output = options.output ?? stdoutByteStream();
   const connection = app.connect(acp.ndJsonStream(output, input));
-  await connection.closed;
+  // An editor that kills the agent sends a signal rather than closing stdin.
+  // Closing the connection releases every Session route it holds in the
+  // service; without it each closed editor leaves one private route behind.
+  const signals = ["SIGTERM", "SIGHUP", "SIGINT"] as const;
+  const stop = () => {
+    connection.close();
+  };
+  for (const signal of signals) process.on(signal, stop);
+  try {
+    await connection.closed;
+  } finally {
+    for (const signal of signals) process.off(signal, stop);
+    // A signal leaves stdin open and unread; release it so the process can end.
+    if (options.input === undefined) process.stdin.destroy();
+  }
 }

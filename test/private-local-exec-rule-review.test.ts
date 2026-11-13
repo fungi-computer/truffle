@@ -210,7 +210,7 @@ it("explains why shell and unrecognized Git options cannot offer Always allow", 
   );
   expect(unsupported.prefix).toBeUndefined();
   expect(unsupported.alwaysAllowUnavailableReason).toContain("option");
-  expect(unsupported.warning).toContain("Project hooks");
+  expect(unsupported.risk?.summary).toContain("Git hooks in this project");
   const unprotected = localExecEscapeReview(
     {
       executable: "git",
@@ -221,7 +221,7 @@ it("explains why shell and unrecognized Git options cannot offer Always allow", 
   );
   expect(unprotected.prefix).toBeUndefined();
   expect(unprotected.alwaysAllowUnavailableReason).toContain("protected");
-  expect(unprotected.warning).toContain("Project hooks");
+  expect(unprotected.risk?.summary).toContain("Git hooks in this project");
   const push = localExecEscapeReview(
     {
       executable: "git",

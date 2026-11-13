@@ -26,7 +26,6 @@ export type LocalApprovalReview = {
   kind: "exec" | "extension-install";
   argv?: string[];
   prefix?: readonly string[];
-  warning?: string;
   alwaysAllowCoverage?: string;
   alwaysAllowUnavailableReason?: string;
   risk?: { summary: string; detail: string };

@@ -26,6 +26,32 @@ const gitHookGrantSubcommands = new Set([
 ]);
 
 /** Build the host's review before the approval record is staged or displayed. */
+/** The one risk a Git escape carries, whether or not a reusable rule is offered. */
+function gitRisk(subcommand: string): NonNullable<LocalApprovalReview["risk"]> {
+  const hookCapable = gitHookGrantSubcommands.has(subcommand);
+  const summary =
+    (hookCapable
+      ? "Git hooks in this project can run code as you, and this Agent can add hooks."
+      : "This Git command will run outside the sandbox, as you.") +
+    (subcommand === "push"
+      ? " It can push, force-push or delete any branch."
+      : "") +
+    (["push", "fetch", "pull"].includes(subcommand)
+      ? " Remotes can use your SSH keys."
+      : "");
+  const detail =
+    (hookCapable
+      ? "Git runs hook scripts from the folder the project's hooksPath setting names. That setting must already exist, but this Agent can add hook files there. A configured fsmonitor program in this folder may also be writable by this Agent."
+      : summary) +
+    (subcommand === "push"
+      ? " A push grant can push all branches, force-update them or delete remote branches."
+      : "") +
+    (["push", "fetch", "pull"].includes(subcommand)
+      ? " Remote URLs can run ssh with your HOME and keys."
+      : "");
+  return { summary, detail };
+}
+
 export function localExecEscapeReview(
   request: {
     command?: string | undefined;
@@ -74,30 +100,7 @@ export function localExecEscapeReview(
       prefix[0] === "git"
         ? gitRuleCoverage(prefix[1] ?? "")
         : `Direct argv commands beginning ${JSON.stringify(prefix)} in this project; shell commands${prefix[0] === "fungi" ? " and extension installs" : ""} still ask.`;
-    if (prefix[0] === "git") {
-      const hookCapable = gitHookGrantSubcommands.has(prefix[1] ?? "");
-      const summary =
-        (hookCapable
-          ? "Git hooks in this project can run code as you, and this Agent can add hooks."
-          : "This Git command will run outside the sandbox, as you.") +
-        (prefix[1] === "push"
-          ? " It can push, force-push or delete any branch."
-          : "") +
-        (["push", "fetch", "pull"].includes(prefix[1] ?? "")
-          ? " Remotes can use your SSH keys."
-          : "");
-      const detail =
-        (hookCapable
-          ? "Git runs hook scripts from the folder the project's hooksPath setting names. That setting must already exist, but this Agent can add hook files there. A configured fsmonitor program in this folder may also be writable by this Agent."
-          : summary) +
-        (prefix[1] === "push"
-          ? " A push grant can push all branches, force-update them or delete remote branches."
-          : "") +
-        (["push", "fetch", "pull"].includes(prefix[1] ?? "")
-          ? " Remote URLs can run ssh with your HOME and keys."
-          : "");
-      review.risk = { summary, detail };
-    } else {
+    if (prefix[0] !== "git") {
       const summary =
         prefix[0] === "fungi"
           ? `Matching \`${prefix.join(" ")} …\` commands run outside the sandbox, as you. Extension installs still ask.`
@@ -105,19 +108,8 @@ export function localExecEscapeReview(
       review.risk = { summary, detail: summary };
     }
   }
-  if (request.executable === "git") {
-    const hookCapable = gitHookGrantSubcommands.has(request.args?.[0] ?? "");
-    review.warning =
-      (hookCapable
-        ? `Project hooks can run code as you ${review.prefix === undefined ? "when this command runs" : "under this grant"}. Only the hooksPath setting must pre-exist; this Agent can create missing hook files there. A configured fsmonitor path in the worktree may also be Agent-writable.`
-        : "This command runs as you outside the sandbox.") +
-      (request.args?.[0] === "push"
-        ? " This grant can push all branches, force-update them, or delete remote branches."
-        : "") +
-      (["push", "fetch", "pull"].includes(request.args?.[0] ?? "")
-        ? " Remote URLs can invoke ssh with your HOME and keys."
-        : "");
-  }
+  if (request.executable === "git")
+    review.risk = gitRisk(request.args?.[0] ?? "");
   if (review.kind === "extension-install")
     review.alwaysAllowUnavailableReason =
       "Extension installs require a fresh approval; no reusable rule applies.";
