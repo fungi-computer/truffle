@@ -161,18 +161,26 @@ export function createPrivateFungiMcpConnection(
                         const httpFailure = z
                           .looseObject({ status: z.number() })
                           .safeParse(cause);
+                        const status = httpFailure.success
+                          ? httpFailure.data.status
+                          : undefined;
+                        // A Hub 5xx may follow an accepted call: unknown outcome.
                         if (
-                          httpFailure.success &&
-                          httpFailure.data.status !== 401
+                          status !== undefined &&
+                          status !== 401 &&
+                          status !== 403 &&
+                          status < 500
                         )
                           throw cause;
-                        // A 401 is the Hub refusing before execution: the
-                        // outcome is known, and reconnecting will not help.
+                        // A 401 or 403 is the Hub refusing before execution
+                        // (credential revoked, or Team membership/permission
+                        // removed): the outcome is known, and reconnecting
+                        // will not help.
                         if (
                           cause instanceof UnauthorizedError ||
                           cause instanceof FungiSignInRequiredError ||
-                          (httpFailure.success &&
-                            httpFailure.data.status === 401)
+                          status === 401 ||
+                          status === 403
                         )
                           return {
                             content: [

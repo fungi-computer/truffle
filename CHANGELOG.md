@@ -1,5 +1,19 @@
 # @fungi.computer/truffle
 
+## 0.12.3
+
+### Patch Changes
+
+- Changes since 0.12.2:
+
+  - fix(local): state the end of a Computer connection on Hub 403 and 5xx
+
+- Updated dependencies
+  - @fungi.computer/shiitake@0.17.0
+  - @fungi.computer/graft@0.2.21
+  - @fungi.computer/shiitake-extensions@0.9.3
+  - @fungi.computer/zookeeper@0.0.28
+
 ## 0.12.2
 
 ### Patch Changes

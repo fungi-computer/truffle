@@ -1,3 +1,4 @@
+import { UnauthorizedError } from "@modelcontextprotocol/client";
 import { createMcpHandler, McpServer } from "@modelcontextprotocol/server";
 import { Mycelium, type Runtime } from "@fungi.computer/mycelium";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -186,11 +187,11 @@ it.each([false, true])(
       expect(decoded.local).toMatchObject({ content: "local result" });
       expect(localCalls).toBe(2);
       allowed = false;
-      await expect(invoke(runtime, "must not execute")).rejects.toThrow(
-        "The sandbox failed for an unrecognized reason",
-      );
+      expect(
+        JSON.stringify(await invoke(runtime, "must not execute")),
+      ).toContain("the code did not run");
       expect(calls).toHaveLength(2);
-      expect(localCalls).toBe(2);
+      expect(localCalls).toBe(3);
     } finally {
       await runtime.close();
       await localTools.processes.close();
@@ -350,3 +351,204 @@ it("reports a key revoked mid-session as a refused call, not an unknown outcome"
     await runtime.close();
   }
 });
+
+// pf-11 failure matrix. Each cell names the end state on both sides.
+type Fixture = Readonly<{
+  calls: string[];
+  fetchBehavior: {
+    current: (
+      request: Request,
+      method: string,
+    ) => Promise<Response | undefined>;
+  };
+  source: ReturnType<typeof createPrivateFungiMcpConnection>;
+}>;
+
+function matrixFixture(): Fixture {
+  const calls: string[] = [];
+  const handler = createMcpHandler(() => {
+    const server = new McpServer({ name: "fungi-mcp-test", version: "0.0.0" });
+    server.registerTool(
+      "execute",
+      { inputSchema: z.strictObject({ code: z.string() }) },
+      ({ code }) => {
+        calls.push(code);
+        return Promise.resolve({ content: [{ type: "text", text: code }] });
+      },
+    );
+    return server;
+  });
+  const fetchBehavior: Fixture["fetchBehavior"] = {
+    current: () => Promise.resolve(undefined),
+  };
+  const source = createPrivateFungiMcpConnection({
+    endpoint: new URL("https://hub.test/api/teams/team-selected/mcp"),
+    authProvider: { token: () => Promise.resolve("fixture") },
+    fetch: async (input, init) => {
+      const request = new Request(input.toString(), init);
+      const text = await request.clone().text();
+      const body = z
+        .looseObject({ method: z.string().optional() })
+        .safeParse(text === "" ? {} : JSON.parse(text));
+      const method = body.success ? (body.data.method ?? "") : "";
+      return (
+        (await fetchBehavior.current(request, method)) ?? handler.fetch(request)
+      );
+    },
+  });
+  return { calls, fetchBehavior, source };
+}
+
+function matrixRuntime(source: Fixture["source"]) {
+  return Mycelium.make({
+    sources: [source],
+    sandbox: {
+      execute: async (request) => {
+        const execute = request.bindings.fungiMcp?.execute;
+        if (execute === undefined) throw new Error("Fungi MCP unavailable");
+        return execute({ code: request.code });
+      },
+    },
+  });
+}
+
+it("matrix: network drop while idle fails the next connect as unreachable, then a later connect succeeds without replay", async () => {
+  const { calls, fetchBehavior, source } = matrixFixture();
+  const runtime = await matrixRuntime(source);
+  try {
+    fetchBehavior.current = () => Promise.reject(new TypeError("network down"));
+    await expect(
+      source.acquire({
+        signal: new AbortController().signal,
+        invalidate: () => undefined,
+      }),
+    ).rejects.toThrow(/Can't reach https:\/\/hub\.test/);
+    await expect(invoke(runtime, "while-down")).rejects.toThrow();
+    expect(calls).toEqual([]);
+    fetchBehavior.current = () => Promise.resolve(undefined);
+    expect(JSON.stringify(await invoke(runtime, "after-recovery"))).toContain(
+      "after-recovery",
+    );
+    expect(calls).toEqual(["after-recovery"]);
+  } finally {
+    await runtime.close();
+  }
+});
+
+it("matrix: Hub killed mid-call (5xx after accept) is not replayed and the next call reconnects", async () => {
+  const { calls, fetchBehavior, source } = matrixFixture();
+  const runtime = await matrixRuntime(source);
+  try {
+    fetchBehavior.current = (_request, method) => {
+      if (method !== "tools/call") return Promise.resolve(undefined);
+      fetchBehavior.current = () => Promise.resolve(undefined);
+      return Promise.resolve(new Response(null, { status: 503 }));
+    };
+    const interrupted = JSON.stringify(await invoke(runtime, "hub-died"));
+    expect(interrupted).toContain("outcome unknown");
+    expect(calls).toEqual([]);
+    expect(
+      JSON.stringify(await invoke(runtime, "after-hub-restart")),
+    ).toContain("after-hub-restart");
+    expect(calls).toEqual(["after-hub-restart"]);
+  } finally {
+    await runtime.close();
+  }
+});
+
+it("matrix: Team membership revoked mid-session (403) is a refusal, and reconnecting stays refused", async () => {
+  const { calls, fetchBehavior, source } = matrixFixture();
+  const runtime = await matrixRuntime(source);
+  try {
+    fetchBehavior.current = (_request, method) =>
+      Promise.resolve(
+        method === "tools/call"
+          ? new Response(null, { status: 403 })
+          : undefined,
+      );
+    const refused = JSON.stringify(await invoke(runtime, "after-removal"));
+    expect(refused).not.toContain("outcome unknown");
+    expect(refused).toContain("did not run");
+    expect(calls).toEqual([]);
+    fetchBehavior.current = () =>
+      Promise.resolve(new Response(null, { status: 403 }));
+    await expect(
+      source.acquire({
+        signal: new AbortController().signal,
+        invalidate: () => undefined,
+      }),
+    ).rejects.toThrow();
+    expect(calls).toEqual([]);
+  } finally {
+    await runtime.close();
+  }
+});
+
+it("matrix: credential revoked before reconnect refuses the connection with a sign-in instruction", async () => {
+  const { calls, fetchBehavior, source } = matrixFixture();
+  fetchBehavior.current = () =>
+    Promise.resolve(new Response(null, { status: 401 }));
+  await expect(
+    source.acquire({
+      signal: new AbortController().signal,
+      invalidate: () => undefined,
+    }),
+  ).rejects.toBeInstanceOf(UnauthorizedError);
+  expect(calls).toEqual([]);
+});
+
+it("matrix: Local side cancelled mid-call tells the Hub it cancelled, never replays, and the next call reconnects", async () => {
+  const { calls, fetchBehavior, source } = matrixFixture();
+  const entered = Promise.withResolvers<undefined>();
+  const methods: string[] = [];
+  fetchBehavior.current = (request, method) => {
+    methods.push(method);
+    if (method !== "tools/call") return Promise.resolve(undefined);
+    entered.resolve(undefined);
+    fetchBehavior.current = (_next, nextMethod) => {
+      methods.push(nextMethod);
+      return Promise.resolve(undefined);
+    };
+    return new Promise<Response>((_resolve, reject) => {
+      request.signal.addEventListener("abort", () => {
+        reject(new Error("aborted"));
+      });
+    });
+  };
+  const runtime = await matrixRuntime(source);
+  try {
+    const cancel = new AbortController();
+    const lease = await runtime.acquire();
+    try {
+      const prepared = await Effect.runPromise(
+        lease.executeTool.prepare({
+          type: "toolCall",
+          id: "local-cancel-proof",
+          name: "execute",
+          arguments: { code: "local-cancelled" },
+        }),
+      );
+      const pending = expect(
+        Effect.runPromise(Stream.runCollect(prepared.execute()), {
+          signal: cancel.signal,
+        }),
+      ).rejects.toBeDefined();
+      await entered.promise;
+      cancel.abort();
+      await pending;
+    } finally {
+      await lease.release();
+    }
+    // The maintained client states cancellation to the Hub as an MCP
+    // notification; the Hub, not Local, owns whether the operation had begun.
+    expect(methods).toContain("notifications/cancelled");
+    expect(calls).toEqual([]);
+    fetchBehavior.current = () => Promise.resolve(undefined);
+    expect(JSON.stringify(await invoke(runtime, "after-cancel"))).toContain(
+      "after-cancel",
+    );
+    expect(calls).toEqual(["after-cancel"]);
+  } finally {
+    await runtime.close();
+  }
+}, 5000);
