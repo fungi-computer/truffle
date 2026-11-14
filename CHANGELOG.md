@@ -1,5 +1,13 @@
 # @fungi.computer/truffle
 
+## 0.12.6
+
+### Patch Changes
+
+- Changes since 0.12.5:
+
+  - fix(local): cap private ui routes and evict the oldest idle attachment
+
 ## 0.12.5
 
 ### Patch Changes

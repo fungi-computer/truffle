@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 
+import { maxPrivateRoutes } from "../src/private-local-service-listener.js";
 import { capturePrivateLocalExecPath } from "../src/private-local-exec-path.js";
 import {
   readServiceRecord,
@@ -304,3 +305,66 @@ for (const departure of ["SIGTERM", "SIGHUP", "stdin-eof"] as const)
     },
     60_000,
   );
+
+it.skipIf(process.platform !== "linux")(
+  "a service keeps at most the cap of private routes when clients attach and are killed without detaching",
+  async () => {
+    const clientPath = capturePrivateLocalExecPath(
+      process.env.PATH ?? "",
+      process.cwd(),
+    );
+    const home = await mkdtemp(join(tmpdir(), "fungi-route-cap-"));
+    const directory = await serviceDirectory(join(home, ".fungi", "service"));
+    const project = join(home, "project");
+    await mkdir(project);
+    const service = spawn([process.execPath, fixture, directory, "20"], {
+      cwd: home,
+      env: { PATH: process.env.PATH, HOME: home },
+      stdout: "inherit",
+      stderr: "inherit",
+    });
+    try {
+      let record = await readServiceRecord(directory);
+      for (let attempt = 0; record?.pid !== service.pid; attempt += 1) {
+        if (attempt >= 400) throw new Error("The service did not start");
+        await Bun.sleep(25);
+        record = await readServiceRecord(directory);
+      }
+      const base = `${record.baseUrl}/service/${record.serviceId}`;
+      const databasePath = join(project, "agent.sqlite");
+      new DatabaseSync(databasePath).close();
+      const routes: string[] = [];
+      const alive = async (route: string) =>
+        (await fetch(`${base}${route}/sandbox`)).status !== 404;
+      // Each attach is a client that vanishes: no DELETE, no watch.
+      for (let index = 0; index < maxPrivateRoutes + 8; index += 1) {
+        const response = await fetch(`${base}/select`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            invocationRoot: project,
+            databasePath,
+            clientPath,
+          }),
+        });
+        expect(response.status, await response.clone().text()).toBe(200);
+        routes.push(selectedSchema.parse(await response.json()).routePath);
+      }
+      const live: boolean[] = [];
+      for (const route of routes) live.push(await alive(route));
+      // The oldest idle attachments were closed; the newest cap remain.
+      expect(live.filter(Boolean).length).toBe(maxPrivateRoutes);
+      expect(live.slice(0, 8).some(Boolean)).toBe(false);
+      expect(live.slice(8).every(Boolean)).toBe(true);
+      service.kill("SIGTERM");
+      expect(await service.exited).toBe(0);
+    } finally {
+      if (service.exitCode === null) {
+        service.kill("SIGKILL");
+        await service.exited;
+      }
+      await rm(home, { recursive: true, force: true });
+    }
+  },
+  60_000,
+);

@@ -40,6 +40,7 @@ import { Hono } from "hono";
 import { correlationKey } from "@fungi.computer/cairn";
 import {
   createLocalUiAttachment,
+  isLocalUiAttachmentIdle,
   type LocalUiAttachment,
 } from "./private-local-ui-attachment.js";
 import { localServiceIds } from "./private-local-service-ids.js";
@@ -79,6 +80,9 @@ import {
 } from "./private-local-service-discovery.js";
 
 type SelectionInput = z.infer<typeof selectionSchema>;
+
+/** Private UI routes kept at once; see `evictOldestIdlePrivateRoute`. */
+export const maxPrivateRoutes = 64;
 
 export function createPrivateLocalServiceShutdown(input: {
   closeOwners: () => Promise<void>;
@@ -256,6 +260,7 @@ export async function runPrivateLocalService(
     string,
     {
       path: string;
+      attachment: LocalUiAttachment | undefined;
       fetch: (request: Request) => Response | Promise<Response>;
       effectiveModel: (
         sessionId: string,
@@ -271,6 +276,22 @@ export async function runPrivateLocalService(
   /** Identity-only pointer; live routes add current diagnostics separately. */
   let record: ServiceRecord | undefined;
   let recordWritten = false;
+  /**
+   * A client killed without its DELETE never closes its attachment, so private
+   * routes are capped: at the cap the oldest idle attachment closes through its
+   * ordinary `close()`, whose abort listener removes the route.
+   */
+  const evictOldestIdlePrivateRoute = () => {
+    let privateRoutes = 0;
+    let oldestIdle: LocalUiAttachment | undefined;
+    for (const route of routes.values()) {
+      if (route.attachment === undefined) continue;
+      privateRoutes += 1;
+      if (oldestIdle === undefined && isLocalUiAttachmentIdle(route.attachment))
+        oldestIdle = route.attachment;
+    }
+    if (privateRoutes >= maxPrivateRoutes) oldestIdle?.close();
+  };
   /**
    * Mount an Agent's route by store, not by its open runtime: a request on a
    * route reopens an Agent the service released while it was idle.
@@ -293,6 +314,7 @@ export async function runPrivateLocalService(
       };
       mounted = {
         path,
+        attachment,
         fetch: (request) => {
           const url = new URL(request.url);
           url.pathname = url.pathname.slice(routePrefix.length) || "/";
@@ -315,6 +337,7 @@ export async function runPrivateLocalService(
         sandboxStatus: (signal) => owners.sandboxStatus(target, signal),
       };
       const key = attachment === undefined ? selected.databasePath : path;
+      if (attachment !== undefined) evictOldestIdlePrivateRoute();
       routes.set(key, mounted);
       attachment?.signal.addEventListener(
         "abort",

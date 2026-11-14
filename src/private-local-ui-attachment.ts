@@ -35,6 +35,13 @@ export function createLocalUiAttachment(
   return attachment;
 }
 
+/** True while no watch holds the attachment, so closing it cuts off no client. */
+export function isLocalUiAttachmentIdle(
+  attachment: LocalUiAttachment,
+): boolean {
+  return (attachments.get(attachment)?.watches ?? 0) === 0;
+}
+
 export function startLocalUiWatch(
   attachment: LocalUiAttachment,
   sessionId: string,
