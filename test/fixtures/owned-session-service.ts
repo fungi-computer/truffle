@@ -1,10 +1,12 @@
 // The real Local service listener, owning one Shiitake Agent store, run as its
 // own process. In "hang" mode the Agent's close never settles, so SIGTERM
 // starts a drain that cannot finish: the shape of client-surfaces-v1-68.
+import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import { Shiitake } from "@fungi.computer/shiitake";
 import { createPrivateSqliteOwner } from "../../src/private-sqlite-owner.js";
+import { createPrivateLocalComputerProcesses } from "../../src/private-local-computer-processes.js";
 import { createPrivateLocalRuntimeHost } from "../../src/private-local-runtime-host.js";
 import { runPrivateLocalService } from "../../src/private-local-service-listener.js";
 import { serviceDirectory } from "../../src/private-local-service-discovery.js";
@@ -15,7 +17,11 @@ import {
 } from "./effective-model.js";
 
 const [directory, databasePath, mode] = z
-  .tuple([z.string().min(1), z.string().min(1), z.enum(["hang", "drain"])])
+  .tuple([
+    z.string().min(1),
+    z.string().min(1),
+    z.enum(["hang", "drain", "hang-command"]),
+  ])
   .parse(process.argv.slice(2));
 
 // Report the moment SIGTERM arrives, so the test measures the grace from it.
@@ -24,6 +30,17 @@ process.on("SIGTERM", () => {
 });
 
 await runPrivateLocalService(await serviceDirectory(directory), async () => {
+  if (mode === "hang-command") {
+    // A command the Agent started: its own process group, recorded for a stop.
+    const root = dirname(databasePath);
+    await createPrivateLocalComputerProcesses(root, process.env.HOME)
+      .scope("fixture")
+      .start(
+        { kind: "shell", command: "sleep 600" },
+        root,
+        process.env.PATH ?? "",
+      );
+  }
   const database = new DatabaseSync(databasePath);
   const agent = await Shiitake.make({
     store: createPrivateSqliteOwner(database),
@@ -50,7 +67,7 @@ await runPrivateLocalService(await serviceDirectory(directory), async () => {
     name: "stop-agent",
     bindSessionPath: () => true,
     close:
-      mode === "hang"
+      mode !== "drain"
         ? () => new Promise<void>(() => undefined)
         : async () => {
             await agent.close();

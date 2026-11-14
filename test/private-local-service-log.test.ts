@@ -86,7 +86,7 @@ describe("diagnostics resource lifecycle", () => {
       }),
       readMemory: () => ({ rss: 300, heap }),
     });
-    lifecycle.ready("fixture-service");
+    lifecycle.ready("fixture-service", 0);
     lifecycle.recoveryDisabled("read-failed");
     const first = lifecycle.getStatus();
     expect(first).toEqual({
@@ -137,7 +137,7 @@ describe("diagnostics resource lifecycle", () => {
       openWriter: () => ({ writeLine, close }),
       readMemory,
     });
-    lifecycle.ready("fixture-service");
+    lifecycle.ready("fixture-service", 0);
     failWrites = true;
     expect(() =>
       vi.advanceTimersByTime(serviceLogSampleIntervalMs),
@@ -150,7 +150,7 @@ describe("diagnostics resource lifecycle", () => {
     });
     expect(vi.getTimerCount()).toBe(0);
     vi.advanceTimersByTime(24 * 60 * 60 * 1000);
-    lifecycle.ready("fixture-service");
+    lifecycle.ready("fixture-service", 0);
     lifecycle.failure(localFailureMetadata("fixture", new Error("private")));
     lifecycle.stopping("SIGTERM");
     lifecycle.close();
@@ -211,8 +211,8 @@ describe("diagnostics resource lifecycle", () => {
       }),
       readMemory,
     });
-    lifecycle.ready("fixture-service");
-    lifecycle.ready("fixture-service");
+    lifecycle.ready("fixture-service", 0);
+    lifecycle.ready("fixture-service", 0);
     expect(vi.getTimerCount()).toBe(1);
     lifecycle.stopping("SIGTERM");
     lifecycle.stopping("SIGINT");
@@ -223,7 +223,12 @@ describe("diagnostics resource lifecycle", () => {
     expect(readMemory).not.toHaveBeenCalled();
     expect(lines.map((line) => z.json().parse(JSON.parse(line)))).toEqual([
       { ...envelope, event: "starting" },
-      { ...envelope, event: "ready", serviceId: "fixture-service" },
+      {
+        ...envelope,
+        event: "ready",
+        serviceId: "fixture-service",
+        endedCommands: 0,
+      },
       { ...envelope, event: "stopping", reason: "SIGTERM" },
       { ...envelope, event: "stopped", reason: "SIGTERM" },
     ]);
@@ -268,7 +273,7 @@ describe("diagnostics resource lifecycle", () => {
       state: "failed",
       code: "sink-write-failed",
     });
-    lifecycle.ready("fixture-service");
+    lifecycle.ready("fixture-service", 0);
     lifecycle.close();
     expect(closeWriter).toHaveBeenCalledOnce();
   });

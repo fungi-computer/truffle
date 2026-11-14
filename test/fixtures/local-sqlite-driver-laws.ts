@@ -6,8 +6,8 @@ import { join } from "node:path";
 import {
   createPrivateSqliteOwner,
   openPrivateWritableSqliteDatabase,
-  type PrivateSqliteFailureCode,
 } from "../../src/private-sqlite-owner.js";
+import { type PrivateSqliteFailureCode } from "../../src/private-sqlite-failure.js";
 
 /** The production opener selects the real driver of the current runtime. */
 export function assertLocalSqliteNestedTransactions() {

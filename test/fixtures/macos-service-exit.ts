@@ -50,7 +50,7 @@ try {
   if (mode === "stop") {
     assert.deepEqual(
       await createPrivateLocalServiceManager({ directory }).stop(),
-      { kind: "stopped" },
+      { kind: "stopped", endedCommands: 0 },
     );
   } else {
     child.kill("SIGTERM");

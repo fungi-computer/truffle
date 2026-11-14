@@ -1052,7 +1052,7 @@ it.runIf(process.platform === "linux")(
         },
         extensions: tools.extensions,
         tools: tools.tools,
-        instructions: createPrivateLocalInstructionSource(tools.port),
+        instructions: createPrivateLocalInstructionSource(),
         model: {
           acquire: () =>
             Promise.resolve({

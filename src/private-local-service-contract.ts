@@ -29,8 +29,12 @@ export type PrivateLocalServiceStatus = Readonly<{
 }>;
 
 export type PrivateLocalServiceStopResult =
-  /** `killed`: it did not exit within five seconds of SIGTERM. */
-  | Readonly<{ kind: "stopped" | "killed" }>
+  /**
+   * `killed`: it did not exit within five seconds of SIGTERM. `endedCommands`
+   * counts leftover Agent commands the stop itself had to end; a graceful drain
+   * ends its commands itself and reports none.
+   */
+  | Readonly<{ kind: "stopped" | "killed"; endedCommands: number }>
   | Readonly<{ kind: "not-running"; recordCleaned: boolean }>
   | Readonly<{ kind: "replaced" }>;
 

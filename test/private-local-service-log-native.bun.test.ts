@@ -85,7 +85,7 @@ test.skipIf(process.platform === "win32")(
     try {
       diagnostics = openDiagnostics(root);
       expect(diagnostics.getStatus()).toEqual({ state: "active" });
-      diagnostics.ready("native-short-write");
+      diagnostics.ready("native-short-write", 0);
       // Controlled SDK result, not an OS short-write claim: the maintained
       // writeSync contract permits a byte count smaller than the supplied line.
       // Startup/ready and descriptor close still use the real native filesystem.
@@ -104,7 +104,7 @@ test.skipIf(process.platform === "win32")(
       const failedSize = statSync(join(root, "service.jsonl")).size;
       for (let sequence = 1; sequence < 10; sequence++)
         emitBoundedRecord(diagnostics, sequence);
-      diagnostics.ready("cannot-restart");
+      diagnostics.ready("cannot-restart", 0);
       diagnostics.stopping("SIGTERM");
       diagnostics.close();
       diagnostics.close();
@@ -128,7 +128,7 @@ test.skipIf(process.platform === "win32")(
     try {
       diagnostics = openDiagnostics(root);
       expect(diagnostics.getStatus()).toEqual({ state: "active" });
-      diagnostics.ready("native-rename-fault");
+      diagnostics.ready("native-rename-fault", 0);
       // Change the destination AFTER open validation. A real rename from the
       // regular .2 file to a nonempty .3 directory must fail at the native API.
       await writeFile(join(root, "service.jsonl.2"), "", { mode: 0o600 });

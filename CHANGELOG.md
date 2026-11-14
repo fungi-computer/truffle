@@ -1,5 +1,30 @@
 # @fungi.computer/truffle
 
+## 0.12.0
+
+### Minor Changes
+
+- Changes since 0.11.0:
+
+  - fix(local): do not delay the start reply for the command group record
+  - feat(local): report how many leftover commands fungi stop ended
+  - feat(home): load AGENTS.md and SYSTEM.md from Home
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.13.0
+  - @fungi.computer/shiitake-extensions@0.9.0
+  - @fungi.computer/shiitake@0.16.0
+  - @fungi.computer/nacre@0.6.1
+  - @fungi.computer/mycelium@0.3.11
+  - @fungi.computer/graft@0.2.18
+  - @fungi.computer/zookeeper@0.0.25
+  - @fungi.computer/knapsack@0.4.12
+  - @fungi.computer/veil@0.7.3
+
 ## 0.11.0
 
 ### Minor Changes

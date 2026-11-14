@@ -27,9 +27,11 @@ import type {
 import {
   createPrivateSqliteOwner,
   openPrivateReadOnlySqliteDatabase,
+} from "./private-sqlite-owner.js";
+import {
   privateSqliteFailureCode,
   type PrivateSqliteFailureCode,
-} from "./private-sqlite-owner.js";
+} from "./private-sqlite-failure.js";
 
 export type LocalSummary = StoredSessionSummary &
   Readonly<{ databasePath: string; sessionId: string }>;

@@ -37,7 +37,6 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
-import { createLocalSkillSource } from "../src/local-skill-source.js";
 import { LocalStoreSchemaError } from "../src/private-local-service.js";
 import {
   readPrivateLocalAgentProfile,
@@ -55,7 +54,6 @@ import { loopContract } from "@fungi.computer/shiitake-extensions/loop";
 import { createPrivateModels } from "../src/local-models.js";
 import { openAIAccessToken } from "./openai-fixtures.js";
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
-import { createPrivateInvocationFilesPort } from "../src/private-invocation-files.js";
 import { createPrivateSqliteOwner } from "../src/private-sqlite-owner.js";
 import { acquireNodeStoreLease } from "@fungi.computer/shiitake/node";
 import {
@@ -1755,82 +1753,24 @@ describe("private local instructions and model selection", () => {
       label: "Shiitake · GPT-5.6 Sol (medium) · Sign in required",
     });
   });
-  it("captures authored instructions before one present or absent root AGENTS.md", async () => {
+  it("keeps the system tier fixed whatever the project files say", async () => {
     const root = await temporaryDirectory("instructions");
-    const source = createPrivateLocalInstructionSource(
-      await createPrivateInvocationFilesPort(root),
-    );
-    const absent = await source.load({
-      sessionId: "main",
-      commandId: "instruction-1",
-      signal: new AbortController().signal,
-    });
-    expect(absent.text).toContain(
+    const source = createPrivateLocalInstructionSource();
+    const load = (commandId: string) =>
+      source.load({
+        sessionId: "main",
+        commandId,
+        signal: new AbortController().signal,
+      });
+    const before = await load("instruction-1");
+    expect(before.text).toMatch(/^You are the local coding agent\./u);
+    expect(before.text).toContain(
       "After a run fails, each new user message is a new instruction: retry or continue the failed task only when the user explicitly asks, and ask what they want when the message is ambiguous.",
     );
-    await writeFile(join(root, "AGENTS.md"), "\uFEFFproject instructions\r\n");
-    const present = await source.load({
-      sessionId: "main",
-      commandId: "instruction-2",
-      signal: new AbortController().signal,
-    });
-
-    expect(absent.text).toMatch(/^You are the local coding agent\./u);
-    expect(present.text).toContain(
-      "After a run fails, each new user message is a new instruction: retry or continue the failed task only when the user explicitly asks, and ask what they want when the message is ambiguous.",
-    );
-    expect(present.text).toContain("\uFEFFproject instructions");
-    expect(
-      present.text.indexOf("You are the local coding agent."),
-    ).toBeLessThan(present.text.indexOf("project instructions"));
-    expect(present.revision).not.toBe(absent.revision);
-    await writeFile(join(root, "AGENTS.md"), "changed instructions\n");
-    const changed = await source.load({
-      sessionId: "main",
-      commandId: "instruction-3",
-      signal: new AbortController().signal,
-    });
-    expect(changed.revision).not.toBe(present.revision);
-  });
-
-  it("keeps skill changes outside the AGENTS instruction revision", async () => {
-    const root = await temporaryDirectory("skills-revision");
-    const skillRoot = join(root, ".agents", "skills", "local-proof");
-    await mkdir(skillRoot, { recursive: true });
-    const writeSkill = (description: string) =>
-      writeFile(
-        join(skillRoot, "SKILL.md"),
-        `---\nname: local-proof\ndescription: ${description}\n---\nprivate body\n`,
-      );
-    await writeSkill("First description");
-    const source = createPrivateLocalInstructionSource(
-      await createPrivateInvocationFilesPort(root),
-    );
-    const skills = createLocalSkillSource({
-      cwd: root,
-      home: root,
-      hidden: () => [],
-    });
-    const signal = new AbortController().signal;
-    const first = await source.load({
-      sessionId: "main",
-      commandId: "skill-instructions",
-      signal,
-    });
-    expect(first.text).not.toContain("local-proof");
-    expect((await skills.catalog(signal)).skills).toContainEqual(
-      expect.objectContaining({ description: "First description" }),
-    );
-    await writeSkill("Changed description");
-    const second = await source.load({
-      sessionId: "main",
-      commandId: "skill-instructions",
-      signal,
-    });
-    expect(second).toEqual(first);
-    expect((await skills.catalog(signal)).skills).toContainEqual(
-      expect.objectContaining({ description: "Changed description" }),
-    );
+    await writeFile(join(root, "AGENTS.md"), "project instructions\n");
+    const after = await load("instruction-2");
+    expect(after).toEqual(before);
+    expect(after.text).not.toContain("project instructions");
   });
 
   it("puts extension skills in a real local Session and loads through its run door", async () => {
@@ -1845,6 +1785,7 @@ describe("private local instructions and model selection", () => {
       join(skillRoot, "references", "REFERENCE.md"),
       "session reference body\n",
     );
+    await writeFile(join(root, "AGENTS.md"), "\uFEFFproject guidance\r\n");
 
     const faux = fauxModel([], { tokenSize: { min: 1, max: 1 } });
     const requests: Context[] = [];
@@ -1873,7 +1814,7 @@ describe("private local instructions and model selection", () => {
       store: createPrivateSqliteOwner(database),
       extensions: localTools.extensions,
       runtime,
-      instructions: createPrivateLocalInstructionSource(localTools.port),
+      instructions: createPrivateLocalInstructionSource(),
       model: {
         acquire: () => {
           return Promise.resolve({
@@ -1903,6 +1844,7 @@ describe("private local instructions and model selection", () => {
       const systemPrompt = getSystemMessageText(systemMessage);
       for (const section of [
         "[extension:botanical-home.home]",
+        "[extension:botanical-home.instructions]",
         "[extension:botanical-session-goal.goal]",
         "[extension:botanical-session-loop.loop]",
         "[extension:botanical-session-plan.plan]",
@@ -1918,6 +1860,17 @@ describe("private local instructions and model selection", () => {
       );
       expect(systemPrompt).not.toContain("<location>");
       expect(systemPrompt).not.toContain("secret session skill body");
+      // AGENTS.md arrives through Home, after the fixed host text, not in the system tier.
+      expect(
+        systemPrompt.indexOf("You are the local coding agent."),
+      ).toBeLessThan(systemPrompt.indexOf("## AGENTS.md\nproject guidance"));
+      expect(
+        systemPrompt.indexOf("[extension:botanical-home.instructions]"),
+      ).toBeLessThan(systemPrompt.indexOf("## AGENTS.md\nproject guidance"));
+      // The host's skills extension lists skills once; Home does not repeat them.
+      expect(systemPrompt.split("Prove the real local Session")).toHaveLength(
+        2,
+      );
       expect(requests[1]?.messages).toContainEqual(
         expect.objectContaining({
           role: "toolResult",
@@ -1929,60 +1882,6 @@ describe("private local instructions and model selection", () => {
       await agent.close();
       database.close();
     }
-  });
-
-  it("keeps oversized, unreadable, and escaping AGENTS.md failures visible", async () => {
-    const root = await temporaryDirectory("instruction-errors");
-    const source = createPrivateLocalInstructionSource(
-      await createPrivateInvocationFilesPort(root),
-    );
-    await writeFile(join(root, "AGENTS.md"), "x".repeat(128 * 1_024 + 1));
-    await expect(
-      source.load({
-        sessionId: "main",
-        commandId: "instruction-4",
-        signal: new AbortController().signal,
-      }),
-    ).rejects.toThrow("128 KiB instruction bound");
-    await writeFile(join(root, "AGENTS.md"), "x".repeat(32_001));
-    await expect(
-      source.load({
-        sessionId: "main",
-        commandId: "instruction-5",
-        signal: new AbortController().signal,
-      }),
-    ).rejects.toThrow("32000-byte snapshot bound");
-
-    await rm(join(root, "AGENTS.md"));
-    await mkdir(join(root, "AGENTS.md"));
-    await expect(
-      source.load({
-        sessionId: "main",
-        commandId: "instruction-6",
-        signal: new AbortController().signal,
-      }),
-    ).rejects.toThrow("not a file");
-    await rm(join(root, "AGENTS.md"), { recursive: true });
-    await writeFile(join(root, "AGENTS.md"), Uint8Array.of(0xff));
-    await expect(
-      source.load({
-        sessionId: "main",
-        commandId: "instruction-7",
-        signal: new AbortController().signal,
-      }),
-    ).rejects.toThrow("not valid UTF-8");
-    await rm(join(root, "AGENTS.md"));
-    const outside = await temporaryDirectory("outside");
-    const outsideAgents = join(outside, "AGENTS.md");
-    await writeFile(outsideAgents, "outside");
-    await symlink(outsideAgents, join(root, "AGENTS.md"));
-    await expect(
-      source.load({
-        sessionId: "main",
-        commandId: "instruction-8",
-        signal: new AbortController().signal,
-      }),
-    ).rejects.toThrow("outside the invocation root");
   });
 
   it("rejects unsupported selected-model reasoning before opening local storage", async () => {
@@ -2177,7 +2076,7 @@ it("round-trips Home URI results through Local's contained Files port", async ()
     store: createPrivateSqliteOwner(database),
     extensions: local.extensions,
     runtime: createPrivateLocalRuntimeHost(),
-    instructions: createPrivateLocalInstructionSource(local.port),
+    instructions: createPrivateLocalInstructionSource(),
     model: {
       acquire: () =>
         Promise.resolve({

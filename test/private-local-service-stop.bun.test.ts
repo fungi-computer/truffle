@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -28,6 +28,17 @@ const drainTimeoutRecord = z.object({
   unfinishedOwnerCount: z.number().int(),
 });
 
+const groupRecord = z.looseObject({ groupId: z.number().int() });
+
+function groupAlive(groupId: number): boolean {
+  try {
+    process.kill(-groupId, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function exists(path: string) {
   try {
     await stat(path);
@@ -40,7 +51,7 @@ async function exists(path: string) {
 }
 
 /** A real listener process owning an open Session, under a throwaway HOME. */
-async function serviceOwningASession(mode: "hang" | "drain") {
+async function serviceOwningASession(mode: "hang" | "drain" | "hang-command") {
   const home = await mkdtemp(join(tmpdir(), "fungi-stop-home-"));
   const directory = await serviceDirectory(join(home, ".fungi", "service"));
   const root = join(home, "project");
@@ -79,7 +90,7 @@ async function serviceOwningASession(mode: "hang" | "drain") {
       if (record === undefined) await sleep(25);
     }
     if (record === undefined) throw new Error("Fixture service did not start");
-    const manager = createPrivateLocalServiceManager({ directory });
+    const manager = createPrivateLocalServiceManager({ directory, home });
     // Stop after active Session ownership: the service now owns this store.
     const connection = await manager.connect({
       invocationRoot: root,
@@ -88,6 +99,7 @@ async function serviceOwningASession(mode: "hang" | "drain") {
     });
     await connection.close();
     return {
+      home,
       directory,
       record,
       manager,
@@ -109,6 +121,35 @@ async function expectCleared(directory: string, record: ServiceRecord) {
 }
 
 describe("fungi stop", () => {
+  it("reports and ends the Agent command a SIGKILLed hung service left running", async () => {
+    const service = await serviceOwningASession("hang-command");
+    let groupId: number | undefined;
+    try {
+      const records = join(service.home, ".fungi", "process-groups");
+      const [name] = await readdir(records);
+      if (name === undefined)
+        throw new Error("The service recorded no command");
+      groupId = groupRecord.parse(
+        JSON.parse(await readFile(join(records, name), "utf8")),
+      ).groupId;
+      expect(groupAlive(groupId)).toBe(true);
+      // Freeze the service so only the stop's SIGKILL fallback can end it.
+      service.child.kill("SIGSTOP");
+      expect(await service.manager.stop()).toEqual({
+        kind: "killed",
+        endedCommands: 1,
+      });
+      for (let attempt = 0; attempt < 100 && groupAlive(groupId); attempt += 1)
+        await sleep(20);
+      expect(groupAlive(groupId)).toBe(false);
+      expect(await readdir(records)).toEqual([]);
+    } finally {
+      if (groupId !== undefined && groupAlive(groupId))
+        process.kill(-groupId, "SIGKILL");
+      await service.close();
+    }
+  }, 30_000);
+
   it("a listener with a stuck Agent exits on its own drain deadline and names that owner", async () => {
     const service = await serviceOwningASession("hang");
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -154,7 +195,10 @@ describe("fungi stop", () => {
   it("stops a well-behaved service on SIGTERM without SIGKILL and clears service.json, its owner lock and its port", async () => {
     const service = await serviceOwningASession("drain");
     try {
-      expect(await service.manager.stop()).toEqual({ kind: "stopped" });
+      expect(await service.manager.stop()).toEqual({
+        kind: "stopped",
+        endedCommands: 0,
+      });
       // Well inside the 5 s grace, counted from SIGTERM itself.
       expect(await service.sinceSigterm()).toBeLessThan(4_000);
       expect(service.child.signalCode).toBeNull();
@@ -171,7 +215,10 @@ describe("fungi stop", () => {
       // drain deadline can run. The external SIGKILL fallback still matters.
       service.child.kill("SIGSTOP");
       const started = Date.now();
-      expect(await service.manager.stop()).toEqual({ kind: "killed" });
+      expect(await service.manager.stop()).toEqual({
+        kind: "killed",
+        endedCommands: 0,
+      });
       const elapsed = Date.now() - started;
       expect(elapsed).toBeGreaterThanOrEqual(4_900);
       expect(elapsed).toBeLessThan(7_000);
@@ -180,7 +227,10 @@ describe("fungi stop", () => {
       // The next client starts a fresh service without manual intervention.
       const next = await service.manager.start();
       expect(next.serviceId).not.toBe(service.record.serviceId);
-      expect(await service.manager.stop()).toEqual({ kind: "stopped" });
+      expect(await service.manager.stop()).toEqual({
+        kind: "stopped",
+        endedCommands: 0,
+      });
     } finally {
       await service.close();
     }

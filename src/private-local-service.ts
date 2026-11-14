@@ -338,11 +338,11 @@ export function createPrivateLocalServiceManager(
       );
     const outcome = await terminatePrivateLocalService(directory, owner);
     // A SIGKILLed service never ran its owner drain; end its command groups.
-    await reapOrphanedProcessGroups(root.home, owner);
+    const endedCommands = await reapOrphanedProcessGroups(root.home, owner);
     // A killed process cannot remove its own record or lifetime lock.
     await removeOwnedServiceRecord(directory, lifecycle.serviceId);
     await clearAbandonedServiceOwner(directory);
-    return { kind: outcome };
+    return { kind: outcome, endedCommands };
   }
   /**
    * Reuse the registered service when this client can, otherwise stop it so a

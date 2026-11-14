@@ -233,7 +233,7 @@ describe("fungi stop signals only the verified lease owner", () => {
       );
       expect(
         await createPrivateLocalServiceManager({ directory }).stop(),
-      ).toEqual({ kind: "stopped" });
+      ).toEqual({ kind: "stopped", endedCommands: 0 });
       await owner.exited;
       expect(owner.exitCode).toBe(0);
       expect(await readServiceRegistration(directory)).toBeUndefined();

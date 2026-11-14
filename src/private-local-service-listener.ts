@@ -47,7 +47,7 @@ import writeFileAtomic from "write-file-atomic";
 import { z } from "zod";
 import { privateLocalExecPathSchema } from "./private-local-exec-path.js";
 import { listPrivateModels } from "./local-models.js";
-import { privateSqliteFailureCode } from "./private-sqlite-owner.js";
+import { privateSqliteFailureCode } from "./private-sqlite-failure.js";
 import type { PrivateLocalEffectiveModel } from "./private-local-effective-model.js";
 import { reapOrphanedProcessGroups } from "./private-local-process-groups.js";
 import { openPrivateLocalBunServer } from "./private-bun-shiitake-host.js";
@@ -146,7 +146,7 @@ export async function runPrivateLocalService(
   const startedAt = await readOwnProcessStart();
   const release = await acquireServiceLock(directory, "owner");
   // A crashed predecessor never ran its drain; its command groups are orphans.
-  await reapOrphanedProcessGroups(root.home);
+  const endedCommands = await reapOrphanedProcessGroups(root.home);
   const serviceId = localServiceIds.service.generate();
   const version = privateLocalServiceVersion();
   const jsc = await import("bun:jsc");
@@ -651,7 +651,7 @@ export async function runPrivateLocalService(
       mode: 0o600,
     });
     recordWritten = true;
-    diagnostics.ready(serviceId);
+    diagnostics.ready(serviceId, endedCommands);
     onReady?.();
     process.on("SIGINT", onInterrupt);
     process.on("SIGTERM", onTerminate);

@@ -1,6 +1,6 @@
 import * as Redacted from "effect/Redacted";
 import { ShiitakeError } from "@fungi.computer/shiitake";
-import { privateSqliteFailureCode } from "./private-sqlite-owner.js";
+import { privateSqliteFailureCode } from "./private-sqlite-failure.js";
 import { z } from "zod";
 
 const listenerFailureSchema = z.object({

@@ -27,8 +27,8 @@ import { readPrivateLocalSessionDiscovery } from "../src/private-local-session-d
 import {
   createPrivateSqliteOwner,
   openPrivateReadOnlySqliteDatabase,
-  privateSqliteFailureCode,
 } from "../src/private-sqlite-owner.js";
+import { privateSqliteFailureCode } from "../src/private-sqlite-failure.js";
 import {
   ensureAgentDefaultModelTable,
   readAgentDefaultModel,

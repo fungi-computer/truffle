@@ -187,12 +187,9 @@ import {
 import { type SubagentSource } from "@fungi.computer/shiitake-extensions/subagents/host";
 
 const initialSessionId = "main";
-const maximumInstructionReadBytes = 128 * 1_024;
-const maximumInstructionSnapshotBytes = 32_000;
-const instructionRevisionVersion = "local-host-instructions-v3";
+const instructionRevision = "local-host-instructions-v4";
 const authoredInstructions =
   "You are the local coding agent. Explain durable changes clearly. After a run fails, each new user message is a new instruction: retry or continue the failed task only when the user explicitly asks, and ask what they want when the message is ambiguous.";
-const utf8 = new TextEncoder();
 
 const localHostIds = defineIdFamily({
   family: "local-host",
@@ -863,86 +860,16 @@ async function localDatabasePaths(
   };
 }
 
-function frame(parts: readonly Uint8Array[]): Uint8Array {
-  const total = parts.reduce((size, part) => size + 4 + part.byteLength, 0);
-  const framed = new Uint8Array(total);
-  const view = new DataView(framed.buffer);
-  let offset = 0;
-  for (const part of parts) {
-    view.setUint32(offset, part.byteLength);
-    offset += 4;
-    framed.set(part, offset);
-    offset += part.byteLength;
-  }
-  return framed;
-}
-
-async function instructionRevision(
-  authored: string,
-  agents: string | undefined,
-): Promise<string> {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    frame([
-      utf8.encode(instructionRevisionVersion),
-      utf8.encode(authored),
-      Uint8Array.of(agents === undefined ? 0 : 1),
-      utf8.encode(agents ?? ""),
-    ]),
-  );
-  return `local-instructions-${Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, "0"),
-  ).join("")}`;
-}
-
-/** Build the fixed source read by Shiitake once for each local run. */
-export function createPrivateLocalInstructionSource(
-  port: Awaited<ReturnType<typeof createPrivateInvocationFilesPort>>,
-): InstructionSource {
-  return Object.freeze({
-    load: async ({ sessionId, signal }) => {
-      signal.throwIfAborted();
-      let agents: string | undefined;
-      try {
-        const page = await port.read(
-          { path: "AGENTS.md", offset: 0, limit: maximumInstructionReadBytes },
-          {
-            executionId: `local-instructions/${sessionId}`,
-            deadlineAt: null,
-            signal,
-          },
-        );
-        if ("image" in page)
-          throw new Error("Root AGENTS.md is an image, not instructions");
-        if (page.truncated)
-          throw new Error(
-            "Root AGENTS.md exceeds the 128 KiB instruction bound",
-          );
-        agents = page.content;
-      } catch (cause) {
-        if (
-          cause instanceof Error &&
-          isErrnoException(cause) &&
-          cause.code === "ENOENT"
-        ) {
-          agents = undefined;
-        } else throw cause;
-      }
-      signal.throwIfAborted();
-      const text =
-        agents === undefined
-          ? authoredInstructions
-          : `${authoredInstructions}\n\n${agents}`;
-      if (utf8.encode(text).byteLength > maximumInstructionSnapshotBytes)
-        throw new Error(
-          `Local instructions exceed Shiitake's ${String(maximumInstructionSnapshotBytes)}-byte snapshot bound`,
-        );
-      return Object.freeze({
-        revision: await instructionRevision(authoredInstructions, agents),
-        text,
-      });
-    },
+/**
+ * The fixed Local host instructions. The project's AGENTS.md and skills reach
+ * the model through Home, below this system tier, as untrusted file content.
+ */
+export function createPrivateLocalInstructionSource(): InstructionSource {
+  const snapshot = Object.freeze({
+    revision: instructionRevision,
+    text: authoredInstructions,
   });
+  return Object.freeze({ load: () => Promise.resolve(snapshot) });
 }
 
 export function createPrivateLocalModelSource(
@@ -2301,7 +2228,7 @@ export async function openPrivateLocalRuntimeHost(
       runtime: runtime.runtime,
       extensions: localTools.extensions,
       model: modelSource,
-      instructions: createPrivateLocalInstructionSource(localTools.port),
+      instructions: createPrivateLocalInstructionSource(),
       tools: localTools.tools,
       recipientStatus: async (
         recipient: import("@fungi.computer/shiitake/extensions").AttentionRecipient,

@@ -5,8 +5,8 @@ import { fromNodeSqlite } from "@fungi.computer/watchdog/node-sqlite";
 import {
   createPrivateSqliteOwner,
   observePrivateSqliteOwner,
-  type PrivateSqliteFailureCode,
 } from "../src/private-sqlite-owner.js";
+import { type PrivateSqliteFailureCode } from "../src/private-sqlite-failure.js";
 
 it("Local reports native SQL failures, rolls back the operation and leaves connection lifetime with its host", () => {
   const database = new DatabaseSync(":memory:");

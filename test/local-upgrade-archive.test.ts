@@ -196,7 +196,7 @@ it("resumes an interrupted protocol-3 archive under its original slug after the 
           prior: { kind: "protocol", protocol: 3, build },
         });
         await unlink(record);
-        return { kind: "stopped" };
+        return { kind: "stopped", endedCommands: 0 };
       },
     }),
   ).rejects.toThrow(

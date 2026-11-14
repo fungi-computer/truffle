@@ -175,7 +175,12 @@ export function createServiceStreamCapture(directory: string) {
 /** Catchable observations, not an inferred cause for a missing final record. */
 export type ServiceLogEvent =
   | Readonly<{ event: "starting" }>
-  | Readonly<{ event: "ready"; serviceId: string }>
+  | Readonly<{
+      event: "ready";
+      serviceId: string;
+      /** Command groups of a crashed predecessor this start ended. */
+      endedCommands: number;
+    }>
   | Readonly<{
       event: "stopping" | "stopped";
       reason: "SIGINT" | "SIGTERM" | "startup-failure" | "runtime-failure";
@@ -230,7 +235,7 @@ export type ServiceLogShutdownReason = Extract<
 
 export type ServiceLogLifecycle = Readonly<{
   getStatus: () => ServiceDiagnosticsStatus;
-  ready: (serviceId: string) => void;
+  ready: (serviceId: string, endedCommands: number) => void;
   stopping: (reason: ServiceLogShutdownReason) => void;
   failure: (failure: FailureMetadata) => void;
   ruleMatch: (
@@ -434,9 +439,9 @@ export function createServiceLogLifecycle(
     // persisted at all. Recovery disablement must not stop a working log sink.
     getStatus: () =>
       status.state === "failed" ? status : (recovery ?? status),
-    ready(serviceId) {
+    ready(serviceId, endedCommands) {
       if (closed || ready) return;
-      emit({ event: "ready", serviceId });
+      emit({ event: "ready", serviceId, endedCommands });
       ready = true;
       if (status.state === "active") sampler.start();
     },

@@ -10,8 +10,8 @@ import {
   createPrivateSqliteOwner,
   openPrivateReadOnlySqliteDatabase,
   openPrivateWritableSqliteDatabase,
-  privateSqliteFailureCode,
 } from "../src/private-sqlite-owner.js";
+import { privateSqliteFailureCode } from "../src/private-sqlite-failure.js";
 
 it("preserves writable timeout, foreign keys, transaction state and changed rows", () => {
   const database = openPrivateWritableSqliteDatabase(":memory:", 125);

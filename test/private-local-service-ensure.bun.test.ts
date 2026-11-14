@@ -371,7 +371,7 @@ describe("a running client", () => {
     // A later release's client replaces the service this window reached.
     expect(
       await createPrivateLocalServiceManager({ directory }).stop(),
-    ).toEqual({ kind: "stopped" });
+    ).toEqual({ kind: "stopped", endedCommands: 0 });
     await startOtherService(otherProtocolService);
     const restart = {
       name: new LocalServiceUpdated().name,
