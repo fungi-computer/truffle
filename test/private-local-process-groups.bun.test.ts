@@ -28,6 +28,8 @@ async function startOwner() {
   await mkdir(root);
   await mkdir(home);
   const child = spawn([process.execPath, fixture, root, home], {
+    // The pipe is the fixture's lifeline: it exits when its parent drops it.
+    stdin: "pipe",
     stdout: "pipe",
     stderr: "inherit",
   });
@@ -68,6 +70,7 @@ test.skipIf(process.platform !== "linux")(
         await readdir(join(owner.home, ".fungi", "process-groups")),
       ).toEqual([]);
     } finally {
+      owner.child.kill("SIGKILL");
       if (alive(owner.groupId)) process.kill(-owner.groupId, "SIGKILL");
       await rm(owner.area, { recursive: true, force: true });
     }
@@ -95,8 +98,71 @@ test.skipIf(process.platform !== "linux")(
       expect(await reapOrphanedProcessGroups(owner.home)).toBe(0);
       expect(alive(owner.groupId)).toBe(true);
     } finally {
+      owner.child.kill("SIGKILL");
       if (alive(owner.groupId)) process.kill(-owner.groupId, "SIGKILL");
       await rm(owner.area, { recursive: true, force: true });
+    }
+  },
+  20_000,
+);
+
+test.skipIf(process.platform !== "linux")(
+  "the fixture and its command group are gone shortly after its parent is SIGKILLed",
+  async () => {
+    const area = await mkdtemp(join(tmpdir(), "fungi-groups-"));
+    const root = join(area, "project");
+    const home = join(area, "home");
+    await mkdir(root);
+    await mkdir(home);
+    // A throwaway parent that owns the fixture through its stdin pipe.
+    const parent = spawn(
+      [
+        process.execPath,
+        "-e",
+        `const c = Bun.spawn([process.execPath, ${JSON.stringify(fixture)}, ${JSON.stringify(root)}, ${JSON.stringify(home)}], { stdin: "pipe", stdout: "inherit", stderr: "inherit" });
+console.log(JSON.stringify({ pid: c.pid }));
+await new Promise(() => undefined);`,
+      ],
+      { stdout: "pipe", stderr: "inherit" },
+    );
+    let fixturePid: number | undefined;
+    let groupId: number | undefined;
+    try {
+      // Line one is the fixture's pid; line two is the fixture reporting that
+      // it started its command, by which time the group record is written.
+      const reader = parent.stdout.getReader();
+      const decoder = new TextDecoder();
+      let seen = "";
+      while (seen.split("\n").length < 3) {
+        const chunk = await reader.read();
+        expect(chunk.done).toBe(false);
+        seen += decoder.decode(chunk.value);
+      }
+      const { pid } = z
+        .looseObject({ pid: z.number().int() })
+        .parse(JSON.parse(seen.split("\n")[0] ?? ""));
+      fixturePid = pid;
+      const groupsDir = join(home, ".fungi", "process-groups");
+      const names = await readdir(groupsDir);
+      expect(names).toHaveLength(1);
+      groupId = recordSchema.parse(
+        JSON.parse(await Bun.file(join(groupsDir, names[0] ?? "")).text()),
+      ).groupId;
+      expect(groupId).toBeDefined();
+      expect(alive(pid)).toBe(true);
+      parent.kill("SIGKILL");
+      await parent.exited;
+      for (let i = 0; i < 250 && (alive(pid) || alive(groupId)); i++)
+        await Bun.sleep(20);
+      expect(alive(pid)).toBe(false);
+      expect(alive(groupId)).toBe(false);
+    } finally {
+      parent.kill("SIGKILL");
+      if (fixturePid !== undefined && alive(fixturePid))
+        process.kill(fixturePid, "SIGKILL");
+      if (groupId !== undefined && alive(groupId))
+        process.kill(-groupId, "SIGKILL");
+      await rm(area, { recursive: true, force: true });
     }
   },
   20_000,

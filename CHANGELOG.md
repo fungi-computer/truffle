@@ -1,5 +1,14 @@
 # @fungi.computer/truffle
 
+## 0.12.9
+
+### Patch Changes
+
+- Changes since 0.12.8:
+
+  - fix(local): drop redundant fallbacks in the fixture reap test
+  - fix(local): process-group fixture exits with its parent and cannot spin
+
 ## 0.12.8
 
 ### Patch Changes
