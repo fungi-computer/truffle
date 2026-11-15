@@ -1,6 +1,6 @@
 {
   "name": "@fungi.computer/truffle",
-  "version": "0.12.10",
+  "version": "0.13.0",
   "private": false,
   "description": "Truffle: Fungi's local Agent runtime, bundled into the fungi command",
   "type": "module",
@@ -105,7 +105,7 @@
     "@fungi.computer/nacre": "0.6.6",
     "@fungi.computer/seam": "0.2.5",
     "@fungi.computer/shiitake": "0.18.2",
-    "@fungi.computer/shiitake-extensions": "0.10.2",
+    "@fungi.computer/shiitake-extensions": "0.11.0",
     "@fungi.computer/veil": "0.7.4",
     "@fungi.computer/watchdog": "0.1.3",
     "@fungi.computer/whistle": "0.3.0",

@@ -1,5 +1,18 @@
 # @fungi.computer/truffle
 
+## 0.13.0
+
+### Minor Changes
+
+- Changes since 0.12.10:
+
+  - feat(skills): pass the session id into the skill source
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/shiitake-extensions@0.11.0
+
 ## 0.12.10
 
 ### Patch Changes

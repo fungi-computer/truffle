@@ -53,9 +53,16 @@ it("passes captured A through the existing leaf parameters after ambient HOME be
       hidden: () => [],
     });
     const signal = new AbortController().signal;
-    expect((await skills.read("selected", undefined, signal)).content).toBe(
-      homeA,
-    );
+    expect(
+      (
+        await skills.read({
+          sessionId: "session",
+          name: "selected",
+          file: undefined,
+          signal,
+        })
+      ).content,
+    ).toBe(homeA);
     expect(localExtensions({ home: root.home }).root).toBe(
       join(homeA, ".fungi", "extensions"),
     );

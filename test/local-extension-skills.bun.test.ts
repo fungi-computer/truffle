@@ -80,7 +80,9 @@ async function names(
     extensions: skills,
     hidden: () => [],
   });
-  return (await source.catalog(signal)).skills.map((skill) => skill.name);
+  return (
+    await source.catalog({ sessionId: "session", signal: signal })
+  ).skills.map((skill) => skill.name);
 }
 
 beforeAll(async () => {
@@ -176,7 +178,9 @@ test("skills source reads from its selected home after ambient HOME changes", as
       hidden: () => [],
     });
     expect(
-      (await source.catalog(signal)).skills.map((skill) => skill.name),
+      (
+        await source.catalog({ sessionId: "session", signal: signal })
+      ).skills.map((skill) => skill.name),
     ).not.toContain("ambient");
     const selected = join(home, ".agents", "skills", "selected");
     await mkdir(selected, { recursive: true });
@@ -184,9 +188,16 @@ test("skills source reads from its selected home after ambient HOME changes", as
       join(selected, "SKILL.md"),
       "---\nname: selected\ndescription: Selected home\n---\nSelected body\n",
     );
-    expect((await source.read("selected", undefined, signal)).content).toBe(
-      "Selected body\n",
-    );
+    expect(
+      (
+        await source.read({
+          sessionId: "session",
+          name: "selected",
+          file: undefined,
+          signal,
+        })
+      ).content,
+    ).toBe("Selected body\n");
   } finally {
     if (previous === undefined) delete process.env.HOME;
     else process.env.HOME = previous;

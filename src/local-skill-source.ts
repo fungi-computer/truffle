@@ -499,8 +499,9 @@ export function createLocalSkillSource(
     return scanRoots(roots, displayRoots, hidden, signal, diagnostics);
   };
   return {
-    catalog,
-    read: async (name, file, signal) => {
+    // Local serves every Session the same skills, so the Session is not read.
+    catalog: ({ signal }) => catalog(signal),
+    read: async ({ name, file, signal }) => {
       z.string().min(1).parse(name);
       const found = (await catalog(signal)).skills.find(
         (skill) => skill.name === name,

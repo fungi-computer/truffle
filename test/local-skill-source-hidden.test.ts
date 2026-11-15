@@ -80,9 +80,14 @@ describe("Local SkillSource sandbox-hidden records", () => {
       renameSync(join(directory, "refs"), join(directory, "refs-moved"));
       symlinkSync(record, join(directory, "refs"));
     });
-    await expect(source.read("racer", "refs/token", signal)).rejects.toThrow(
-      "Skill path changed while it was opened",
-    );
+    await expect(
+      source.read({
+        sessionId: "session",
+        name: "racer",
+        file: "refs/token",
+        signal,
+      }),
+    ).rejects.toThrow("Skill path changed while it was opened");
     expect(calls).toBe(2);
   });
 
@@ -92,7 +97,10 @@ describe("Local SkillSource sandbox-hidden records", () => {
     await skill(join(outside, "foreign"), "foreign");
     await mkdir(join(cwd, ".agents"));
     await symlink(outside, join(cwd, ".agents", "skills"));
-    const catalog = await source.catalog(signal);
+    const catalog = await source.catalog({
+      sessionId: "session",
+      signal: signal,
+    });
     expect(catalog.skills.map((item) => item.name)).not.toContain("foreign");
     expect(catalog.diagnostics).toContainEqual(
       expect.objectContaining({
@@ -100,9 +108,14 @@ describe("Local SkillSource sandbox-hidden records", () => {
         reason: "invalid",
       }),
     );
-    await expect(source.read("foreign", undefined, signal)).rejects.toThrow(
-      "Unknown or hidden skill",
-    );
+    await expect(
+      source.read({
+        sessionId: "session",
+        name: "foreign",
+        file: undefined,
+        signal,
+      }),
+    ).rejects.toThrow("Unknown or hidden skill");
   });
 
   it("refuses skills inside, or roots covering, a sandbox-hidden record", async () => {
@@ -116,14 +129,22 @@ describe("Local SkillSource sandbox-hidden records", () => {
         skills: ["~/.config/fungi/skills", "~/.config"],
       }),
     );
-    const catalog = await source.catalog(signal);
+    const catalog = await source.catalog({
+      sessionId: "session",
+      signal: signal,
+    });
     expect(catalog.skills.map((item) => item.name)).toEqual([]);
     for (const path of [join(record, "skills"), join(home, ".config")])
       expect(catalog.diagnostics).toContainEqual(
         expect.objectContaining({ path, reason: "invalid" }),
       );
-    await expect(source.read("inside", undefined, signal)).rejects.toThrow(
-      "Unknown or hidden skill",
-    );
+    await expect(
+      source.read({
+        sessionId: "session",
+        name: "inside",
+        file: undefined,
+        signal,
+      }),
+    ).rejects.toThrow("Unknown or hidden skill");
   });
 });

@@ -70,7 +70,10 @@ describe("Local SkillSource", () => {
       join(home, ".fungi/settings.json"),
       JSON.stringify({ skills: [elsewhere] }),
     );
-    const catalog = await source.catalog(signal);
+    const catalog = await source.catalog({
+      sessionId: "session",
+      signal: signal,
+    });
     expect(
       Object.fromEntries(
         catalog.skills.map((s) => [s.name, s.displayLocation]),
@@ -80,15 +83,36 @@ describe("Local SkillSource", () => {
       "in-home": join("~", ".agents", "skills", "in-home", "SKILL.md"),
       outside: join(outside, "SKILL.md"),
     });
-    expect((await source.read("in-project", undefined, signal)).content).toBe(
-      "Inside the invocation root body\n",
-    );
-    expect((await source.read("in-home", undefined, signal)).content).toBe(
-      "Under home body\n",
-    );
-    expect((await source.read("outside", undefined, signal)).content).toBe(
-      "Neither root body\n",
-    );
+    expect(
+      (
+        await source.read({
+          sessionId: "session",
+          name: "in-project",
+          file: undefined,
+          signal,
+        })
+      ).content,
+    ).toBe("Inside the invocation root body\n");
+    expect(
+      (
+        await source.read({
+          sessionId: "session",
+          name: "in-home",
+          file: undefined,
+          signal,
+        })
+      ).content,
+    ).toBe("Under home body\n");
+    expect(
+      (
+        await source.read({
+          sessionId: "session",
+          name: "outside",
+          file: undefined,
+          signal,
+        })
+      ).content,
+    ).toBe("Neither root body\n");
   });
 
   it("keeps the explicitly selected home for catalog and later reads after HOME changes", async () => {
@@ -101,14 +125,25 @@ describe("Local SkillSource", () => {
     try {
       process.env.HOME = otherHome;
       expect(
-        (await source.catalog(signal)).skills.map((item) => item.name),
+        (
+          await source.catalog({ sessionId: "session", signal: signal })
+        ).skills.map((item) => item.name),
       ).toContain("selected");
       expect(
-        (await source.catalog(signal)).skills.map((item) => item.name),
+        (
+          await source.catalog({ sessionId: "session", signal: signal })
+        ).skills.map((item) => item.name),
       ).not.toContain("ambient");
-      expect((await source.read("selected", undefined, signal)).content).toBe(
-        "Selected home body\n",
-      );
+      expect(
+        (
+          await source.read({
+            sessionId: "session",
+            name: "selected",
+            file: undefined,
+            signal,
+          })
+        ).content,
+      ).toBe("Selected home body\n");
     } finally {
       if (previous === undefined) delete process.env.HOME;
       else process.env.HOME = previous;
@@ -129,13 +164,17 @@ describe("Local SkillSource", () => {
       "child",
       "Supporting skill is not discovered",
     );
-    expect((await source.catalog(signal)).skills).toEqual([]);
+    expect(
+      (await source.catalog({ sessionId: "session", signal: signal })).skills,
+    ).toEqual([]);
     await mkdir(join(home, ".fungi"));
     await writeFile(
       join(home, ".fungi/settings.json"),
       JSON.stringify({ skills: ["~/.claude/skills"] }),
     );
-    expect((await source.catalog(signal)).skills).toEqual([
+    expect(
+      (await source.catalog({ sessionId: "session", signal: signal })).skills,
+    ).toEqual([
       {
         name: "nested",
         description: "Synced skill",
@@ -145,9 +184,16 @@ describe("Local SkillSource", () => {
           "~/.claude/skills/synced/source-target/nested/SKILL.md",
       },
     ]);
-    expect((await source.read("nested", undefined, signal)).content).toBe(
-      "Synced skill body\n",
-    );
+    expect(
+      (
+        await source.read({
+          sessionId: "session",
+          name: "nested",
+          file: undefined,
+          signal,
+        })
+      ).content,
+    ).toBe("Synced skill body\n");
   });
 
   it("discovers project and personal roots with project-first precedence and independent collisions", async () => {
@@ -165,7 +211,10 @@ describe("Local SkillSource", () => {
     await skill(home, ".pi/skills", "pi-home", "Personal Pi");
     await skill(home, ".pi/agent/skills", "pi-agent", "Personal Pi agent");
     await skill(home, ".claude/skills", "claude-home", "Personal Claude");
-    const catalog = await source.catalog(signal);
+    const catalog = await source.catalog({
+      sessionId: "session",
+      signal: signal,
+    });
     expect(catalog.skills.find((s) => s.name === "shared")?.description).toBe(
       "Fungi project wins",
     );
@@ -201,7 +250,10 @@ describe("Local SkillSource", () => {
       join(directory, "SKILL.md"),
       "---\nname: Bad--Name\ndescription: Usable description\n---\nLoadable body\n",
     );
-    const catalog = await source.catalog(signal);
+    const catalog = await source.catalog({
+      sessionId: "session",
+      signal: signal,
+    });
     expect(catalog.skills.map((skill) => skill.name)).toEqual(["Bad--Name"]);
     expect(catalog.diagnostics).toContainEqual(
       expect.objectContaining({
@@ -209,9 +261,16 @@ describe("Local SkillSource", () => {
         reason: "warning",
       }),
     );
-    expect((await source.read("Bad--Name", undefined, signal)).content).toBe(
-      "Loadable body\n",
-    );
+    expect(
+      (
+        await source.read({
+          sessionId: "session",
+          name: "Bad--Name",
+          file: undefined,
+          signal,
+        })
+      ).content,
+    ).toBe("Loadable body\n");
   });
 
   it("uses Pi's literal true flag for model invocation and reports hidden skills", async () => {
@@ -230,7 +289,10 @@ describe("Local SkillSource", () => {
       "Human only",
       "disable-model-invocation: true\n",
     );
-    const catalog = await source.catalog(signal);
+    const catalog = await source.catalog({
+      sessionId: "session",
+      signal: signal,
+    });
     expect(catalog.skills.map((skill) => skill.name)).toEqual(["quoted"]);
     expect(catalog.diagnostics).toContainEqual(
       expect.objectContaining({
@@ -262,7 +324,10 @@ describe("Local SkillSource", () => {
       ]),
     );
     await writeFile(join(valid, "bad.txt"), Buffer.from([0xff]));
-    const catalog = await source.catalog(signal);
+    const catalog = await source.catalog({
+      sessionId: "session",
+      signal: signal,
+    });
     expect(catalog.skills.map((skill) => skill.name)).toEqual(["derived"]);
     expect(catalog.diagnostics).toContainEqual(
       expect.objectContaining({
@@ -275,12 +340,24 @@ describe("Local SkillSource", () => {
         (diagnostic) => diagnostic.path === join(invalid, "SKILL.md"),
       )?.cause,
     ).toBeInstanceOf(TypeError);
-    expect((await source.read("derived", undefined, signal)).content).toBe(
-      "Unicode body: café\n",
-    );
-    await expect(source.read("derived", "bad.txt", signal)).rejects.toThrow(
-      TypeError,
-    );
+    expect(
+      (
+        await source.read({
+          sessionId: "session",
+          name: "derived",
+          file: undefined,
+          signal,
+        })
+      ).content,
+    ).toBe("Unicode body: café\n");
+    await expect(
+      source.read({
+        sessionId: "session",
+        name: "derived",
+        file: "bad.txt",
+        signal,
+      }),
+    ).rejects.toThrow(TypeError);
   });
 
   it("skips malformed frontmatter and escaped roots while loading healthy skills", async () => {
@@ -294,7 +371,10 @@ describe("Local SkillSource", () => {
       "Outside discovery root",
     );
     await symlink(foreign, join(cwd, ".agents/skills/escaped"));
-    const catalog = await source.catalog(signal);
+    const catalog = await source.catalog({
+      sessionId: "session",
+      signal: signal,
+    });
     expect(catalog.skills.map((s) => s.name)).toEqual(["good"]);
     expect(catalog.diagnostics.map((d) => d.path)).toContain(
       join(bad, "SKILL.md"),
@@ -302,7 +382,14 @@ describe("Local SkillSource", () => {
     expect(catalog.diagnostics).toHaveLength(2);
     await mkdir(join(good, "references"));
     await writeFile(join(good, "references/example.md"), "reference text");
-    expect(await source.read("good", undefined, signal)).toEqual({
+    expect(
+      await source.read({
+        sessionId: "session",
+        name: "good",
+        file: undefined,
+        signal,
+      }),
+    ).toEqual({
       name: "good",
       file: "SKILL.md",
       content: "Valid skill body\n",
@@ -310,21 +397,33 @@ describe("Local SkillSource", () => {
       supportingFiles: ["references/example.md"],
     });
     expect(
-      (await source.read("good", "references/example.md", signal)).content,
+      (
+        await source.read({
+          sessionId: "session",
+          name: "good",
+          file: "references/example.md",
+          signal,
+        })
+      ).content,
     ).toBe("reference text");
     await symlink(join(foreign, "SKILL.md"), join(good, "escape.md"));
-    await expect(source.read("good", "escape.md", signal)).rejects.toThrow(
-      "escapes",
-    );
+    await expect(
+      source.read({
+        sessionId: "session",
+        name: "good",
+        file: "escape.md",
+        signal,
+      }),
+    ).rejects.toThrow("escapes");
     for (const file of [
       "../escaped/SKILL.md",
       "/etc/passwd",
       "references\\example.md",
       "a\0b",
     ])
-      await expect(source.read("good", file, signal)).rejects.toThrow(
-        "relative path",
-      );
+      await expect(
+        source.read({ sessionId: "session", name: "good", file, signal }),
+      ).rejects.toThrow("relative path");
   });
 
   it("deduplicates canonical roots and keeps hidden project names hidden", async () => {
@@ -340,14 +439,22 @@ describe("Local SkillSource", () => {
     await skill(cwd, ".fungi/skills", "visible", "Visible project");
     await mkdir(join(cwd, ".agents"));
     await symlink(join(cwd, ".fungi/skills"), join(cwd, ".agents/skills"));
-    const catalog = await source.catalog(signal);
+    const catalog = await source.catalog({
+      sessionId: "session",
+      signal: signal,
+    });
     expect(catalog.skills.map((s) => s.name)).toEqual(["visible"]);
     expect(
       catalog.diagnostics.filter((d) => d.reason === "collision"),
     ).toHaveLength(1);
-    await expect(source.read("hidden", undefined, signal)).rejects.toThrow(
-      "hidden",
-    );
+    await expect(
+      source.read({
+        sessionId: "session",
+        name: "hidden",
+        file: undefined,
+        signal,
+      }),
+    ).rejects.toThrow("hidden");
   });
 
   it("reports oversized skill files and metadata without exceeding catalog bounds", async () => {
@@ -361,7 +468,10 @@ describe("Local SkillSource", () => {
     await writeFile(join(oversized, "SKILL.md"), "x".repeat(128 * 1_024 + 1));
     for (let n = 0; n < 65; n++)
       await skill(cwd, ".agents/skills", `skill-${String(n)}`, "Description");
-    const catalog = await source.catalog(signal);
+    const catalog = await source.catalog({
+      sessionId: "session",
+      signal: signal,
+    });
     // Canonical locations count towards the byte bound. A longer TMPDIR can
     // fill 16 KB before 64 entries; every omitted skill must hit a real bound.
     expect(catalog.skills.length).toBeGreaterThan(0);
@@ -398,12 +508,17 @@ describe("Local SkillSource", () => {
 
   it("returns an empty catalog and respects cancellation", async () => {
     const { source } = await fixture();
-    expect(await source.catalog(signal)).toEqual({
+    expect(
+      await source.catalog({ sessionId: "session", signal: signal }),
+    ).toEqual({
       skills: [],
       diagnostics: [],
     });
     await expect(
-      source.catalog(AbortSignal.abort(new Error("Canceled skill scan"))),
+      source.catalog({
+        sessionId: "session",
+        signal: AbortSignal.abort(new Error("Canceled skill scan")),
+      }),
     ).rejects.toThrow("Canceled skill scan");
   });
 
@@ -411,7 +526,10 @@ describe("Local SkillSource", () => {
     const { cwd, source } = await fixture();
     const root = join(cwd, ".fungi/skills");
     await mkdir(root, { recursive: true });
-    expect((await source.catalog(signal)).diagnostics).toContainEqual(
+    expect(
+      (await source.catalog({ sessionId: "session", signal: signal }))
+        .diagnostics,
+    ).toContainEqual(
       expect.objectContaining({
         path: root,
         reason: "empty",
@@ -419,7 +537,10 @@ describe("Local SkillSource", () => {
       }),
     );
     const bad = await skill(cwd, ".fungi/skills", "blank", "'  '");
-    const rejected = await source.catalog(signal);
+    const rejected = await source.catalog({
+      sessionId: "session",
+      signal: signal,
+    });
     expect(rejected.skills).toEqual([]);
     expect(rejected.diagnostics).toContainEqual(
       expect.objectContaining({
@@ -449,7 +570,10 @@ describe("Local SkillSource", () => {
     await mkdir(join(root, "synced"));
     await symlink(outside, join(root, "synced/escape"));
     await symlink(root, join(root, "synced/cycle"));
-    const catalog = await source.catalog(signal);
+    const catalog = await source.catalog({
+      sessionId: "session",
+      signal: signal,
+    });
     expect(catalog.skills.map((skill) => skill.name)).toEqual(["good"]);
     expect(catalog.diagnostics).toContainEqual(
       expect.objectContaining({
@@ -478,7 +602,10 @@ describe("Local SkillSource", () => {
       join(cwd, ".fungi/settings.json"),
       JSON.stringify({ skills: ["extras", "missing"] }),
     );
-    const catalog = await source.catalog(signal);
+    const catalog = await source.catalog({
+      sessionId: "session",
+      signal: signal,
+    });
     expect(catalog.skills[0]?.location).toBe(join(project, "SKILL.md"));
     expect(catalog.diagnostics).toContainEqual(
       expect.objectContaining({
@@ -490,7 +617,10 @@ describe("Local SkillSource", () => {
       join(cwd, ".fungi/settings.json"),
       JSON.stringify({ skills: 1 }),
     );
-    expect((await source.catalog(signal)).diagnostics).toContainEqual(
+    expect(
+      (await source.catalog({ sessionId: "session", signal: signal }))
+        .diagnostics,
+    ).toContainEqual(
       expect.objectContaining({
         path: join(cwd, ".fungi/settings.json"),
         reason: "invalid",
@@ -514,7 +644,10 @@ describe("Local SkillSource", () => {
       extensions: [{ extensionId: "acme-tools", directory: extension }],
       hidden: () => [],
     });
-    const catalog = await source.catalog(signal);
+    const catalog = await source.catalog({
+      sessionId: "session",
+      signal: signal,
+    });
     expect(
       catalog.skills.map((s) => [s.name, s.description, s.origin]),
     ).toEqual([
@@ -547,7 +680,9 @@ describe("Local SkillSource", () => {
       "From the extension",
     );
     const without = createLocalSkillSource({ cwd, home, hidden: () => [] });
-    expect((await without.catalog(signal)).skills).toEqual([]);
+    expect(
+      (await without.catalog({ sessionId: "session", signal: signal })).skills,
+    ).toEqual([]);
     const withFolder = createLocalSkillSource({
       cwd,
       home,
@@ -555,7 +690,14 @@ describe("Local SkillSource", () => {
       hidden: () => [],
     });
     expect(
-      (await withFolder.read("only-ext", undefined, signal)).baseDirectory,
+      (
+        await withFolder.read({
+          sessionId: "session",
+          name: "only-ext",
+          file: undefined,
+          signal,
+        })
+      ).baseDirectory,
     ).toBe(await realpath(directory));
   });
 });
