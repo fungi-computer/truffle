@@ -1,5 +1,13 @@
 # @fungi.computer/truffle
 
+## 0.12.10
+
+### Patch Changes
+
+- Changes since 0.12.9:
+
+  - fix(computer): say offline in plain words when the attach link drops
+
 ## 0.12.9
 
 ### Patch Changes

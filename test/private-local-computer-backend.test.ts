@@ -1,5 +1,6 @@
 import { expect, it } from "vitest";
 import {
+  dialFailureStatus,
   FolderCwdError,
   FolderPathMap,
   FolderWorkspaceRpc,
@@ -97,4 +98,26 @@ it("translates sync entries both ways and drops what is outside the folder", asy
   await expect(
     folder.shell.exec({ source: "pwd", cwd: "/etc" }),
   ).rejects.toThrow(FolderCwdError);
+});
+
+it("reports a failed dial as a typed reason and keeps the raw cause aside", () => {
+  expect(
+    dialFailureStatus(
+      { probeUnavailable: false, cause: "socket hang up" },
+      500,
+    ),
+  ).toEqual({
+    kind: "offline",
+    retryInMs: 500,
+    reason: "unreachable",
+    cause: "socket hang up",
+  });
+  expect(
+    dialFailureStatus({ probeUnavailable: true, cause: "fetch failed" }, 1000),
+  ).toEqual({
+    kind: "offline",
+    retryInMs: 1000,
+    reason: "probe-unavailable",
+    cause: "fetch failed",
+  });
 });

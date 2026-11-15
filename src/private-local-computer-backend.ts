@@ -472,8 +472,35 @@ export type LocalBackendTarget = Readonly<{
 export type LocalBackendStatus =
   | Readonly<{ kind: "connecting" }>
   | Readonly<{ kind: "online" }>
-  | Readonly<{ kind: "offline"; retryInMs: number; reason: string }>
+  | Readonly<{
+      kind: "offline";
+      retryInMs: number;
+      reason: LocalBackendOfflineReason;
+      /** The raw failure, for logs; never shown to the person. */
+      cause?: string;
+    }>
   | Readonly<{ kind: "refused" }>;
+
+/** Why the link is down, in terms a person can act on. */
+export type LocalBackendOfflineReason =
+  "unreachable" | "probe-unavailable" | "connection-closed";
+
+/** The offline status for a failed dial, keeping the raw cause out of `reason`. */
+export function dialFailureStatus(
+  failure: Readonly<{ probeUnavailable: boolean; cause: string }>,
+  retryInMs: number,
+): Extract<LocalBackendStatus, { kind: "offline" }> {
+  return {
+    kind: "offline",
+    retryInMs,
+    reason: failure.probeUnavailable ? "probe-unavailable" : "unreachable",
+    cause: failure.cause,
+  };
+}
+
+function causeText(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}
 
 function dialUrl(target: LocalBackendTarget): URL {
   const computer = `computers/${encodeURIComponent(target.computerId)}/backends/${encodeURIComponent(target.backendId)}/connect`;
@@ -595,16 +622,14 @@ export async function runLocalComputerBackend(
             return "refused";
           }
         } else refused = 0;
-        options.onStatus?.({
-          kind: "offline",
-          retryInMs: delay,
-          reason:
+        options.onStatus?.(
+          dialFailureStatus(
             probe.kind === "unavailable"
-              ? `Dial probe unavailable: ${probe.cause instanceof Error ? probe.cause.message : String(probe.cause)}`
-              : error instanceof Error
-                ? error.message
-                : String(error),
-        });
+              ? { probeUnavailable: true, cause: causeText(probe.cause) }
+              : { probeUnavailable: false, cause: causeText(error) },
+            delay,
+          ),
+        );
         await sleep(delay, options.signal);
         delay = Math.min(delay * 2, 15_000);
         continue;
@@ -639,7 +664,7 @@ export async function runLocalComputerBackend(
         options.onStatus?.({
           kind: "offline",
           retryInMs: delay,
-          reason: "connection closed",
+          reason: "connection-closed",
         });
     }
     return "stopped";
