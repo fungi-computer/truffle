@@ -1,5 +1,17 @@
 # @fungi.computer/truffle
 
+## 0.13.1
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/agar@0.18.1
+  - @fungi.computer/nacre@0.6.7
+  - @fungi.computer/shiitake@0.18.3
+  - @fungi.computer/graft@0.2.26
+  - @fungi.computer/shiitake-extensions@0.11.1
+  - @fungi.computer/zookeeper@0.0.33
+
 ## 0.13.0
 
 ### Minor Changes
