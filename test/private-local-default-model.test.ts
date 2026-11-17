@@ -135,7 +135,7 @@ it("falls back to another signed-in provider without a Fungi account", async () 
 });
 
 for (const [providerId, modelId] of [
-  ["openai", "gpt-6.1-sol"],
+  ["openai", "gpt-6.2-sol"],
   ["anthropic", "claude-opus-5-5"],
 ] as const) {
   it(`starts fresh ${providerId} subscription chats on ${modelId} with medium thinking`, async () => {

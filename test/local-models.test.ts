@@ -154,7 +154,13 @@ describe("private Pi OpenAI composition", () => {
         .filter(({ providerId }) => providerId === "openai")
         .map(({ id }) => id),
     ).toEqual(
-      expect.arrayContaining(["gpt-6-astra", "gpt-6-sol", "gpt-6-luna"]),
+      expect.arrayContaining([
+        "gpt-6.2-astra",
+        "gpt-6.2-sol",
+        "gpt-6-astra",
+        "gpt-6-sol",
+        "gpt-6-luna",
+      ]),
     );
     const models = createPrivateModels();
     expect(models.getProvider("openai")?.auth.oauth).toBeDefined();
@@ -163,6 +169,28 @@ describe("private Pi OpenAI composition", () => {
       false,
     );
     expect(models.getProvider("openai")?.auth.apiKey).toBeDefined();
+  });
+
+  it("offers GPT-6.2 Sol at GPT-6.1 Sol's price and GPT-6.2 Astra at 80% of GPT-6 Astra's", () => {
+    const catalog = createPrivateModels().getModels("openai");
+    const model = (id: string) => {
+      const found = catalog.find((entry) => entry.id === id);
+      if (found === undefined) throw new Error(`Missing ${id}`);
+      return found;
+    };
+    const sol = model("gpt-6.2-sol");
+    expect(sol.name).toBe("GPT-6.2 Sol");
+    expect(sol.cost).toEqual(model("gpt-6.1-sol").cost);
+    expect(sol.contextWindow).toBe(model("gpt-6.1-sol").contextWindow);
+    const astra = model("gpt-6.2-astra");
+    const previous = model("gpt-6-astra").cost;
+    expect(astra.name).toBe("GPT-6.2 Astra");
+    expect(astra.cost).toMatchObject({
+      input: previous.input * 0.8,
+      output: previous.output * 0.8,
+      cacheRead: previous.cacheRead * 0.8,
+      cacheWrite: previous.cacheWrite * 0.8,
+    });
   });
 
   it("offers only the logins Veil's provider policy allows locally", () => {

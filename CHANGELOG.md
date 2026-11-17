@@ -1,5 +1,28 @@
 # @fungi.computer/truffle
 
+## 0.15.0
+
+### Minor Changes
+
+- Changes since 0.14.2:
+
+  - feat(models): add GPT-6.2 Sol and GPT-6.2 Astra; ChatGPT subscriptions
+    default to GPT-6.2 Sol
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.20.0
+  - @fungi.computer/shiitake@0.20.0
+  - @fungi.computer/nacre@0.7.2
+  - @fungi.computer/mycelium@0.4.3
+  - @fungi.computer/graft@0.2.30
+  - @fungi.computer/shiitake-extensions@0.11.5
+  - @fungi.computer/zookeeper@0.0.37
+  - @fungi.computer/knapsack@0.4.16
+  - @fungi.computer/veil@0.7.7
+
 ## 0.14.2
 
 ### Patch Changes

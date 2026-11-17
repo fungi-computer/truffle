@@ -80,7 +80,7 @@ export async function defaultLocalModel(
       auth.type !== "oauth"
         ? undefined
         : provider.id === "openai"
-          ? "gpt-6.1-sol"
+          ? "gpt-6.2-sol"
           : provider.id === "anthropic"
             ? "claude-opus-5-5"
             : undefined;
