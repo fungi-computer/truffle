@@ -21,7 +21,8 @@ async function fixture(mode: "read-only" | "workspace") {
     database.close();
     await rm(root, { recursive: true, force: true });
   });
-  const ledger = new ApprovalLedger({
+  // Creates the approval tables the tests count: no Files call may stage a record.
+  new ApprovalLedger({
     owner: fromNodeSqlite(database),
     home: { kind: "local", id: "files-refusal" },
     now: Date.now,
@@ -37,14 +38,13 @@ async function fixture(mode: "read-only" | "workspace") {
     deadlineAt: null,
     signal: new AbortController().signal,
   });
-  return { root, database, ledger, port, context };
+  return { root, database, port, context };
 }
 
 it.each(["patch", "edit", "write"] as const)(
   "Read-only Files %s refuses without touching files or staging an approval",
   async (kind) => {
-    const { root, database, ledger, port, context } =
-      await fixture("read-only");
+    const { root, database, port, context } = await fixture("read-only");
     await writeFile(join(root, "note.txt"), "before\n");
     if (kind === "edit") {
       for (const path of ["note.txt", "missing.txt"])
@@ -75,7 +75,6 @@ it.each(["patch", "edit", "write"] as const)(
         code: "ENOENT",
       },
     );
-    expect(ledger.pendingHandoffs()).toEqual([]);
     expect(
       database.prepare("SELECT count(*) AS total FROM approval_records").get(),
     ).toMatchObject({ total: 0 });
@@ -83,7 +82,7 @@ it.each(["patch", "edit", "write"] as const)(
 );
 
 it("Workspace edit and patch still write without creating an approval", async () => {
-  const { root, database, ledger, port, context } = await fixture("workspace");
+  const { root, database, port, context } = await fixture("workspace");
   await writeFile(join(root, "note.txt"), "before\n");
   expect(
     await edit(
@@ -103,7 +102,6 @@ it("Workspace edit and patch still write without creating an approval", async ()
   ).toMatchObject({ status: "completed" });
   expect(await readFile(join(root, "note.txt"), "utf8")).toBe("after\n");
   expect(await readFile(join(root, "new.txt"), "utf8")).toBe("new\n");
-  expect(ledger.pendingHandoffs()).toEqual([]);
   expect(
     database.prepare("SELECT count(*) AS total FROM approval_records").get(),
   ).toMatchObject({ total: 0 });

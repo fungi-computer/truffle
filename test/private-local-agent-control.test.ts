@@ -15,6 +15,7 @@ import {
   readFile,
   realpath,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { createModels } from "@earendil-works/pi-ai";
@@ -372,6 +373,303 @@ async function openProductionHost(
     await import("../dist/private-local-runtime-host.js");
   return open(...args);
 }
+
+/** Real child stores and tools, with only the provider replaced by recorded responses. */
+async function folderCreationFixture() {
+  const fixture = await sandboxProductionFixture();
+  await mkdir(join(fixture.root, "parent", "helper"), { recursive: true });
+  const parent = await openProductionHost(
+    { ...fixture.options, folder: "parent", mode: "full-access" },
+    fixture.models,
+  );
+  const databasePath = parent.databasePath;
+  await parent.close();
+  let directory: LocalAgentControlDirectory | undefined;
+  const opened = new Map<
+    string,
+    Awaited<ReturnType<typeof openProductionHost>>
+  >();
+  const owners = createLocalServiceOwners(
+    async (options) => {
+      directory = options.agentControl;
+      const host = await openProductionHost(
+        { ...options, configRoot: fixture.options.configRoot },
+        fixture.models,
+      );
+      opened.set(host.agentId, host);
+      return host;
+    },
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    fixture.options.configRoot,
+  );
+  try {
+    const selected = await owners.select({
+      invocationRoot: fixture.root,
+      databasePath,
+      sessionId: "creator-session",
+    });
+    selected.release();
+    if (directory === undefined) throw new Error("Local directory missing");
+    const control = createdBy(directory, selected.agentId);
+    const directoryCreate = control.create;
+    if (directoryCreate === undefined) throw new Error("Local create missing");
+    const create: NonNullable<AgentControlDirectory["create"]> = (
+      request,
+      signal,
+    ) =>
+      directoryCreate(
+        {
+          ...request,
+          model: {
+            providerId: fixture.options.providerId,
+            modelId: fixture.options.modelId,
+          },
+        },
+        signal,
+      );
+    return {
+      ...fixture,
+      owners,
+      opened,
+      create,
+      creatorAgentId: selected.agentId,
+    };
+  } catch (cause) {
+    await owners.close();
+    throw cause;
+  }
+}
+
+it.each([undefined, "parent/./helper"])(
+  "creates a helper with folder %s, persisting its own Files root and exec directory",
+  async (folder) => {
+    const fixture = await folderCreationFixture();
+    const signal = new AbortController().signal;
+    const expectedFolder = folder === undefined ? "parent" : "parent/helper";
+    const expectedRoot = join(fixture.root, expectedFolder);
+    try {
+      await writeFile(join(expectedRoot, "folder-marker"), "child Files root");
+      const request =
+        folder === undefined
+          ? { requestId: "folder-create" }
+          : { requestId: "folder-create", folder };
+      const created = await fixture.create(request, signal);
+      expect(created.workingDirectory).toBe(expectedRoot);
+      expect(await fixture.create(request, signal)).toEqual(created);
+      const child = fixture.opened.get(created.agentId);
+      if (child === undefined) throw new Error("Child runtime missing");
+      const database = new DatabaseSync(child.databasePath);
+      try {
+        expect(
+          database
+            .prepare(
+              "SELECT folder, mode, created_by FROM private_local_identity WHERE singleton = 1",
+            )
+            .get(),
+        ).toMatchObject({
+          folder: expectedFolder,
+          mode: "full-access",
+          created_by: created.createdBy,
+        });
+      } finally {
+        database.close();
+      }
+      fixture.faux.setResponses([
+        fauxAssistantMessage(
+          fauxToolCall("execute", {
+            code: 'return { exec: await env.computers.local.exec({ command: "pwd" }), file: await env.computers.local.files.read({ path: "folder-marker" }) }',
+          }),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("Folder checked"),
+      ]);
+      const sessionId = await child.createSession("folder-proof");
+      const session = child.getSession(sessionId);
+      const accepted = await session.command({
+        type: "prompt",
+        requestId: "check-folder",
+        delivery: "followUp",
+        text: "Check your working directory and Files root.",
+      });
+      const settled = await waitForAgentSettlement(
+        session,
+        accepted.commandId,
+        5_000,
+        signal,
+      );
+      expect(settled.terminal.outcome).toBe("completed");
+      const snapshot = await session.read();
+      const results = snapshot.messages
+        .map(({ value }) => value)
+        .filter((message) => message.role === "toolResult");
+      expect(results).toHaveLength(1);
+      expect(results[0]).toMatchObject({ isError: false });
+      expect(JSON.stringify(results)).toContain(expectedRoot);
+      expect(JSON.stringify(results)).toContain("child Files root");
+      await expect(
+        fixture.create(
+          {
+            requestId: "folder-create",
+            folder: folder ? "parent" : "parent/helper",
+          },
+          signal,
+        ),
+      ).rejects.toMatchObject({
+        name: "AgentCreateRefused",
+        reason: "request_conflict",
+      });
+    } finally {
+      await fixture.owners.close();
+    }
+  },
+  30_000,
+);
+
+it("refuses helper folders outside the project or creator, protected state, and non-directories before creating anything", async () => {
+  const fixture = await folderCreationFixture();
+  try {
+    await mkdir(join(fixture.root, "sibling"));
+    await writeFile(join(fixture.root, "parent", "file"), "not a directory");
+    await symlink(dirname(fixture.root), join(fixture.root, "escape"));
+    await symlink(
+      join(fixture.root, "sibling"),
+      join(fixture.root, "parent", "escape"),
+    );
+    const agents = join(fixture.root, ".fungi", "agents");
+    const before = await readdir(agents, { recursive: true });
+    for (const { folder, message } of [
+      { folder: "../outside", message: "project-relative" },
+      { folder: fixture.root, message: "project-relative" },
+      { folder: "escape", message: "outside the project" },
+      { folder: ".fungi", message: "protected project .fungi" },
+      { folder: "parent/file", message: "must be a directory" },
+      { folder: "parent/missing", message: "must be an existing directory" },
+      { folder: "sibling", message: "outside the creator's folder" },
+      { folder: ".", message: "outside the creator's folder" },
+      { folder: "parent/escape", message: "outside the creator's folder" },
+    ]) {
+      const refused = fixture.create(
+        { requestId: `refused-${folder}`, folder },
+        new AbortController().signal,
+      );
+      await expect(refused).rejects.toMatchObject({
+        name: "AgentCreateRefused",
+        reason: "exceeds_creator",
+      });
+      await expect(refused).rejects.toThrow(message);
+    }
+    expect(await readdir(agents, { recursive: true })).toEqual(before);
+  } finally {
+    await fixture.owners.close();
+  }
+});
+
+it("shows a helper's Session in its creator's agents.status after agents.create and a steered agents.send", async () => {
+  const fixture = await folderCreationFixture();
+  try {
+    const creator = fixture.opened.get(fixture.creatorAgentId);
+    if (creator === undefined) throw new Error("Creator runtime missing");
+    const model = `${fixture.options.providerId}/${fixture.options.modelId}`;
+    // The creator's tool run and the helper's turn share one recorded
+    // provider, so both closing replies say the same thing.
+    fixture.faux.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall("execute", {
+          code: `const helper = await agents.create({ requestId: "status-helper", model: ${JSON.stringify(model)} }); const accepted = await agents.send({ agentId: helper.agentId, sessionId: helper.sessionId, requestId: "status-work", text: "Say done.", delivery: "steer" }); return { accepted, status: await agents.status({ agentId: helper.agentId }) }`,
+        }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("Done."),
+      fauxAssistantMessage("Done."),
+    ]);
+    const sessionId = await creator.createSession("status-proof");
+    const session = creator.getSession(sessionId);
+    const accepted = await session.command({
+      type: "prompt",
+      requestId: "start-helper",
+      delivery: "followUp",
+      text: "Start a helper and check on it.",
+    });
+    const settled = await waitForAgentSettlement(
+      session,
+      accepted.commandId,
+      10_000,
+      new AbortController().signal,
+    );
+    expect(settled.terminal.outcome).toBe("completed");
+    const results = (await session.read()).messages
+      .map(({ value }) => value)
+      .filter((message) => message.role === "toolResult");
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ isError: false });
+    const resultText = z
+      .object({ content: z.array(z.object({ text: z.string() }).loose()) })
+      .loose()
+      .parse(results[0]).content[0]?.text;
+    const reported = z
+      .object({
+        accepted: z.object({ commandId: z.string() }).loose(),
+        status: z.object({
+          sessions: z.array(z.object({ sessionId: z.string() }).loose()),
+        }),
+      })
+      .loose()
+      .parse(JSON.parse(resultText ?? ""));
+    const helper = [...fixture.opened.values()].find(
+      ({ agentId }) => agentId !== fixture.creatorAgentId,
+    );
+    if (helper === undefined) throw new Error("Helper runtime missing");
+    const helperSessions = (await helper.listSessions()).sessions.map(
+      ({ sessionId: id }) => id,
+    );
+    const [helperSessionId] = helperSessions;
+    if (helperSessionId === undefined)
+      throw new Error("Helper Session missing");
+    expect(reported.status.sessions.map(({ sessionId: id }) => id)).toEqual(
+      helperSessions,
+    );
+    // Let the helper's own turn finish so the fixture closes with no work running.
+    await waitForAgentSettlement(
+      helper.getSession(helperSessionId),
+      reported.accepted.commandId,
+      10_000,
+      new AbortController().signal,
+    );
+  } finally {
+    await fixture.owners.close();
+  }
+}, 30_000);
+
+it("refuses a create with a typed refusal when the creator's own folder is gone, creating nothing", async () => {
+  const fixture = await folderCreationFixture();
+  try {
+    const agents = join(fixture.root, ".fungi", "agents");
+    const before = await readdir(agents, { recursive: true });
+    await rm(join(fixture.root, "parent"), { recursive: true });
+    for (const folder of [undefined, "helper"]) {
+      const refused = fixture.create(
+        folder === undefined
+          ? { requestId: "creator-folder-gone" }
+          : { requestId: "creator-folder-gone-sub", folder },
+        new AbortController().signal,
+      );
+      await expect(refused).rejects.toMatchObject({
+        name: "AgentCreateRefused",
+        reason: "exceeds_creator",
+      });
+      await expect(refused).rejects.toThrow(
+        "The creating Agent's folder must be an existing directory",
+      );
+    }
+    expect(await readdir(agents, { recursive: true })).toEqual(before);
+  } finally {
+    await fixture.owners.close();
+  }
+});
 
 it("Full access runs a real Agent command bare outside its folder without bwrap", async () => {
   const fixture = await sandboxProductionFixture();

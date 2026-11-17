@@ -5,7 +5,19 @@ import lockfile from "proper-lockfile";
 import semver from "semver";
 import writeFileAtomic from "write-file-atomic";
 import { z } from "zod";
-import { logEvent } from "./log-event.js";
+import {
+  acquireNodeStoreLease,
+  type NodeStoreLease,
+} from "@fungi.computer/shiitake/node";
+import { ShiitakeError } from "@fungi.computer/shiitake";
+import { upgradeWoodstockStore } from "@fungi.computer/shiitake/effect";
+import { privateSqliteFailureCode } from "./private-sqlite-failure.js";
+import {
+  createPrivateSqliteOwner,
+  openPrivateWritableSqliteDatabase,
+  storeWriteBusyTimeoutMs,
+} from "./private-sqlite-owner.js";
+import { upgradeLocalIdentity } from "./private-local-identity.js";
 import { incompatibleLocalExtensionActivations } from "./private-local-extension-records.js";
 import {
   createPrivateLocalServiceManager,
@@ -184,7 +196,7 @@ export async function readLocalUpgradeNews(path: string) {
 }
 
 export type ArchivedArtifact = Readonly<{
-  kind: "agent-store" | "extension-activations";
+  kind: "extension-activations";
   from: string;
   to: string;
 }>;
@@ -222,27 +234,13 @@ type IncompatibleArtifact = Readonly<{
   kind: ArchivedArtifact["kind"];
   from: string;
   name: string;
-  folder: "agents" | "extensions";
+  folder: "extensions";
 }>;
 
 async function surveyIncompatibleLocalHome(
   home: string,
 ): Promise<IncompatibleArtifact[]> {
   const incompatible: IncompatibleArtifact[] = [];
-  for (const store of await probePrivateLocalAgentStoreEntries(home)) {
-    try {
-      readPrivateLocalAgentProfile(store.databasePath);
-    } catch (cause) {
-      if (cause instanceof LocalStoreSchemaError)
-        incompatible.push({
-          kind: "agent-store",
-          from: store.entry,
-          name: store.agentId,
-          folder: "agents",
-        });
-      else logEvent("upgrade-agent-store-survey", cause);
-    }
-  }
   for (const path of await incompatibleLocalExtensionActivations(home))
     incompatible.push({
       kind: "extension-activations",
@@ -251,6 +249,168 @@ async function surveyIncompatibleLocalHome(
       folder: "extensions",
     });
   return incompatible;
+}
+
+async function archiveDestination(
+  item: IncompatibleArtifact,
+  archive: string,
+): Promise<string> {
+  const directory = join(archive, item.folder);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  for (const suffix of ["", "-2", "-3", "-4", "-5", "-6", "-7", "-8", "-9"]) {
+    const candidate = join(directory, `${item.name}${suffix}`);
+    if (!(await exists(candidate))) return candidate;
+  }
+  throw new Error(
+    `Cannot archive ${item.from} under ${directory}: all destinations exist`,
+  );
+}
+
+async function moveToArchive(
+  item: IncompatibleArtifact,
+  archive: string,
+): Promise<ArchivedArtifact> {
+  const destination = await archiveDestination(item, archive);
+  try {
+    await rename(item.from, destination);
+  } catch (cause) {
+    throw new Error(`Cannot archive ${item.from} to ${destination}`, {
+      cause,
+    });
+  }
+  return { kind: item.kind, from: item.from, to: destination };
+}
+
+/** Take the host's own lease on a store; a live owner keeps it and nothing moves. */
+function acquireStoreLeaseUnlessBusy(
+  databasePath: string,
+): NodeStoreLease | undefined {
+  try {
+    return acquireNodeStoreLease(`${databasePath}.owner.sqlite`);
+  } catch (cause) {
+    const code = privateSqliteFailureCode(cause);
+    if (code === "busy" || code === "locked") return undefined;
+    throw cause;
+  }
+}
+
+async function archiveArtifacts(
+  incompatible: readonly IncompatibleArtifact[],
+  archive: string,
+  signal?: AbortSignal,
+): Promise<ArchivedArtifact[]> {
+  const archived: ArchivedArtifact[] = [];
+  for (const item of incompatible) {
+    signal?.throwIfAborted();
+    archived.push(await moveToArchive(item, archive));
+  }
+  return archived;
+}
+
+/** Folder stores never move: successful upgrades and typed in-place refusals. */
+export type LocalFolderUpgradeReport = Readonly<{
+  upgraded: readonly string[];
+  refused: readonly LocalStoreSchemaError[];
+}>;
+
+type FolderStore = Readonly<{
+  entry: string;
+  databasePath: string;
+}>;
+
+/** Upgrade one store's data in place, rolling back a failed migration. */
+function upgradeStoreInPlace(databasePath: string): "upgraded" | "unchanged" {
+  const database = openPrivateWritableSqliteDatabase(
+    databasePath,
+    storeWriteBusyTimeoutMs,
+  );
+  try {
+    const owner = createPrivateSqliteOwner(database);
+    return owner.transactionSync(() => {
+      const identity = upgradeLocalIdentity(database);
+      const woodstock = upgradeWoodstockStore(owner);
+      return identity || woodstock === "upgraded" ? "upgraded" : "unchanged";
+    });
+  } catch (cause) {
+    if (
+      cause instanceof ShiitakeError &&
+      cause.boundary === "store" &&
+      cause.cause === "incompatible"
+    )
+      throw new LocalStoreSchemaError(databasePath, "unreadable", { cause });
+    throw cause;
+  } finally {
+    database.close();
+  }
+}
+
+/** Refuse before taking a write lease; recheck under that lease before upgrading. */
+async function settleFolderStore(
+  store: FolderStore,
+): Promise<Readonly<{ upgraded?: string; refusal?: LocalStoreSchemaError }>> {
+  let lease: NodeStoreLease | undefined;
+  try {
+    readPrivateLocalAgentProfile(store.databasePath);
+    // A link and its target remain under the target owner's custody.
+    if ((await lstat(store.entry)).isSymbolicLink()) return {};
+    lease = acquireStoreLeaseUnlessBusy(store.databasePath);
+    if (lease === undefined) return {};
+    readPrivateLocalAgentProfile(store.databasePath);
+    return upgradeStoreInPlace(store.databasePath) === "upgraded"
+      ? { upgraded: store.entry }
+      : {};
+  } catch (cause) {
+    const code = privateSqliteFailureCode(cause);
+    if (code === "busy" || code === "locked") return {};
+    return {
+      refusal:
+        cause instanceof LocalStoreSchemaError
+          ? cause
+          : new LocalStoreSchemaError(store.databasePath, "unreadable", {
+              cause,
+            }),
+    };
+  } finally {
+    lease?.release();
+  }
+}
+
+/**
+ * Folder stores have their own lifetime, independent of the home release
+ * marker. Each Agent store is upgraded in place so its Agent and history stay
+ * usable. Refused stores remain exactly where they were, never archived.
+ */
+export async function upgradeLocalFolder(
+  folder: string,
+  signal?: AbortSignal,
+): Promise<LocalFolderUpgradeReport> {
+  const root = join(folder, ".fungi");
+  if (!(await exists(join(root, "agents"))))
+    return { refused: [], upgraded: [] };
+  const release = await lockfile.lock(root, {
+    lockfilePath: join(root, ".upgrade.lock"),
+    realpath: false,
+    stale: 30_000,
+    update: 10_000,
+    retries: { retries: 60, factor: 1.2, minTimeout: 25, maxTimeout: 250 },
+  });
+  try {
+    signal?.throwIfAborted();
+    const upgraded: string[] = [];
+    const refused: LocalStoreSchemaError[] = [];
+    for (const store of await probePrivateLocalAgentStoreEntries(folder)) {
+      signal?.throwIfAborted();
+      const result = await settleFolderStore(store);
+      if (result.upgraded !== undefined) upgraded.push(result.upgraded);
+      if (result.refusal !== undefined) refused.push(result.refusal);
+    }
+    return {
+      refused,
+      upgraded,
+    };
+  } finally {
+    await release();
+  }
 }
 
 /** Upgrade → service startup → extensions owner: this lock is always first. */
@@ -306,7 +466,6 @@ export async function upgradeLocalHome(
       const archive = join(root, "archive", archiveSlug(prior));
       if (
         (await surveyIncompatibleLocalHome(home)).length === 0 &&
-        !(await exists(join(archive, "agents"))) &&
         !(await exists(join(archive, "extensions", "activations.json")))
       )
         return { kind: "current" };
@@ -357,9 +516,9 @@ export async function upgradeLocalHome(
     const incompatible = await surveyIncompatibleLocalHome(home);
     // The installed-registry owner also uses archive/unversioned. Only our
     // own entries indicate an interrupted home upgrade to resume.
-    const existingArchive =
-      (await exists(join(archive, "agents"))) ||
-      (await exists(join(archive, "extensions", "activations.json")));
+    const existingArchive = await exists(
+      join(archive, "extensions", "activations.json"),
+    );
     if (
       incompatible.length === 0 &&
       !existingArchive &&
@@ -370,47 +529,11 @@ export async function upgradeLocalHome(
       return { kind: "current" };
     }
     news ??= await readLocalUpgradeNews(options.newsPath);
-    if (incompatible.length > 0) {
-      await mkdir(join(archive, "agents"), { recursive: true, mode: 0o700 });
-      await mkdir(join(archive, "extensions"), {
-        recursive: true,
-        mode: 0o700,
-      });
-    }
-    const archived: ArchivedArtifact[] = [];
-    for (const item of incompatible) {
-      options.signal?.throwIfAborted();
-      let destination: string | undefined;
-      for (const suffix of [
-        "",
-        "-2",
-        "-3",
-        "-4",
-        "-5",
-        "-6",
-        "-7",
-        "-8",
-        "-9",
-      ]) {
-        const candidate = join(archive, item.folder, `${item.name}${suffix}`);
-        if (!(await exists(candidate))) {
-          destination = candidate;
-          break;
-        }
-      }
-      if (destination === undefined)
-        throw new Error(
-          `Cannot archive ${item.from} under ${join(archive, item.folder)}: all destinations exist`,
-        );
-      try {
-        await rename(item.from, destination);
-      } catch (cause) {
-        throw new Error(`Cannot archive ${item.from} to ${destination}`, {
-          cause,
-        });
-      }
-      archived.push({ kind: item.kind, from: item.from, to: destination });
-    }
+    const archived = await archiveArtifacts(
+      incompatible,
+      archive,
+      options.signal,
+    );
     await writeLocalVersionMarker(home, {
       release: news.release,
       spore,
@@ -423,8 +546,7 @@ export async function upgradeLocalHome(
         from: prior,
         to: news.release,
         service,
-        archive:
-          incompatible.length > 0 || existingArchive ? archive : undefined,
+        archive: archived.length > 0 || existingArchive ? archive : undefined,
         archived,
         whatsNew: news.lines,
       },
@@ -448,30 +570,43 @@ export function formatLocalUpgradeNotice(
     lines.push("Stopped the old Fungi service.");
   if (report.service === "killed")
     lines.push("Stopped the old Fungi service after its exit deadline.");
-  if (report.archive !== undefined) {
-    const agents = report.archived.filter(
-      (item) => item.kind === "agent-store",
-    ).length;
-    const activations = report.archived.find(
-      (item) => item.kind === "extension-activations",
-    );
-    const contents = [
-      ...(agents > 0
-        ? [`${String(agents)} Agent ${agents === 1 ? "store" : "stores"}`]
-        : []),
-      ...(activations !== undefined ? ["extension activations"] : []),
-    ].join(" and ");
-    lines.push(
-      report.archived.length === 0
-        ? "The earlier archive is still at"
-        : `Archived ${contents} to`,
-      `  ${report.archive} (nothing was deleted)`,
-    );
-    if (activations !== undefined)
-      lines.push(`  Extension activations: ${activations.to}`);
-  }
+  lines.push(...archiveLines(report));
   const news = report.whatsNew.slice(0, 3);
   if (news.length > 0)
     lines.push("What's new:", ...news.map((line) => `  • ${line}`));
   return lines;
+}
+
+/** The archive's own lines: what moved, where, and that nothing was deleted. */
+function archiveLines(
+  report: Pick<LocalUpgradeReport, "archive" | "archived">,
+): readonly string[] {
+  if (report.archive === undefined) return [];
+  const activations = report.archived[0];
+  return [
+    report.archived.length === 0
+      ? "The earlier archive is still at"
+      : "Archived extension activations to",
+    `  ${report.archive} (nothing was deleted)`,
+    ...(activations !== undefined
+      ? [`  Extension activations: ${activations.to}`]
+      : []),
+  ];
+}
+
+export function formatLocalFolderUpgradeNotice(
+  report: LocalFolderUpgradeReport,
+): readonly string[] {
+  const upgraded = report.upgraded.length;
+  return [
+    ...(upgraded > 0
+      ? [
+          `Upgraded ${String(upgraded)} Agent ${upgraded === 1 ? "store" : "stores"} to this Fungi (nothing was lost)`,
+        ]
+      : []),
+    ...report.refused.flatMap((refusal) => [
+      refusal.message,
+      `  ${refusal.databasePath}`,
+    ]),
+  ];
 }

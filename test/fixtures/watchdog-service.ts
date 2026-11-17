@@ -69,12 +69,14 @@ if (isMainThread) {
           messages: [{ role: "user", content: "fixture prompt", timestamp: 1 }],
         });
         for await (const event of stream) {
-          if (event.type === "text_delta") {
+          // Local paces provider events, so the consumer sees an event only
+          // after Local recorded it. Stall once the text is complete.
+          if (event.type === "text_end") {
             // Deliberately endless. Nothing on this event loop can arrange exit.
             for (;;) Math.sqrt(2);
           }
         }
-        throw new Error("The fixture did not produce a text delta");
+        throw new Error("The fixture did not produce its text");
       },
       undefined,
       undefined,

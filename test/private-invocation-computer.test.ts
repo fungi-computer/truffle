@@ -26,6 +26,7 @@ import { Knapsack, type KnapsackComputer } from "@fungi.computer/knapsack";
 import { Mycelium, type InvocationContext } from "@fungi.computer/mycelium";
 import {
   createPrivateInvocationComputer,
+  localApprovalDeadline,
   likelySandboxDenied,
   runPrivateInvocationProcess,
 } from "../src/private-invocation-computer.js";
@@ -290,7 +291,7 @@ it.each(["run", "start"] as const)(
   },
 );
 
-it("Workspace escape stages without executing, while Full access ignores escape", async () => {
+it("Workspace escape returns its own decision, while Full access ignores escape", async () => {
   const root = await temporaryDirectory("escape");
   const marker = join(root, "ran");
   let mode: "workspace" | "full-access" = "workspace";
@@ -305,15 +306,7 @@ it("Workspace escape stages without executing, while Full access ignores escape"
     async ({ request, cwd }) => {
       expect(cwd).toBe(await realpath(root));
       stages.push(JSON.stringify(request));
-      return {
-        kind: "pending_approval",
-        recordId: "one",
-        description: {
-          title: "computer.exec",
-          inputBytes: 1,
-          inputSha256: "a".repeat(64),
-        },
-      };
+      return { kind: "denied", by: "the user", message: "Denied by the user" };
     },
   );
   const input = {
@@ -322,13 +315,13 @@ it("Workspace escape stages without executing, while Full access ignores escape"
     escape: { justification: "sandbox denied" },
   };
   expect(await computer.call("exec", input, invocation())).toMatchObject({
-    kind: "pending_approval",
-    recordId: "one",
+    kind: "denied",
+    by: "the user",
   });
   expect(await exists(marker)).toBe(false);
   expect(await computer.call("exec", input, invocation())).toMatchObject({
-    kind: "pending_approval",
-    recordId: "one",
+    kind: "denied",
+    by: "the user",
   });
   expect(stages).toHaveLength(2);
   mode = "full-access";
@@ -354,13 +347,8 @@ it("a direct argv prefix may run by policy, but shell text still asks", async ()
     () => {
       decisions.push("card");
       return Promise.resolve({
-        kind: "pending_approval",
-        recordId: "shell",
-        description: {
-          title: "computer.exec",
-          inputBytes: 1,
-          inputSha256: "a".repeat(64),
-        },
+        kind: "refused",
+        reason: "approval_expired",
       });
     },
     ({ request }) => {
@@ -398,7 +386,7 @@ it("a direct argv prefix may run by policy, but shell text still asks", async ()
       { command: "git push; touch ~/x", escape: { justification: "blocked" } },
       invocation(),
     ),
-  ).toMatchObject({ kind: "pending_approval" });
+  ).toMatchObject({ kind: "refused", reason: "approval_expired" });
   expect(
     await computer.call(
       "exec",
@@ -409,7 +397,7 @@ it("a direct argv prefix may run by policy, but shell text still asks", async ()
       },
       invocation(),
     ),
-  ).toMatchObject({ kind: "pending_approval" });
+  ).toMatchObject({ kind: "refused", reason: "approval_expired" });
   allowed = false;
   expect(
     await computer.call(
@@ -421,13 +409,37 @@ it("a direct argv prefix may run by policy, but shell text still asks", async ()
       },
       invocation(),
     ),
-  ).toMatchObject({ kind: "pending_approval" });
+  ).toMatchObject({ kind: "refused", reason: "approval_expired" });
   expect(decisions).toEqual(["policy", "card", "card", "card"]);
 });
 
 function invocation(signal = new AbortController().signal): InvocationContext {
   return { executionId: "local-exec-proof", deadlineAt: null, signal };
 }
+
+it("approval waits reserve the command budget inside the actual execute deadline", () => {
+  const context = { ...invocation(), deadlineAt: 1_000_000 };
+  expect(
+    localApprovalDeadline(
+      {
+        operation: "run",
+        command: "true",
+        timeoutMs: 180_000,
+      },
+      context,
+    ),
+  ).toBe(700_000);
+  expect(
+    localApprovalDeadline(
+      {
+        operation: "run",
+        command: "true",
+        timeoutMs: 900_000,
+      },
+      context,
+    ),
+  ).toBe(100_000);
+});
 
 function shellLiteral(value: string) {
   return `'${value.replaceAll("'", "'\\''")}'`;

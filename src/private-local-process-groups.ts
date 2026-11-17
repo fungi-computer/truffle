@@ -8,6 +8,7 @@ import {
   readProcessStart,
   type ProcessStart,
 } from "./private-local-process-identity.js";
+import { signalSession } from "./private-local-process-sessions.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -67,7 +68,8 @@ export async function readGroupProcessStart(
  * service (SIGKILL, watchdog exit, crash) leaves it running. Every group is
  * recorded here with the start time of its leader and of the owning service,
  * so a later stop or start can end exactly those groups and never a process
- * that merely reuses a PID.
+ * that merely reuses a PID. The leader is also a session leader, so the same
+ * id ends processes that moved to another group (timeout(1) calls setpgid).
  */
 const groupRecordSchema = z.strictObject({
   groupId: z.number().int().min(2),
@@ -178,6 +180,7 @@ export async function reapOrphanedProcessGroups(
     // must be the recorded one.
     if (leader.kind !== "running" || leader.start === record.leaderStart) {
       signalGroup(record.groupId, "SIGKILL");
+      await signalSession(record.groupId, "KILL");
       reaped += 1;
     }
     await rm(path, { force: true });

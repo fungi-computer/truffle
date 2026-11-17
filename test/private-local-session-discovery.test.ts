@@ -1,4 +1,5 @@
 import {
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -8,7 +9,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -28,10 +30,10 @@ import { createPrivateSqliteOwner } from "../src/private-sqlite-owner.js";
 import {
   projectPrivateLocalSessionDiscovery,
   readPrivateLocalSessionDiscovery,
-  unreadableStoreReason,
 } from "../src/private-local-session-discovery.js";
 import { sessionDiscoverySchema } from "../src/private-local-service-discovery.js";
 import { unusedExtensions } from "./fixtures/unused-extensions.js";
+import { initFreshStore } from "./fixtures/fresh-store.js";
 import {
   fixtureEffectiveModel,
   fixtureMailControls,
@@ -62,6 +64,7 @@ function createDatabase(
   sessionId = "main",
 ) {
   const database = new DatabaseSync(path);
+  initFreshStore(database, "fixture", title);
   const owner = createPrivateSqliteOwner(database);
   prepareSessionStore(owner);
   const entry: Extract<StoredSessionEntry, { kind: "command" }> = {
@@ -101,6 +104,30 @@ async function discoverPrivateLocalSessions(
   );
 }
 
+/** A real Agent store a Local host wrote at Woodstock marker 3; re-marked 0 it is one no build wrote. */
+const markerThreeStore = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "..",
+  "packages",
+  "shiitake",
+  "test",
+  "fixtures",
+  "historical-stores",
+  "marker-3.agent.sqlite",
+);
+
+async function writeUnreadableStore(path: string) {
+  await copyFile(markerThreeStore, path);
+  const database = new DatabaseSync(path);
+  try {
+    database.exec("UPDATE woodstock_schema SET version = 0");
+  } finally {
+    database.close();
+  }
+}
+
 afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((value) => rm(value, { recursive: true, force: true })),
@@ -137,7 +164,7 @@ describe("private local session discovery", () => {
     const folder = await root();
     const store = join(folder, ".fungi", "agents", "old");
     await mkdir(store, { recursive: true });
-    createDatabase(join(store, "agent.sqlite"), "old prompt", 10);
+    await writeUnreadableStore(join(store, "agent.sqlite"));
 
     const discovered = await discoverPrivateLocalSessions(
       folder,
@@ -148,14 +175,20 @@ describe("private local session discovery", () => {
         agentId,
         unreadable,
       })),
-    ).toEqual([{ agentId: "old", unreadable: unreadableStoreReason("old") }]);
+    ).toEqual([
+      {
+        agentId: "old",
+        unreadable:
+          "Fungi cannot read this Agent store. Its files have not been changed.",
+      },
+    ]);
   });
 
   it("sends an unreadable store across the service wire as its own visible row", async () => {
     const folder = await root();
     const store = join(folder, ".fungi", "agents", "old");
     await mkdir(store, { recursive: true });
-    createDatabase(join(store, "agent.sqlite"), "old prompt", 10);
+    await writeUnreadableStore(join(store, "agent.sqlite"));
 
     const sent: unknown = JSON.parse(
       JSON.stringify(await readPrivateLocalSessionDiscovery(folder)),
@@ -166,7 +199,13 @@ describe("private local session discovery", () => {
         agentId,
         unreadable,
       })),
-    ).toEqual([{ agentId: "old", unreadable: unreadableStoreReason("old") }]);
+    ).toEqual([
+      {
+        agentId: "old",
+        unreadable:
+          "Fungi cannot read this Agent store. Its files have not been changed.",
+      },
+    ]);
   });
 
   it("lists every Session in one store and resumes its exact identity", async () => {
@@ -422,7 +461,8 @@ describe("Local startup selection", () => {
           ),
           sessionCount: 1,
           updatedAt: 10,
-          unreadable: unreadableStoreReason("first"),
+          name: "first",
+          createdBy: null,
         },
         {
           agentId: "second",
@@ -431,7 +471,8 @@ describe("Local startup selection", () => {
           ),
           sessionCount: 1,
           updatedAt: 10,
-          unreadable: unreadableStoreReason("second"),
+          name: "second",
+          createdBy: null,
         },
       ]);
     } finally {

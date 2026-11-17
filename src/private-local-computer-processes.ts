@@ -24,6 +24,11 @@ import {
   removeProcessGroupRecord,
   writeProcessGroupRecord,
 } from "./private-local-process-groups.js";
+import {
+  sessionAlive,
+  signalSession,
+  signalSessionNow,
+} from "./private-local-process-sessions.js";
 import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import { Writable } from "node:stream";
 import { logEvent } from "./log-event.js";
@@ -200,6 +205,11 @@ function groupAlive(groupId: number) {
     }
     throw cause;
   }
+}
+
+/** The leader's group, or any process its session still holds. */
+async function commandAlive(groupId: number) {
+  return groupAlive(groupId) || (await sessionAlive(groupId));
 }
 
 /**
@@ -492,13 +502,25 @@ class ManagedProcess {
     resolve(undefined);
   }
 
-  /** TERM the whole group, then KILL whatever ignores it past the grace. */
+  /**
+   * TERM the whole command, then KILL whatever ignores it past the grace. The
+   * command is its own session leader, and a process that calls setpgid
+   * (timeout(1)) leaves the group but not the session: the group signal
+   * reaches the leader's group and the session signal reaches the rest.
+   */
   async #terminateGroup() {
     const groupId = this.#groupId;
-    if (groupId === undefined || !signalGroup(groupId, "SIGTERM")) return false;
+    if (groupId === undefined) return false;
+    const grouped = signalGroup(groupId, "SIGTERM");
+    const sessioned = await signalSession(groupId, "TERM");
+    if (!grouped && !sessioned) return false;
     const deadline = Date.now() + terminationGraceMs;
-    while (groupAlive(groupId) && Date.now() < deadline) await delay(20);
-    if (groupAlive(groupId)) signalGroup(groupId, "SIGKILL");
+    while ((await commandAlive(groupId)) && Date.now() < deadline)
+      await delay(20);
+    if (await commandAlive(groupId)) {
+      signalGroup(groupId, "SIGKILL");
+      await signalSession(groupId, "KILL");
+    }
     return true;
   }
 
@@ -528,8 +550,10 @@ class ManagedProcess {
 
   /** Synchronous last resort while the host process itself exits. */
   killNow() {
-    if (this.running && this.#groupId !== undefined)
+    if (this.running && this.#groupId !== undefined) {
       signalGroup(this.#groupId, "SIGKILL");
+      signalSessionNow(this.#groupId, "KILL");
+    }
   }
 
   snapshot(): PrivateLocalProcess {

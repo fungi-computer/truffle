@@ -606,7 +606,7 @@ describe("private local RuntimeHost", () => {
         "high",
       ]);
       expect(
-        requests.map((request) => request.headers.get("session_id")),
+        requests.map((request) => request.headers.get("session-id")),
       ).toEqual([
         "synthetic-provider-default",
         "synthetic-owner-session",
@@ -1047,9 +1047,9 @@ describe("private local RuntimeHost", () => {
       "INSERT INTO woodstock_schema (version, protocol) VALUES (3, 'shiitake.extension/v1')",
     ],
     [
-      "obsolete",
+      "unsupported marker",
       "CREATE TABLE woodstock_schema (version INTEGER NOT NULL, protocol TEXT NOT NULL)",
-      "INSERT INTO woodstock_schema (version, protocol) VALUES (2, 'shiitake.extension/v0')",
+      "INSERT INTO woodstock_schema (version, protocol) VALUES (0, 'shiitake.extension/v0')",
     ],
   ])(
     "refuses a %s store while retaining its file and evidence",

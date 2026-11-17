@@ -5,6 +5,11 @@ import * as Effect from "effect/Effect";
 import { parseModelPreferenceJson } from "@fungi.computer/shiitake/model-preference";
 import { z } from "zod";
 import { localPermissionModeSchema } from "./private-local-permission-mode.js";
+import {
+  identityBaselineColumns,
+  identityColumnNames,
+  selectIdentitySql,
+} from "./private-local-identity.js";
 import { readAgentDefaultModelJson } from "./private-local-agent-default-model.js";
 import {
   localAgentFolderSchema,
@@ -13,6 +18,7 @@ import {
 import { logEvent } from "./log-event.js";
 import {
   readSessionSummaries,
+  readWoodstockStoreProtocol,
   type StoredSessionSummary,
 } from "@fungi.computer/shiitake/effect";
 
@@ -27,6 +33,8 @@ import type {
 import {
   createPrivateSqliteOwner,
   openPrivateReadOnlySqliteDatabase,
+  type NativeOutput,
+  type PrivateSqliteDatabase,
 } from "./private-sqlite-owner.js";
 import {
   privateSqliteFailureCode,
@@ -115,11 +123,6 @@ async function immediateStoreCandidates(root: string, relative: string) {
  */
 export type LocalStoreVisibility = "active" | "archived" | "all";
 
-/** The one plain phrase for a store written before the current schema, with how to reset it. */
-export function unreadableStoreReason(agentId: string): string {
-  return `predates the current schema; move .fungi/agents/${agentId} aside to reset it`;
-}
-
 /**
  * Whether a store's Agent is archived. A store this cannot read counts as
  * not archived, so discovery still reports it as a problem.
@@ -207,18 +210,36 @@ const storedProfileSchema = z.strictObject({
   model: z.string(),
 });
 
-/** A Local or Woodstock store outside the current schema; Local never migrates it. */
+/** A store this Fungi cannot open; its files must remain untouched in place. */
 export class LocalStoreSchemaError extends Error {
   override readonly name = "LocalStoreSchemaError";
   constructor(
     readonly databasePath: string,
+    readonly reason: "newer" | "unreadable" = "unreadable",
     options?: ErrorOptions,
   ) {
     super(
-      `Agent store ${databasePath} is incompatible with this version of Fungi. To reset, stop the owning Fungi service, then move this database, its .owner.sqlite sidecar and any associated SQLite journal files aside together. Create a fresh Agent; existing Sessions are not migrated. Keep the moved files if you need their data.`,
+      reason === "newer"
+        ? "This Agent was saved by a newer Fungi. Update Fungi to open it. Its files have not been changed."
+        : "Fungi cannot read this Agent store. Its files have not been changed.",
       options,
     );
   }
+}
+
+/** Check before any Local identity, model, or runtime preparation can write. */
+export function assertLocalStoreProtocol(
+  database: PrivateSqliteDatabase,
+  path: string,
+): void {
+  const protocol = readWoodstockStoreProtocol(
+    createPrivateSqliteOwner(database),
+  );
+  if (protocol === "newer" || protocol === "unmarked")
+    throw new LocalStoreSchemaError(
+      path,
+      protocol === "newer" ? "newer" : "unreadable",
+    );
 }
 
 export type PrivateLocalAgentProfile = ReturnType<typeof openAgentProfile>;
@@ -269,35 +290,26 @@ export function readPrivateLocalAgentProfile(
 function openAgentProfile(path: string) {
   const database = openPrivateReadOnlySqliteDatabase(path);
   try {
-    const columns = database
-      .prepare("PRAGMA table_info(private_local_identity)")
-      .all();
+    assertLocalStoreProtocol(database, path);
+    // An identity from before sandbox modes, folders or the archive flag reads
+    // with the values it ran with; only a table that is not an identity is refused.
+    const columns = identityColumnNames(database);
     if (
-      ![
-        "name",
-        "created_by",
-        "archived",
-        "mode",
-        "writable_folders",
-        "folder",
-      ].every((required) => columns.some((column) => column.name === required))
+      !identityBaselineColumns.every((required) => columns.includes(required))
     )
       throw new LocalStoreSchemaError(path);
-    const identity = database
-      .prepare(
-        "SELECT name, created_by, archived, mode, writable_folders, folder FROM private_local_identity WHERE singleton = 1",
-      )
-      .get();
+    const identity: Record<string, NativeOutput> =
+      database.prepare(selectIdentitySql(columns)).get() ?? {};
     const writableFolders = storedProfileSchema.shape.writableFolders.parse(
-      JSON.parse(z.string().parse(identity?.writable_folders)),
+      JSON.parse(z.string().parse(identity.writable_folders)),
     );
     const stored = storedProfileSchema.parse({
-      name: identity?.name,
-      createdBy: identity?.created_by,
-      archived: identity?.archived,
-      mode: identity?.mode,
+      name: identity.name,
+      createdBy: identity.created_by,
+      archived: identity.archived,
+      mode: identity.mode,
       writableFolders,
-      folder: identity?.folder,
+      folder: identity.folder,
       model: readAgentDefaultModelJson(database),
     });
     return Object.freeze({
@@ -383,8 +395,6 @@ export async function readPrivateLocalSessionDiscovery(
     request.signal?.throwIfAborted();
     const agentId = basename(dirname(path));
     try {
-      const summaries = await readPrivateLocalSessionSummaries(path);
-      discovered.push(...summaries);
       let profile: ReturnType<typeof readPrivateLocalAgentProfile> | undefined;
       let unreadable: string | undefined;
       try {
@@ -392,11 +402,16 @@ export async function readPrivateLocalSessionDiscovery(
         resolveAgentFolder(root, profile.folder);
         profiles.set(agentId, profile);
       } catch (cause) {
-        // Shown on the row so the user knows to reset the store; opening it
-        // refuses with the same error.
+        // Listing and opening retain the same reason without moving the store.
         if (!(cause instanceof LocalStoreSchemaError)) throw cause;
-        unreadable = unreadableStoreReason(agentId);
+        unreadable = cause.message;
       }
+      // Never decode obsolete Session rows just to display the refused Agent.
+      const summaries =
+        unreadable === undefined
+          ? await readPrivateLocalSessionSummaries(path)
+          : [];
+      discovered.push(...summaries);
       agents.push({
         agentId,
         name: profile?.name,

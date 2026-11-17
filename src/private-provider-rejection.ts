@@ -2,8 +2,14 @@ import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { isContextOverflow } from "@earendil-works/pi-ai/utils/overflow";
 import {
   isRetryableProviderRejection,
+  providerDisplayNames,
   type ProviderRejection,
 } from "@fungi.computer/mule";
+
+const subscriptionNames: ReadonlyMap<string, string> = new Map([
+  ["anthropic", "Claude"],
+  ["openai", "ChatGPT"],
+]);
 
 /** Evidence owned by one Local request, never inferred from assistant prose. */
 export type ModelFailureInput = Readonly<{
@@ -26,22 +32,18 @@ export function modelFailureMessage(
   provider: string,
   failure: ModelFailureInput,
 ): string {
-  const name =
-    provider === "anthropic"
-      ? "Anthropic"
-      : provider === "openai"
-        ? "OpenAI"
-        : provider;
+  const name = providerDisplayNames.get(provider) ?? provider;
   if (failure.refusal !== undefined)
     return `${failure.refusal.category}: ${failure.refusal.message}`;
-  // Typed subscription evidence wins over all SDK/provider wording.
+  // Typed limit evidence wins over all SDK/provider wording. Account quota
+  // exhaustion is not evidence about a Claude or ChatGPT subscription.
   if (failure.rejection?.code === "usage-limit-reached") {
+    const account =
+      failure.rejection.cause === "quota"
+        ? undefined
+        : subscriptionNames.get(provider);
     const subscription =
-      provider === "anthropic"
-        ? " on your Claude subscription"
-        : provider === "openai"
-          ? " on your ChatGPT subscription"
-          : "";
+      account === undefined ? "" : ` on your ${account} subscription`;
     const resetAt = failure.rejection.resetAt;
     const reset =
       resetAt === undefined

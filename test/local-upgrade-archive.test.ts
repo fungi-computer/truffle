@@ -32,7 +32,7 @@ function oldStore(path: string) {
   db.close();
 }
 
-it("archives only refused home artifacts, keeps symlink targets, and resumes without overwriting", async () => {
+it("archives refused activations but leaves all Agent stores and symlinks in place", async () => {
   const home = await mkdtemp(join(tmpdir(), "fungi-upgrade-"));
   homes.push(home);
   const agents = join(home, ".fungi", "agents");
@@ -64,9 +64,9 @@ it("archives only refused home artifacts, keeps symlink targets, and resumes wit
   expect(first.kind).toBe("upgraded");
   if (first.kind !== "upgraded") throw new Error("expected upgrade");
   expect(first.report.archive).toBe(archive);
-  expect(first.report.archived).toHaveLength(3);
+  expect(first.report.archived).toHaveLength(1);
   expect(formatLocalUpgradeNotice(first.report)).toContain(
-    "Archived 2 Agent stores and extension activations to",
+    "Archived extension activations to",
   );
   expect(formatLocalUpgradeNotice(first.report)).toContain(
     `  Extension activations: ${join(archive, "extensions", "activations.json")}`,
@@ -75,9 +75,9 @@ it("archives only refused home artifacts, keeps symlink targets, and resumes wit
     "earlier archive",
   );
   expect(
-    await readFile(join(archive, "agents", "old-agent-2", "agent.sqlite")),
+    await readFile(join(agents, "old-agent", "agent.sqlite")),
   ).toBeTruthy();
-  expect(await readlink(join(archive, "agents", "linked-agent"))).toBe(target);
+  expect(await readlink(join(agents, "linked-agent"))).toBe(target);
   expect((await lstat(join(target, "agent.sqlite"))).isFile()).toBe(true);
   expect(await readFile(join(extensions, "installed.json"), "utf8")).toBe(
     installed,
@@ -147,19 +147,16 @@ it("archives truncated activation JSON as reader-refused without blocking dispat
   });
 });
 
-it("resumes an interrupted protocol-3 archive under its original slug after the service record is removed", async () => {
+it("resumes an interrupted activation archive under its original slug after the service record is removed", async () => {
   const home = await mkdtemp(join(tmpdir(), "fungi-resumed-archive-"));
   homes.push(home);
   const root = join(home, ".fungi");
-  const agents = join(root, "agents");
+  const extensions = join(root, "extensions");
   const service = join(root, "service");
   await mkdir(service, { recursive: true });
-  const first = join(agents, "a-first");
-  const blocked = join(agents, "z-blocked");
-  await mkdir(first, { recursive: true });
-  await mkdir(blocked, { recursive: true });
-  oldStore(join(first, "agent.sqlite"));
-  oldStore(join(blocked, "agent.sqlite"));
+  await mkdir(extensions, { recursive: true });
+  const blocked = join(extensions, "activations.json");
+  await writeFile(blocked, "{truncated");
   const build = "a".repeat(64);
   const record = join(service, "service.json");
   await writeFile(
@@ -175,9 +172,9 @@ it("resumes an interrupted protocol-3 archive under its original slug after the 
   );
   const archive = join(root, "archive", "protocol-3-aaaaaaaaaaaa");
   for (const suffix of ["", "-2", "-3", "-4", "-5", "-6", "-7", "-8", "-9"]) {
-    const occupied = join(archive, "agents", `z-blocked${suffix}`);
-    await mkdir(occupied, { recursive: true });
-    await writeFile(join(occupied, "keep"), "earlier archived store");
+    const occupied = join(archive, "extensions", `activations.json${suffix}`);
+    await mkdir(join(archive, "extensions"), { recursive: true });
+    await writeFile(occupied, "earlier archived activations");
   }
   const newsPath = join(home, "whats-new.json");
   await writeFile(newsPath, JSON.stringify({ release: "0.4.1", lines: [] }));
@@ -200,19 +197,15 @@ it("resumes an interrupted protocol-3 archive under its original slug after the 
       },
     }),
   ).rejects.toThrow(
-    `Cannot archive ${blocked} under ${join(archive, "agents")}`,
+    `Cannot archive ${blocked} under ${join(archive, "extensions")}`,
   );
-  expect(
-    await readFile(join(archive, "agents", "a-first", "agent.sqlite")),
-  ).toBeTruthy();
+  expect(await readFile(blocked, "utf8")).toBe("{truncated");
   await expect(readFile(record)).rejects.toMatchObject({ code: "ENOENT" });
   await expect(readFile(join(root, "version.json"))).rejects.toMatchObject({
     code: "ENOENT",
   });
 
-  await rm(join(archive, "agents", "z-blocked-9"), {
-    recursive: true,
-  });
+  await unlink(join(archive, "extensions", "activations.json-9"));
   const resumed = await upgradeLocalHome({ home, newsPath, spore: "0.3.1" });
   expect(resumed.kind).toBe("upgraded");
   if (resumed.kind !== "upgraded") throw new Error("expected resumed upgrade");
@@ -220,17 +213,17 @@ it("resumes an interrupted protocol-3 archive under its original slug after the 
   expect(resumed.report.archive).toBe(archive);
   expect(resumed.report.archived).toEqual([
     {
-      kind: "agent-store",
+      kind: "extension-activations",
       from: blocked,
-      to: join(archive, "agents", "z-blocked-9"),
+      to: join(archive, "extensions", "activations.json-9"),
     },
   ]);
   expect(formatLocalUpgradeNotice(resumed.report)).toContain(
     `  ${archive} (nothing was deleted)`,
   );
   expect(
-    await readFile(join(archive, "agents", "a-first", "agent.sqlite")),
-  ).toBeTruthy();
+    await readFile(join(archive, "extensions", "activations.json-9"), "utf8"),
+  ).toBe("{truncated");
   await expect(
     readFile(join(root, ".upgrade-in-progress.json")),
   ).rejects.toMatchObject({

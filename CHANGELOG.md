@@ -1,5 +1,62 @@
 # @fungi.computer/truffle
 
+## 0.14.0
+
+### Minor Changes
+
+- Changes since 0.13.1:
+
+  - fix(shiitake): preserve typed agent answer failures
+  - fix(local): recover concurrent Anthropic OAuth rotations
+  - fix(oyster): bound cancellation retention to the live call deadline
+  - fix(local): refuse duplicate escaped calls while approval waits
+  - fix(local): preserve refused Agent stores in place
+  - fix(approvals): isolate waiting calls and name App write permissions
+  - fix(agents): explain typed quota limits without retry advice
+  - fix(spore): preserve upgrade atomicity and old sandbox requirements
+  - feat(spore): upgrade marker 1 and 2 Agent stores in place too
+  - fix(mule): classify a ChatGPT usage limit that arrives as a parsed error
+    event
+  - feat(spore): upgrade older Agent stores in place instead of archiving them
+  - fix: follow Pi 1.5 where it changed
+  - fix(hub): answer a waiting App write in its own call
+  - fix(shiitake): show a helper's Session in its creator's agents.status
+  - fix(local): keep the session signal type private to its module
+  - fix(local): end every process a stopped command started, even in another
+    group
+  - fix(truffle): refuse a helper create typed when the creator's folder is gone
+  - fix(local): keep the service's timers running while models stream
+  - fix(local): return approval outcomes in the originating tool call
+  - feat(shiitake): let agents choose helper folders
+  - fix(truffle): explain model acquisition failures
+  - fix(spore): archive incompatible folder Agent stores
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.18.2
+  - @fungi.computer/approvals@0.2.4
+  - @fungi.computer/cordyceps@0.4.3
+  - @fungi.computer/nacre@0.7.0
+  - @fungi.computer/shiitake-extensions@0.11.2
+  - @fungi.computer/shiitake@0.19.0
+  - @fungi.computer/veil@0.7.5
+  - @fungi.computer/watchdog@0.1.4
+  - @fungi.computer/graft@0.2.27
+  - @fungi.computer/knapsack@0.4.14
+  - @fungi.computer/mycelium@0.4.1
+  - @fungi.computer/zookeeper@0.0.34
+  - @fungi.computer/bird-dog@0.3.7
+  - @fungi.computer/carrier@0.2.5
+  - @fungi.computer/seam@0.2.6
+
 ## 0.13.1
 
 ### Patch Changes

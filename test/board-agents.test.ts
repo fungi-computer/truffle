@@ -198,7 +198,7 @@ it("an archived Agent is not on the board, and a store from an older schema is u
     agentId: "local_store_old",
     sessions: [],
     unreadable:
-      "predates the current schema; move .fungi/agents/local_store_old aside to reset it",
+      "Fungi cannot read this Agent store. Its files have not been changed.",
   });
 });
 

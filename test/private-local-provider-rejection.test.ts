@@ -24,6 +24,11 @@ async function turnFailure(
   status: number,
   error: Readonly<Record<string, string>>,
 ) {
+  return turnFailureFor(() => Response.json({ error }, { status }));
+}
+
+/** One real Local turn failure for any fixture OpenAI reply. */
+async function turnFailureFor(reply: () => Response) {
   const root = await mkdtemp(join(tmpdir(), "fungi-provider-rejection-"));
   roots.push(root);
   const credentialPath = join(root, "credentials.json");
@@ -43,7 +48,7 @@ async function turnFailure(
     requests.push(url);
     if (url !== "https://api.openai.com/v1/responses")
       throw new Error("Unexpected offline provider request");
-    return Promise.resolve(Response.json({ error }, { status }));
+    return Promise.resolve(reply());
   });
   const models = createPrivateModels(credentialPath);
   const source = createPrivateLocalModelSource(
@@ -108,6 +113,38 @@ it("a Sign in with ChatGPT usage limit reaches the turn as the typed usage-limit
   expect(isRetryableAssistantError(result)).toBe(false);
 });
 
+it("a ChatGPT usage limit that arrives as a parsed error event keeps its typed reason, not try again", async () => {
+  const providerText =
+    "The ChatGPT user has reached their Subscription Sharing usage limit. Ask the user to try again after their usage limit resets or use an API key instead.";
+  const events = [
+    {
+      type: "response.created",
+      sequence_number: 0,
+      response: { id: "response_limit", status: "in_progress" },
+    },
+    {
+      type: "error",
+      code: "subscription_sharing_usage_limit_exceeded",
+      message: providerText,
+      param: null,
+      sequence_number: 1,
+    },
+  ];
+  const { result, providerError, diagnostic } = await turnFailureFor(
+    () =>
+      new Response(
+        events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(""),
+        { headers: { "content-type": "text/event-stream" } },
+      ),
+  );
+  expect(diagnostic).toBe(
+    "OpenAI usage limit reached on your ChatGPT subscription.",
+  );
+  expect(diagnostic).not.toContain("try again");
+  expect(providerError).toContain(providerText);
+  expect(isRetryableAssistantError(result)).toBe(false);
+});
+
 it("a throttling 429 reports the rate limit separately from service availability", async () => {
   const { providerError, diagnostic } = await turnFailure(429, {
     code: "rate_limit_exceeded",
@@ -117,13 +154,16 @@ it("a throttling 429 reports the rate limit separately from service availability
   expect(providerError).toContain("Rate limit reached for requests");
 });
 
-it("any other 429 stays provider_rejected HTTP 429", async () => {
-  const { providerError, diagnostic } = await turnFailure(429, {
-    code: "insufficient_quota",
-    message: bodyMarker,
-  });
-  expect(diagnostic).toBe(
-    "OpenAI rejected the request (HTTP 429); check your sign-in or choose another model.",
-  );
-  expect(providerError).toContain(bodyMarker);
-});
+it.each(["insufficient_quota", "usage_limit_reached"])(
+  "a 429 %s is a plain usage limit naming the provider, never a rejection or a retry",
+  async (code) => {
+    const { result, providerError, diagnostic } = await turnFailure(429, {
+      code,
+      message: bodyMarker,
+    });
+    expect(diagnostic).toBe("OpenAI usage limit reached.");
+    expect(diagnostic).not.toMatch(/HTTP|try again|retry/iu);
+    expect(providerError).toContain(bodyMarker);
+    expect(isRetryableAssistantError(result)).toBe(false);
+  },
+);

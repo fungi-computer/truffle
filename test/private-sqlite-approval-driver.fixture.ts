@@ -176,7 +176,6 @@ export async function nativeApprovalDriverRollback() {
         Promise.reject(new Error("Read must not decide an approval")),
     });
     assert.deepEqual((await capability.list({})).items, []);
-    assert.deepEqual(ledger.pendingHandoffs(), []);
     assert.equal(
       owner.sql.exec("SELECT count(*) AS count FROM native_targets").one()
         .count,

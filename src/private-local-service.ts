@@ -134,6 +134,7 @@ const selectionConflictSchema = z.discriminatedUnion("code", [
   z.object({
     code: z.literal("store_schema_incompatible"),
     databasePath: z.string().min(1),
+    reason: z.enum(["newer", "unreadable"]),
     error: z.string().min(1),
   }),
   z.object({
@@ -151,7 +152,10 @@ async function rejectSelectionConflict(response: Response): Promise<never> {
   const conflict = selectionConflictSchema.safeParse(body);
   if (conflict.success) {
     if (conflict.data.code === "store_schema_incompatible")
-      throw new LocalStoreSchemaError(conflict.data.databasePath);
+      throw new LocalStoreSchemaError(
+        conflict.data.databasePath,
+        conflict.data.reason,
+      );
     if (conflict.data.code === "sandbox_unavailable")
       throw new LocalSandboxUnavailable(conflict.data.reason);
     if (conflict.data.code === "session_path_conflict")

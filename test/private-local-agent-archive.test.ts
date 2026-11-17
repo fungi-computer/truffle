@@ -547,7 +547,7 @@ describe("archiving an Agent", () => {
     }
   });
 
-  it("archiving a store that predates the archived flag gives the typed refusal and a reset phrase, not a SQLite error", async () => {
+  it("archiving a store without an identity gives a plain typed refusal, not a SQLite error", async () => {
     const local = await project();
     try {
       const oldStore = join(
@@ -560,11 +560,11 @@ describe("archiving an Agent", () => {
       const oldPath = join(oldStore, "agent.sqlite");
       const old = new DatabaseSync(oldPath);
       old.exec(
-        "CREATE TABLE private_local_identity (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), agent_id TEXT NOT NULL UNIQUE, name TEXT, created_by TEXT)",
+        "CREATE TABLE private_local_identity (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), name TEXT, created_by TEXT)",
       );
       old
-        .prepare("INSERT INTO private_local_identity VALUES (1, ?, 'old', ?)")
-        .run("local_store_old", maker);
+        .prepare("INSERT INTO private_local_identity VALUES (1, 'old', ?)")
+        .run(maker);
       old.close();
       for (const by of [human, asMaker]) {
         const refusal = await local.directory
@@ -576,7 +576,7 @@ describe("archiving an Agent", () => {
         expect(refusal).toBeInstanceOf(AgentArchiveRefused);
         expect(refusal).toMatchObject({ reason: "unreadable" });
         expect(refusal instanceof Error ? refusal.message : "").toContain(
-          "move .fungi/agents/local_store_old aside",
+          "Fungi cannot read this Agent store. Its files have not been changed.",
         );
       }
       await access(oldPath);

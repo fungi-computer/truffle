@@ -203,6 +203,7 @@ export async function runPrivateLocalService(
         {
           code: "store_schema_incompatible",
           databasePath: error.databasePath,
+          reason: error.reason,
           error: error.message,
         },
         409,

@@ -37,6 +37,10 @@ const lockOptions: lockfile.LockOptions = {
   update: 10_000,
   retries: { retries: 20, factor: 1.2, minTimeout: 25, maxTimeout: 100 },
 };
+// Local collections share a queue before competing with other processes.
+// Otherwise sibling Agents exhaust the filesystem lock's retry budget while
+// their own process is still completing a valid OAuth refresh.
+const localLockTails = new Map<string, Promise<void>>();
 
 const providerIdSchema = z.string().min(1).max(maximumProviderIdLength);
 const credentialStringSchema = z.string().max(maximumCredentialStringLength);
@@ -251,7 +255,7 @@ export class FileCredentialStore implements PrivateCredentialStore {
     if (!isAbsolute(path)) {
       throw new Error("Private credential path must be absolute");
     }
-    this.#path = path;
+    this.#path = resolve(path);
     this.#writeAtomic = writeAtomic;
   }
 
@@ -533,14 +537,24 @@ export class FileCredentialStore implements PrivateCredentialStore {
    * immediately after it succeeds.
    */
   async #withLock<Value>(callback: () => Promise<Value>): Promise<Value> {
-    const directory = dirname(this.#path);
-    await mkdir(directory, { recursive: true, mode: privateDirectoryMode });
-    await chmod(directory, privateDirectoryMode);
-    const release = await lockfile.lock(this.#path, lockOptions);
+    const previous = localLockTails.get(this.#path);
+    const finished = Promise.withResolvers<undefined>();
+    localLockTails.set(this.#path, finished.promise);
+    await previous;
     try {
-      return await callback();
+      const directory = dirname(this.#path);
+      await mkdir(directory, { recursive: true, mode: privateDirectoryMode });
+      await chmod(directory, privateDirectoryMode);
+      const release = await lockfile.lock(this.#path, lockOptions);
+      try {
+        return await callback();
+      } finally {
+        await release();
+      }
     } finally {
-      await release();
+      finished.resolve(undefined);
+      if (localLockTails.get(this.#path) === finished.promise)
+        localLockTails.delete(this.#path);
     }
   }
 }

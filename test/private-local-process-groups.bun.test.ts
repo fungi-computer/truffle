@@ -21,18 +21,27 @@ function alive(pid: number): boolean {
   }
 }
 
-async function startOwner() {
+async function startOwner(command?: string) {
   const area = await mkdtemp(join(tmpdir(), "fungi-groups-"));
   const root = join(area, "project");
   const home = join(area, "home");
   await mkdir(root);
   await mkdir(home);
-  const child = spawn([process.execPath, fixture, root, home], {
-    // The pipe is the fixture's lifeline: it exits when its parent drops it.
-    stdin: "pipe",
-    stdout: "pipe",
-    stderr: "inherit",
-  });
+  const child = spawn(
+    [
+      process.execPath,
+      fixture,
+      root,
+      home,
+      ...(command === undefined ? [] : [command]),
+    ],
+    {
+      // The pipe is the fixture's lifeline: it exits when its parent drops it.
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "inherit",
+    },
+  );
   const reader = child.stdout.getReader();
   const first = await reader.read();
   expect(first.done).toBe(false);
@@ -46,7 +55,13 @@ async function startOwner() {
       ).text(),
     ),
   );
-  return { area, home, child, groupId: record.groupId, name: groups[0] ?? "" };
+  return {
+    area,
+    home,
+    child,
+    groupId: record.groupId,
+    name: groups[0] ?? "",
+  };
 }
 
 test.skipIf(process.platform !== "linux")(
@@ -162,6 +177,41 @@ await new Promise(() => undefined);`,
         process.kill(fixturePid, "SIGKILL");
       if (groupId !== undefined && alive(groupId))
         process.kill(-groupId, "SIGKILL");
+      await rm(area, { recursive: true, force: true });
+    }
+  },
+  20_000,
+);
+
+test.skipIf(process.platform !== "linux")(
+  "the sweep also ends a command's processes that moved to another process group",
+  async () => {
+    // timeout(1) calls setpgid, so its child leaves the recorded group.
+    const area = await mkdtemp(join(tmpdir(), "fungi-groups-pid-"));
+    const pidFile = join(area, "moved.pid");
+    const owner = await startOwner(
+      `timeout 600 sh -c 'echo $$ > ${pidFile}; exec sleep 600'; true`,
+    );
+    let moved = 0;
+    try {
+      for (let i = 0; i < 100 && moved === 0; i++) {
+        const file = Bun.file(pidFile);
+        if (await file.exists()) moved = Number(await file.text());
+        if (moved === 0) await Bun.sleep(50);
+      }
+      expect(moved).toBeGreaterThan(1);
+      owner.child.kill("SIGKILL");
+      await owner.child.exited;
+      expect(alive(moved)).toBe(true);
+      expect(await reapOrphanedProcessGroups(owner.home)).toBe(1);
+      for (let attempt = 0; attempt < 100 && alive(moved); attempt++)
+        await Bun.sleep(20);
+      expect(alive(moved)).toBe(false);
+    } finally {
+      owner.child.kill("SIGKILL");
+      if (moved > 1 && alive(moved)) process.kill(moved, "SIGKILL");
+      if (alive(owner.groupId)) process.kill(-owner.groupId, "SIGKILL");
+      await rm(owner.area, { recursive: true, force: true });
       await rm(area, { recursive: true, force: true });
     }
   },

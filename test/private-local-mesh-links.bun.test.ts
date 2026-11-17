@@ -539,6 +539,20 @@ test.each(["oauth", "oyster"] as const)(
         address: {},
         event: {},
       };
+      const confirmClientReady = async () => {
+        const peer = [...channels.values()][0];
+        if (peer === undefined) throw new Error("Expected an open server peer");
+        // The server's open callback precedes the client's open callback.
+        // A completed round trip proves the client has published its channel,
+        // rather than assuming the other side's socket is already usable.
+        expect(
+          await peer.deliver({
+            ...envelope,
+            key: `readiness-${String(signatures.length)}`,
+          }),
+        ).toBe("refused");
+      };
+      await confirmClientReady();
       expect(await links.deliver(pin, envelope)).toBe("refused");
       expect(signatures).toHaveLength(1);
       // Identical device, scope and private key do not authorize another
@@ -557,7 +571,9 @@ test.each(["oauth", "oyster"] as const)(
         socket.close(1012, "receiver restart");
       await until(() => signatures.length === 2 && channels.size === 1);
       expect(signatures[0]).not.toBe(signatures[1]);
+      await confirmClientReady();
       expect(await links.deliver(pin, envelope)).toBe("refused");
+      expect(received).toBe(2);
       // Removing the shared credential is the completed logout boundary. The
       // already-open connection must not retain its former authority.
       if (kind === "oauth") {
@@ -580,7 +596,7 @@ test.each(["oauth", "oyster"] as const)(
       } else {
         await until(() => channels.size === 0);
       }
-      expect(received).toBe(0);
+      expect(received).toBe(2);
       for (const socket of channels.keys())
         socket.close(1012, "restart after logout");
       await until(() => channels.size === 0);

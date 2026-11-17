@@ -32,6 +32,7 @@ import {
 import { writeFreshStore } from "./fixtures/fresh-store.js";
 import { resolvePrivateLocalCreateStore } from "../src/private-local-runtime-host.js";
 import { unusedExtensions } from "./fixtures/unused-extensions.js";
+import { upgradeLocalIdentity } from "../src/private-local-identity.js";
 import { LocalSandboxUnavailable } from "../src/private-local-containment.js";
 import {
   fixtureEffectiveModel,
@@ -40,28 +41,56 @@ import {
 } from "./fixtures/effective-model.js";
 
 describe("persistent Local service owners", () => {
-  it("rejects a pre-mode Agent store with LocalStoreSchemaError rather than defaulting it", async () => {
-    const root = await mkdtemp(join(tmpdir(), "fungi-pre-mode-store-"));
-    const path = join(root, "agent.sqlite");
-    const database = new DatabaseSync(path);
-    try {
-      database.exec(
-        "CREATE TABLE private_local_identity (singleton INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, name TEXT, created_by TEXT, archived INTEGER NOT NULL, folder TEXT NOT NULL, require_sandbox INTEGER NOT NULL)",
-      );
-      database.exec(
-        "INSERT INTO private_local_identity VALUES (1, 'old', 'Old', NULL, 0, '.', 0)",
-      );
-    } finally {
-      database.close();
-    }
-    try {
-      expect(() => readPrivateLocalAgentProfile(path)).toThrow(
-        LocalStoreSchemaError,
-      );
-    } finally {
-      await rm(root, { recursive: true });
-    }
-  });
+  it.each([
+    [0, "full-access"],
+    [1, "workspace"],
+  ] as const)(
+    "keeps pre-mode sandbox requirement %s as %s",
+    async (required, mode) => {
+      const root = await mkdtemp(join(tmpdir(), "fungi-pre-mode-store-"));
+      const path = join(root, "agent.sqlite");
+      const database = new DatabaseSync(path);
+      try {
+        database.exec(
+          "CREATE TABLE private_local_identity (singleton INTEGER PRIMARY KEY, agent_id TEXT NOT NULL, name TEXT, created_by TEXT, archived INTEGER NOT NULL, folder TEXT NOT NULL, require_sandbox INTEGER NOT NULL)",
+        );
+        database
+          .prepare(
+            "INSERT INTO private_local_identity VALUES (1, 'old', 'Old', NULL, 0, '.', ?)",
+          )
+          .run(required);
+        database.exec(
+          "CREATE TABLE private_local_model_settings (singleton INTEGER PRIMARY KEY, model TEXT NOT NULL)",
+        );
+        database.exec(
+          "INSERT INTO private_local_model_settings VALUES (1, 'null')",
+        );
+      } finally {
+        database.close();
+      }
+      try {
+        expect(readPrivateLocalAgentProfile(path)).toMatchObject({
+          mode,
+          archived: false,
+          folder: ".",
+        });
+        const writable = new DatabaseSync(path);
+        try {
+          writable.exec("BEGIN IMMEDIATE");
+          expect(upgradeLocalIdentity(writable)).toBe(true);
+          writable.exec("COMMIT");
+          expect(
+            writable.prepare("SELECT mode FROM private_local_identity").get(),
+          ).toEqual({ mode });
+        } finally {
+          writable.close();
+        }
+        expect(readPrivateLocalAgentProfile(path)).toMatchObject({ mode });
+      } finally {
+        await rm(root, { recursive: true });
+      }
+    },
+  );
 
   it("passes the mode before opening can execute or recover affected work", async () => {
     const root = await realpath(
@@ -944,7 +973,7 @@ describe("persistent Local service owners", () => {
             ).databasePath;
       if (options.createRequestId !== undefined) {
         await mkdir(dirname(databasePath), { recursive: true });
-        await writeFile(databasePath, "fixture");
+        writeFreshStore(databasePath, null, options.createdBy ?? null);
       }
       openedPaths.push(databasePath);
       return {
@@ -1327,7 +1356,7 @@ it("names the incompatible store instead of listing it by id", async () => {
       LocalStoreSchemaError,
     );
     expect(() => readPrivateLocalAgentProfile(path)).toThrow(
-      `Agent store ${path} is incompatible with this version of Fungi.`,
+      "Fungi cannot read this Agent store. Its files have not been changed.",
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -1383,15 +1412,29 @@ describe("an Agent creating an Agent", () => {
         opened.push(options);
         if (options.agentControl !== undefined)
           directory ??= options.agentControl;
-        return {
-          databasePath:
-            options.databasePath ??
-            (
-              await resolvePrivateLocalCreateStore(
-                root,
-                options.createRequestId ?? "unused",
+        const databasePath =
+          options.databasePath ??
+          (
+            await resolvePrivateLocalCreateStore(
+              root,
+              options.createRequestId ?? "unused",
+            )
+          ).databasePath;
+        if (options.createRequestId !== undefined) {
+          writeFreshStore(databasePath, null, options.createdBy ?? null);
+          const database = new DatabaseSync(databasePath);
+          try {
+            database
+              .prepare(
+                "UPDATE private_local_identity SET folder = ?, mode = ? WHERE singleton = 1",
               )
-            ).databasePath,
+              .run(options.folder ?? ".", options.mode ?? "full-access");
+          } finally {
+            database.close();
+          }
+        }
+        return {
+          databasePath,
           agentId: "fixture-agent",
           listSessions: () =>
             Promise.resolve({ sessions: [], next: undefined }),

@@ -41,6 +41,10 @@ it.each([
     { code: "usage-limit-reached" },
     "Anthropic usage limit reached on your Claude subscription.",
   ],
+  [
+    { code: "usage-limit-reached", cause: "quota" },
+    "Anthropic usage limit reached.",
+  ],
 ] satisfies [ProviderRejection, string][])(
   "presents typed %j in one plain sentence",
   (rejection, expected) => {
@@ -81,6 +85,10 @@ const retryCases: {
 }[] = [
   { rejection: undefined, expected: false },
   { rejection: { code: "usage-limit-reached" }, expected: false },
+  {
+    rejection: { code: "usage-limit-reached", cause: "quota" },
+    expected: false,
+  },
   {
     rejection: { code: "provider_rejected", status: 429 },
     expected: false,

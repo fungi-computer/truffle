@@ -789,6 +789,62 @@ function waitingItem(context: Context): string {
   return itemId;
 }
 
+it.each([
+  ["a string", "main"],
+  ["an invalid choice", { branch: { selected: ["missing"] } }],
+] as const)(
+  "returns a typed refusal when agents.answer receives %s and leaves the question waiting",
+  async (_label, answers) => {
+    const parentContexts: Context[] = [];
+    const childContexts: Context[] = [];
+    const local = await project(
+      [
+        delegate(parentContexts),
+        capture(parentContexts, "Delegated; waiting"),
+        (context) =>
+          fauxAssistantMessage(
+            fauxToolCall("execute", {
+              code: `async () => agents.answer({ agentId: ${JSON.stringify(ids.child)}, sessionId: "main", askId: ${JSON.stringify(waitingItem(context))}, requestId: "invalid-answer", answers: ${JSON.stringify(answers)} })`,
+            }),
+            { stopReason: "toolUse" },
+          ),
+        capture(parentContexts, "Answer attempt finished"),
+      ],
+      [
+        askBranch(childContexts),
+        capture(childContexts, "Asked about the branch"),
+      ],
+    );
+    try {
+      await local.parent.session.send("Delegate this", {
+        requestId: "parent-prompt",
+      });
+      await until(
+        () => local.parent.session.read(),
+        (snapshot) =>
+          snapshot.messages.some(
+            ({ value }) =>
+              value.role === "assistant" &&
+              JSON.stringify(value).includes("Answer attempt finished"),
+          ),
+        "the parent's answer result",
+      );
+      const result = parentContexts
+        .at(-1)
+        ?.messages.findLast((message) => message.role === "toolResult");
+      expect(result).toMatchObject({ isError: true });
+      expect(JSON.stringify(result)).not.toContain("sandbox_failure");
+      expect(JSON.stringify(result)).toContain("answer:invalid:");
+      expect((await local.child.session.read()).attention).toMatchObject([
+        { waitingOn: { agentId: ids.parent, sessionId: "main" } },
+      ]);
+    } finally {
+      await local.owners.close();
+    }
+  },
+  90_000,
+);
+
 it("a child's question reaches its parent in the parent's own turn, and the parent's answer continues the child", async () => {
   const parentContexts: Context[] = [];
   const childContexts: Context[] = [];
@@ -852,6 +908,86 @@ it("a child's question reaches its parent in the parent's own turn, and the pare
     expect(JSON.stringify(parentContexts[2]?.messages.at(-1))).toContain(
       "waiting_on_you",
     );
+  } finally {
+    await local.owners.close();
+  }
+}, 90_000);
+
+it("a new Session on the same Agent cannot answer or pause its earlier Session's child", async () => {
+  const parentContexts: Context[] = [];
+  const childContexts: Context[] = [];
+  const local = await project(
+    [
+      delegate(parentContexts),
+      capture(parentContexts, "Delegated; waiting"),
+      capture(parentContexts, "Leaving the question waiting"),
+    ],
+    [
+      askBranch(childContexts),
+      capture(childContexts, "Asked about the branch"),
+    ],
+  );
+  try {
+    await local.parent.session.send("Delegate this", {
+      requestId: "parent-prompt",
+    });
+    const waiting = await until(
+      () => local.child.session.read(),
+      (snapshot) =>
+        snapshot.attention.some((item) => item.waitingOn !== undefined),
+      "the child's waiting question",
+    );
+    await until(
+      () => local.parent.session.read(),
+      (snapshot) =>
+        snapshot.messages.some(
+          ({ value }) =>
+            value.role === "assistant" &&
+            JSON.stringify(value).includes("Leaving the question waiting"),
+        ),
+      "the original parent's rest",
+    );
+    const item = waiting.attention[0];
+    if (item === undefined) throw new Error("Missing waiting question");
+    local.parentModel.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall("execute", {
+          code: `async () => ({
+            answer: await agents.answer({agentId:${JSON.stringify(ids.child)},sessionId:"main",askId:${JSON.stringify(item.id)},requestId:"new-session-answer",answers:{branch:{selected:["main"]}}}),
+            goal: await agents.goal({agentId:${JSON.stringify(ids.child)},sessionId:"main",action:"pause",reason:"Inspect work"})
+          })`,
+        }),
+        { stopReason: "toolUse" },
+      ),
+      capture(parentContexts, "New Session tried"),
+    ]);
+    const restarted = await local.owners.select({
+      invocationRoot: local.root,
+      databasePath: local.parent.databasePath,
+      sessionId: "new-parent-session",
+    });
+    await restarted.session.send("Answer the earlier child's question", {
+      requestId: "new-parent-prompt",
+    });
+    await until(
+      () => restarted.session.read(),
+      (snapshot) =>
+        snapshot.messages.some(
+          ({ value }) =>
+            value.role === "assistant" &&
+            JSON.stringify(value).includes("New Session tried"),
+        ),
+      "the new Session's result",
+    );
+    const result = parentContexts
+      .at(-1)
+      ?.messages.findLast((message) => message.role === "toolResult");
+    expect(result).toMatchObject({ isError: false });
+    expect(JSON.stringify(result)).toContain("not_sender");
+    expect(JSON.stringify(result)).toContain("not_delegator");
+    expect((await local.child.session.read()).attention).toMatchObject([
+      { waitingOn: { agentId: ids.parent, sessionId: "main" } },
+    ]);
   } finally {
     await local.owners.close();
   }

@@ -93,6 +93,7 @@ async function fixture() {
         denialLine: "Read-only file system",
       }),
       requireHumanApproval: true,
+      expiresAt: Date.now() + 30_000,
     });
     if (result.kind !== "record") throw new Error(result.reason);
     return result.record;
@@ -148,14 +149,6 @@ it("approval claims one unsandboxed git commit; a second approval does not dispa
   const log = await execFile("git", ["-C", root, "log", "--format=%s"]);
   expect(log.stdout.trim()).toBe("approved-once");
   expect(await readFile(join(root, "tracked.txt"), "utf8")).toBe("approved\n");
-  const notices: string[] = [];
-  expect(
-    await ledger.handoff(record.recordId, (notice) => {
-      notices.push(notice.deliveryId);
-      return Promise.resolve({ commandId: "delivered" });
-    }),
-  ).toMatchObject({ kind: "delivered" });
-  expect(notices).toHaveLength(1);
 });
 
 it("deny and a changed mode refuse an escaped commit without changing Git history", async () => {

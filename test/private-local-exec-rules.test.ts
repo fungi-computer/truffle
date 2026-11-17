@@ -343,13 +343,8 @@ it("a narrow grant runs push and commit without a card; removal asks again", asy
     () => {
       cards += 1;
       return Promise.resolve({
-        kind: "pending_approval",
-        recordId: "after-removal",
-        description: {
-          title: "computer.exec",
-          inputBytes: 1,
-          inputSha256: "a".repeat(64),
-        },
+        kind: "refused",
+        reason: "approval_expired",
       });
     },
     async ({ request, cwd, mode, executionPath }) => {
@@ -417,7 +412,7 @@ it("a narrow grant runs push and commit without a card; removal asks again", asy
         signal: new AbortController().signal,
       },
     ),
-  ).toMatchObject({ kind: "pending_approval" });
+  ).toMatchObject({ kind: "refused", reason: "approval_expired" });
   expect(cards).toBe(1);
 });
 

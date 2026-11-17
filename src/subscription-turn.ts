@@ -1,13 +1,15 @@
-import { isDeepStrictEqual } from "node:util";
 import {
   createModels,
   type Credential,
   type CredentialStore,
+  type FetchFunction,
   type Models,
   type OAuthCredential,
 } from "@earendil-works/pi-ai";
 import { z } from "zod";
+import { ShiitakeError } from "@fungi.computer/shiitake";
 import { readOpenAIPerson } from "./private-openai-claims.js";
+import { anthropicGrantIdentity } from "./subscription-identity.js";
 
 // Associate only Local-owned collections with their actual credential owner.
 // Caller-supplied Models retain their own auth contract; never guess a file path.
@@ -35,7 +37,11 @@ function identity(
 ): Identity | undefined {
   if (provider === "anthropic") {
     const account = accountSchema.safeParse(credential);
-    return account.success ? { person: account.data.accountId } : undefined;
+    return {
+      person: account.success
+        ? `account:${account.data.accountId}`
+        : `grant:${anthropicGrantIdentity(credential)}`,
+    };
   }
   // Only the access token's issuer and subject identify an OpenAI person.
   try {
@@ -58,10 +64,9 @@ function sameAccount(
   if (current?.type !== "oauth") return false;
   const pinned = identity(provider, pin);
   const now = identity(provider, current);
-  // OpenAI always needs a proven person. Anthropic's opaque grant may not yet
-  // have its profile account; exact credential equality still proves continuity.
-  if (pinned === undefined || now === undefined)
-    return provider !== "openai" && isDeepStrictEqual(current, pin);
+  // OpenAI always needs a proven person. An opaque Anthropic grant instead
+  // carries continuity from the refresh that exchanged it, across processes.
+  if (pinned === undefined || now === undefined) return false;
   return pinned.person === now.person;
 }
 
@@ -83,8 +88,26 @@ export async function acquireSubscriptionTurn(
     };
   const provider = models.getProvider(providerId);
   if (provider === undefined)
-    throw new Error("Turn provider is not registered");
-  let pin = await owner.read(providerId, { signal });
+    throw new ShiitakeError(
+      "model",
+      "rejected",
+      "Turn provider is not registered; pick another model with /model.",
+    );
+  const readSavedCredential: CredentialStore["read"] = async (id, options) => {
+    try {
+      return await owner.read(id, options);
+    } catch (cause) {
+      options?.signal?.throwIfAborted();
+      throw new ShiitakeError(
+        "model",
+        "rejected",
+        "Couldn't read your saved sign-in; retry, or run fungi doctor.",
+        undefined,
+        cause,
+      );
+    }
+  };
+  let pin = await readSavedCredential(providerId, { signal });
   let released = false;
   let refusal: SubscriptionTurnError | undefined;
   const fail = (): never => {
@@ -108,7 +131,7 @@ export async function acquireSubscriptionTurn(
       if (id !== providerId) throw new Error("Turn provider changed");
       options?.signal?.throwIfAborted();
       if (pin?.type !== "oauth") return pin;
-      return adopt(await owner.read(id, options));
+      return adopt(await readSavedCredential(id, options));
     },
     list: () =>
       Promise.resolve(
@@ -144,11 +167,88 @@ export async function acquireSubscriptionTurn(
       Promise.reject(new Error("Turn credentials cannot be deleted")),
   };
   const scoped = createModels({ credentials: view });
-  scoped.setProvider(provider);
+  const oauth = provider.auth.oauth;
+  const refreshRejected = async (
+    rejected: OAuthCredential,
+    requestSignal: AbortSignal,
+  ) => {
+    // Recheck under Pi's cross-process lock. A peer's committed rotation wins;
+    // once refresh starts, cancellation must not discard its rotated token.
+    const current = await owner.modify(providerId, async (saved) => {
+      assertOpen();
+      requestSignal.throwIfAborted();
+      if (!sameAccount(providerId, saved, rejected)) return fail();
+      if (saved.access !== rejected.access) return undefined;
+      if (oauth === undefined) throw new Error("Turn OAuth unavailable");
+      return oauth.refresh(saved, AbortSignal.timeout(15_000));
+    });
+    requestSignal.throwIfAborted();
+    const next = adopt(current);
+    if (next?.type !== "oauth") return fail();
+    return next.access;
+  };
+  // Retry at the HTTP boundary: a 401 has produced no model output. Never
+  // replay an SSE stream, a tool call, an API key or caller-owned headers.
+  const recoveringFetch = (
+    upstream: FetchFunction = globalThis.fetch,
+  ): FetchFunction => {
+    const rejected = pin;
+    if (rejected?.type !== "oauth") return upstream;
+    let retried = false;
+    const transport = async (
+      input: Parameters<FetchFunction>[0],
+      init?: Parameters<FetchFunction>[1],
+    ) => {
+      if (init === undefined) return upstream(input);
+      const headers = new Headers(init.headers);
+      const replayBody = z.string().safeParse(init.body);
+      if (
+        retried ||
+        // Pi's Anthropic SDK sends a URL and a JSON string. Do not attempt
+        // to replay a consumed Request or an arbitrary streaming body.
+        input instanceof Request ||
+        !replayBody.success ||
+        headers.get("authorization") !== `Bearer ${rejected.access}`
+      )
+        return upstream(input, init);
+      const response = await upstream(input, init);
+      if (response.status !== 401) return response;
+      retried = true;
+      await response.body?.cancel();
+      const access = await refreshRejected(rejected, init.signal ?? signal);
+      headers.set("authorization", `Bearer ${access}`);
+      return upstream(input, { ...init, body: replayBody.data, headers });
+    };
+    return Object.assign(transport, { preconnect: upstream.preconnect });
+  };
+  scoped.setProvider(
+    providerId === "anthropic" && oauth !== undefined
+      ? {
+          ...provider,
+          stream: (model, context, options) =>
+            provider.stream(
+              model,
+              context,
+              Object.assign({}, options, {
+                fetch: recoveringFetch(options?.fetch),
+              }),
+            ),
+          streamSimple: (model, context, options) =>
+            provider.streamSimple(model, context, {
+              ...options,
+              fetch: recoveringFetch(options?.fetch),
+            }),
+        }
+      : provider,
+  );
   try {
     // Pin/refresh at acquisition, not at the first tool iteration.
     if ((await scoped.getAuth(providerId, { signal })) === undefined)
-      throw new Error("Turn provider is not signed in");
+      throw new ShiitakeError(
+        "model",
+        "rejected",
+        "Turn provider is not signed in. Run /login or choose another model with /model.",
+      );
   } catch (error) {
     pin = undefined;
     if (refusal !== undefined) throw refusal;

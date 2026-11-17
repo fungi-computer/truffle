@@ -16,7 +16,6 @@ import {
   listPrivateLocalAgentStores,
   LocalStoreSchemaError,
   readPrivateLocalAgentProfile,
-  unreadableStoreReason,
 } from "./private-local-session-discovery.js";
 import {
   createPrivateSqliteOwner,
@@ -147,7 +146,7 @@ export async function readBoardAgent(
         parents: new Map(),
         waitingNotRead: 0,
         owned: false,
-        unreadable: unreadableStoreReason(agentId),
+        unreadable: cause.message,
       };
     logEvent("board-agent-profile", cause);
     return {

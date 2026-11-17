@@ -11,7 +11,7 @@ import {
   type ApprovalApplyHost,
 } from "@fungi.computer/approvals";
 import type { InvocationContext } from "@fungi.computer/mycelium";
-import { expect, it } from "vitest";
+import { expect, it, vi } from "vitest";
 import {
   createPrivateInvocationComputer,
   dispatchApprovedLocalExec,
@@ -85,6 +85,8 @@ it("a saved Always allow git commit applies to a later -am; shell asks once", as
       },
     };
     let ordinal = 0;
+    let recordId: string | undefined;
+    const decided = Promise.withResolvers<undefined>();
     const cards: ReturnType<typeof localExecEscapeReview>[] = [];
     const computer = await createPrivateInvocationComputer(
       root,
@@ -99,6 +101,8 @@ it("a saved Always allow git commit applies to a later -am; shell asks once", as
           configuredRemotes: new Set(),
         });
         cards.push(review);
+        if (review.prefix === undefined)
+          return { kind: "refused", reason: "approval_expired" };
         const result = await ledger.request({
           requester: {
             principalId: "agent",
@@ -114,13 +118,15 @@ it("a saved Always allow git commit applies to a later -am; shell asks once", as
           idempotencyKey: String(ordinal),
           inputJson: JSON.stringify({ request, cwd }),
           requireHumanApproval: true,
+          expiresAt: Date.now() + 30_000,
         });
         if (result.kind !== "record") throw new Error("Approval not staged");
-        return {
-          kind: "pending_approval",
-          recordId: result.record.recordId,
-          description: result.record.description,
-        };
+        recordId = result.record.recordId;
+        await decided.promise;
+        const applied = await ledger.apply(recordId, apply);
+        return applied.kind === "applied"
+          ? shellOutput.parse(applied.output)
+          : applied;
       },
       async ({ request, cwd }) => {
         if (!("executable" in request)) return undefined;
@@ -142,14 +148,16 @@ it("a saved Always allow git commit applies to a later -am; shell asks once", as
     const run = (
       input: Record<string, string | string[] | { justification: string }>,
     ) => computer.call("exec", input, context);
-    const first = await run({
+    const first = run({
       executable: "git",
       args: ["commit", "-m", "first"],
       escape: { justification: "Git metadata is protected" },
     });
-    expect(first).toMatchObject({ kind: "pending_approval" });
+    await vi.waitFor(() => {
+      expect(recordId).toBeDefined();
+    });
     expect(cards[0]?.prefix).toEqual(["git", "commit"]);
-    const { recordId } = z.object({ recordId: z.string() }).parse(first);
+    if (recordId === undefined) throw new Error("Approval not staged");
     const record = ledger.get(recordId);
     if (!record) throw new Error("Approval record missing");
     expect(
@@ -169,9 +177,8 @@ it("a saved Always allow git commit applies to a later -am; shell asks once", as
       ),
     ).toMatchObject({ kind: "answered" });
     rules.add(cards[0]?.prefix ?? []);
-    expect(await ledger.apply(record.recordId, apply)).toMatchObject({
-      kind: "applied",
-    });
+    decided.resolve(undefined);
+    expect(await first).toMatchObject({ status: "completed", exitCode: 0 });
     const saved = z
       .object({
         version: z.number(),
@@ -210,7 +217,7 @@ it("a saved Always allow git commit applies to a later -am; shell asks once", as
         command: 'git commit -am "third"',
         escape: { justification: "Git metadata is protected" },
       }),
-    ).toMatchObject({ kind: "pending_approval" });
+    ).toMatchObject({ kind: "refused", reason: "approval_expired" });
     expect(cards[1]?.prefix).toBeUndefined();
     expect(cards[1]?.alwaysAllowUnavailableReason).toContain("Shell");
     expect(saved.rules[0]?.id).toMatch(/^local_exec_rule/u);

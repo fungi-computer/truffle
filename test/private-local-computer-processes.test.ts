@@ -27,7 +27,7 @@ import {
 } from "@fungi.computer/mycelium";
 import { createPrivateInvocationComputer } from "../src/private-invocation-computer.js";
 
-it("an escaped start stages without starting a process", async () => {
+it("a denied escaped start does not start a process", async () => {
   const { root, processes } = await fixture("escape-start");
   const marker = join(root, "started");
   let stages = 0;
@@ -42,13 +42,9 @@ it("an escaped start stages without starting a process", async () => {
       expect(request.operation).toBe("start");
       stages++;
       return Promise.resolve({
-        kind: "pending_approval",
-        recordId: "start-record",
-        description: {
-          title: "computer.exec",
-          inputBytes: 1,
-          inputSha256: "a".repeat(64),
-        },
+        kind: "denied",
+        by: "the user",
+        message: "Denied by the user",
       });
     },
   );
@@ -63,7 +59,7 @@ it("an escaped start stages without starting a process", async () => {
       },
       invocation(),
     ),
-  ).toMatchObject({ kind: "pending_approval", recordId: "start-record" });
+  ).toMatchObject({ kind: "denied", by: "the user" });
   expect(stages).toBe(1);
   expect(processes.scope("escape").list()).toEqual([]);
   await expect(access(marker)).rejects.toThrow();

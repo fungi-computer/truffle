@@ -41,10 +41,6 @@ import {
 import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import type { SandboxCommand } from "./private-local-containment.js";
 import type { LocalPermissionMode } from "./private-local-permission-mode.js";
-import type {
-  PendingApproval,
-  ApprovalRefusal,
-} from "@fungi.computer/approvals";
 
 /** A Full-access launch is bare; sandboxed launches always supply a command or refuse. */
 export type LocalSandboxLaunch = (
@@ -159,20 +155,18 @@ const execOutput = z.discriminatedUnion("status", [
   deadlineOutput.extend({ sandbox: sandboxResult }),
 ]);
 const shellInput = z.union([execInput, backgroundExecInput]);
-const pendingOutput = z.strictObject({
-  kind: z.literal("pending_approval"),
-  recordId: z.string(),
-  description: z.strictObject({
-    title: z.string(),
-    inputBytes: z.number(),
-    inputSha256: z.string(),
-  }),
+const deniedOutput = z.strictObject({
+  kind: z.literal("denied"),
+  by: z.string(),
+  note: z.string().optional(),
+  message: z.string(),
 });
 const refusalOutput = z.strictObject({
   kind: z.literal("refused"),
   reason: z.string(),
+  hint: z.string().optional(),
 });
-const approvalOutput = z.union([pendingOutput, refusalOutput]);
+const approvalOutput = z.union([deniedOutput, refusalOutput]);
 export const shellOutput = z.union([
   execOutput,
   backgroundExecOutput,
@@ -190,7 +184,20 @@ export type LocalExecEscapeStage = (
     context: InvocationContext;
     executionPath: string;
   }>,
-) => Promise<PendingApproval | ApprovalRefusal>;
+) => Promise<z.output<typeof shellOutput>>;
+
+/** Leave the requested command's full bounded runtime and teardown reserve. */
+export function localApprovalDeadline(
+  request: Parameters<LocalExecEscapeStage>[0]["request"],
+  context: InvocationContext,
+): number {
+  const deadline = context.deadlineAt ?? Date.now() + invocationDeadlineMs;
+  const commandBudget =
+    request.operation === "run"
+      ? Math.min(request.timeoutMs, maximumCommandTimeoutMs)
+      : 0;
+  return deadline - invocationSetupTeardownMarginMs - commandBudget;
+}
 
 /** Host-only prefix policy: the model has no rule-management door. */
 export type LocalExecPolicyRun = (
@@ -209,6 +216,7 @@ export async function dispatchApprovedLocalExec(
   mode: LocalPermissionMode,
   /** Only inline rule matches have a live execute sink; ledger dispatch does not. */
   sink?: InvocationContext["output"],
+  signal: AbortSignal = new AbortController().signal,
 ): Promise<ExecOutput | z.output<typeof backgroundExecOutput>> {
   const request = shellInput.parse(input);
   if (request.operation === "run") {
@@ -217,7 +225,7 @@ export async function dispatchApprovedLocalExec(
       cwd,
       executionPath,
       home,
-      new AbortController().signal,
+      signal,
       undefined,
       sink,
     );
@@ -233,7 +241,7 @@ export async function dispatchApprovedLocalExec(
     request,
     () => Promise.resolve(cwd),
     executionPath,
-    new AbortController().signal,
+    signal,
   );
   return "text" in output
     ? {
@@ -928,15 +936,17 @@ export async function createPrivateInvocationComputer(
           );
         const cwd = await resolveCwd(root, request.cwd);
         context.signal.throwIfAborted();
-        return approvalOutput.parse(
-          await stageEscape({
-            request,
-            cwd,
-            mode,
-            denialLine: lastDenialLine,
-            context,
-            executionPath: path,
-          }),
+        return jsonValueSchema.parse(
+          shellOutput.parse(
+            await stageEscape({
+              request,
+              cwd,
+              mode,
+              denialLine: lastDenialLine,
+              context,
+              executionPath: path,
+            }),
+          ),
         );
       }
       if (request.operation === "run") {

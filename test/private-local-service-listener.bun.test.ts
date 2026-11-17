@@ -32,6 +32,7 @@ import { createPrivateLocalServiceShutdown } from "../src/private-local-service-
 import { createLocalServiceOwners } from "../src/private-local-service-owner.js";
 import { capturePrivateLocalConfigRoot } from "../src/private-local-config-root.js";
 import { unusedExtensions } from "./fixtures/unused-extensions.js";
+import { writeFreshStore } from "./fixtures/fresh-store.js";
 import {
   fixtureEffectiveModel,
   fixtureMailControls,
@@ -57,7 +58,9 @@ async function syntheticProject(prefix: string) {
   return root;
 }
 
-async function assertIncompatibleStoreRefusal(schema: "local" | "woodstock") {
+async function assertIncompatibleStoreRefusal(
+  schema: "local" | "woodstock" | "newer",
+) {
   const root = await syntheticProject("fungi-old-local-schema-");
   const home = join(root, "home");
   const databasePath = join(root, "agent.sqlite");
@@ -70,18 +73,19 @@ async function assertIncompatibleStoreRefusal(schema: "local" | "woodstock") {
       database.exec(`
         CREATE TABLE private_local_identity (
           singleton INTEGER PRIMARY KEY, agent_id TEXT NOT NULL,
-          name TEXT, created_by TEXT, archived INTEGER NOT NULL DEFAULT 0
-          ${schema === "woodstock" ? ", folder TEXT NOT NULL DEFAULT '.', require_sandbox INTEGER NOT NULL DEFAULT 0" : ""}
+          created_by TEXT, archived INTEGER NOT NULL DEFAULT 0
+          ${schema !== "local" ? ", name TEXT, folder TEXT NOT NULL DEFAULT '.', require_sandbox INTEGER NOT NULL DEFAULT 0" : ""}
         )
       `);
-      if (schema === "woodstock")
+      if (schema !== "local")
         database.exec(`
           CREATE TABLE woodstock_schema (version INTEGER NOT NULL, protocol TEXT NOT NULL);
-          INSERT INTO woodstock_schema VALUES (2, 'shiitake.extension/v0');
+          INSERT INTO woodstock_schema VALUES (${schema === "newer" ? "7" : "0"}, 'shiitake.extension/v0');
         `);
     } finally {
       database.close();
     }
+    const original = await readFile(databasePath);
     const ready = await manager.start();
     const response = await fetch(
       `${ready.baseUrl}/service/${ready.serviceId}/inspect`,
@@ -96,29 +100,35 @@ async function assertIncompatibleStoreRefusal(schema: "local" | "woodstock") {
       .object({
         code: z.literal("store_schema_incompatible"),
         databasePath: z.literal(databasePath),
+        reason: z.enum(["newer", "unreadable"]),
         error: z.string(),
       })
       .parse(await response.json());
-    assert.match(refusal.error, /stop.*Fungi/isu);
-    assert.match(refusal.error, /move.*aside/isu);
-    const isTypedReset = (cause: unknown) => {
+    const reason = schema === "newer" ? "newer" : "unreadable";
+    assert.equal(refusal.reason, reason);
+    assert.doesNotMatch(refusal.error, /move|reset/iu);
+    const isTypedRefusal = (cause: unknown) => {
       assert.ok(cause instanceof LocalStoreSchemaError);
       assert.equal(cause.databasePath, databasePath);
-      assert.match(cause.message, /stop.*Fungi/isu);
-      assert.match(cause.message, /move.*aside/isu);
-      assert.match(cause.message, /not migrated/iu);
+      assert.equal(cause.reason, reason);
+      assert.match(
+        cause.message,
+        schema === "newer" ? /Update Fungi/iu : /cannot read/iu,
+      );
+      assert.doesNotMatch(cause.message, /move|reset/iu);
       return true;
     };
-    await assert.rejects(manager.inspect(selection), isTypedReset);
-    await assert.rejects(manager.connect(selection), isTypedReset);
+    await assert.rejects(manager.inspect(selection), isTypedRefusal);
+    await assert.rejects(manager.connect(selection), isTypedRefusal);
     await assert.rejects(
       manager.createSession({
         invocationRoot: root,
         databasePath,
         requestId: "schema-refusal",
       }),
-      isTypedReset,
+      isTypedRefusal,
     );
+    assert.deepEqual(await readFile(databasePath), original);
     const refused = new DatabaseSync(databasePath, { readOnly: true });
     try {
       if (schema === "local")
@@ -127,13 +137,16 @@ async function assertIncompatibleStoreRefusal(schema: "local" | "woodstock") {
             .prepare("PRAGMA table_info(private_local_identity)")
             .all()
             .map((column) => column.name),
-        ).toEqual(["singleton", "agent_id", "name", "created_by", "archived"]);
+        ).toEqual(["singleton", "agent_id", "created_by", "archived"]);
       else
         expect(
           refused
             .prepare("SELECT version, protocol FROM woodstock_schema")
             .get(),
-        ).toEqual({ version: 2, protocol: "shiitake.extension/v0" });
+        ).toEqual({
+          version: schema === "newer" ? 7 : 0,
+          protocol: "shiitake.extension/v0",
+        });
     } finally {
       refused.close();
     }
@@ -147,14 +160,20 @@ async function assertIncompatibleStoreRefusal(schema: "local" | "woodstock") {
 }
 
 it(
-  "an old Local identity is a typed refusal with reset guidance over HTTP and the Session clients",
+  "an unreadable Local identity is a typed in-place refusal over HTTP and the Session clients",
   () => assertIncompatibleStoreRefusal("local"),
   20_000,
 );
 
 it(
-  "Woodstock v2 is a typed refusal with reset guidance over HTTP and the Session clients",
+  "an unreadable Woodstock marker is a typed in-place refusal over HTTP and the Session clients",
   () => assertIncompatibleStoreRefusal("woodstock"),
+  20_000,
+);
+
+it(
+  "a newer Woodstock marker is a typed update-Fungi refusal over HTTP and the Session clients",
+  () => assertIncompatibleStoreRefusal("newer"),
   20_000,
 );
 
@@ -715,7 +734,7 @@ describe("private Local service listener", () => {
     const agents = join(root, ".fungi", "agents");
     for (const id of ["local_store_first", "local_store_second"]) {
       await mkdir(join(agents, id), { recursive: true });
-      new DatabaseSync(join(agents, id, "agent.sqlite")).close();
+      writeFreshStore(join(agents, id, "agent.sqlite"), id);
       await writeFile(join(agents, id, "agent.sqlite.owner.sqlite"), "");
       await writeFile(
         join(agents, id, "agent.sqlite.owner.sqlite-journal"),

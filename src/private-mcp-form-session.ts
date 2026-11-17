@@ -42,7 +42,7 @@ type Pending = {
 
 const maximumPendingForms = 100;
 
-/** Host-owned references to canonical approvals; no suspended tool or second ledger. */
+/** Host-owned card references; the canonical ledger owns every decision. */
 export function createMcpFormSession() {
   const pending = new Map<string, Pending>();
   let publish: ((sessionId: string) => Promise<void>) | undefined;
@@ -226,5 +226,13 @@ export function createMcpFormSession() {
       },
     };
   }
-  return { extension, presentApproval, bindSession };
+  async function withdrawApproval(recordId: string) {
+    for (const [id, entry] of pending) {
+      if (entry.approval.record.recordId !== recordId) continue;
+      pending.delete(id);
+      entry.alwaysAllow?.(false);
+      await publish?.(entry.sessionId);
+    }
+  }
+  return { extension, presentApproval, withdrawApproval, bindSession };
 }

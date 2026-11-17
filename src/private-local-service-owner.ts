@@ -17,6 +17,7 @@ import type {
 } from "@fungi.computer/shiitake";
 import { logEvent } from "./log-event.js";
 import { modeWithinCeiling } from "./private-local-permission-mode.js";
+import { resolveAgentFolder } from "./private-local-sandbox-policy.js";
 import { createPrivateModels } from "./local-models.js";
 import {
   capturePrivateLocalConfigRoot,
@@ -67,7 +68,6 @@ import {
   readPrivateLocalAgentProfile,
   readPrivateLocalSessionSummaries,
   isArchivedStore,
-  unreadableStoreReason,
   type LocalStoreVisibility,
 } from "./private-local-session-discovery.js";
 import type {
@@ -995,7 +995,17 @@ export function createLocalServiceOwners(
     const projectOwner = owners.get(`project:${invocationRoot}`);
     if (projectOwner !== undefined)
       return (await projectOwner).runtime.databasePath;
-    const stores = await listPrivateLocalAgentStores(invocationRoot);
+    const stores = (await listPrivateLocalAgentStores(invocationRoot)).filter(
+      (path) => {
+        try {
+          readPrivateLocalAgentProfile(path);
+          return true;
+        } catch (cause) {
+          if (!(cause instanceof LocalStoreSchemaError)) throw cause;
+          return false;
+        }
+      },
+    );
     ensureRunning();
     if (stores.length > 1)
       throw new LocalAgentSelectionAmbiguous(
@@ -1489,10 +1499,7 @@ export function createLocalServiceOwners(
         ({ createdBy } = readPrivateLocalAgentProfile(databasePath));
       } catch (error) {
         if (!(error instanceof LocalStoreSchemaError)) throw error;
-        throw new AgentArchiveRefused(
-          "unreadable",
-          `Agent ${agentId}'s store ${unreadableStoreReason(agentId)}`,
-        );
+        throw new AgentArchiveRefused("unreadable", error.message);
       }
       if (by.kind === "agent") {
         if (by.agentId === agentId)
@@ -1563,7 +1570,7 @@ export function createLocalServiceOwners(
               agentId,
               name: agentId,
               workingDirectory: invocationRoot,
-              unreadable: unreadableStoreReason(agentId),
+              unreadable: error.message,
             } satisfies LocalAgentControlAgent;
           }
           const { name, model, createdBy } = profile;
@@ -1581,6 +1588,7 @@ export function createLocalServiceOwners(
           requestId,
           name,
           model,
+          folder,
           extensions: requested = [],
           createdBy,
           createdBySessionId,
@@ -1600,6 +1608,42 @@ export function createLocalServiceOwners(
           );
         const creatorStore = dirname(creatorDatabase);
         const creatorProfile = readPrivateLocalAgentProfile(creatorDatabase);
+        const refusedFolder = (cause: unknown, subject: string) =>
+          new AgentCreateRefused(
+            "exceeds_creator",
+            cause instanceof z.ZodError
+              ? `${subject} must be a project-relative path without '..'`
+              : cause instanceof Error &&
+                  "code" in cause &&
+                  (cause.code === "ENOENT" || cause.code === "ENOTDIR")
+                ? `${subject} must be an existing directory`
+                : cause instanceof Error
+                  ? cause.message
+                  : `${subject} must be an existing project directory`,
+          );
+        let creatorFolder: ReturnType<typeof resolveAgentFolder>;
+        try {
+          creatorFolder = resolveAgentFolder(
+            invocationRoot,
+            creatorProfile.folder,
+          );
+        } catch (cause) {
+          throw refusedFolder(cause, "The creating Agent's folder");
+        }
+        let childFolder: ReturnType<typeof resolveAgentFolder>;
+        try {
+          childFolder = resolveAgentFolder(
+            invocationRoot,
+            folder ?? creatorProfile.folder,
+          );
+        } catch (cause) {
+          throw refusedFolder(cause, "Agent folder");
+        }
+        if (!belongsToProject(creatorFolder.absolute, childFolder.absolute))
+          throw new AgentCreateRefused(
+            "exceeds_creator",
+            "Agent folder resolves outside the creator's folder",
+          );
         try {
           await extensions.assertHeldByAgent(creatorStore, requested);
         } catch (error) {
@@ -1641,7 +1685,7 @@ export function createLocalServiceOwners(
               createdBy,
               createdBySessionId,
               mode: creatorProfile.mode,
-              folder: creatorProfile.folder,
+              folder: childFolder.folder,
               agentControl: directory(invocationRoot),
               mail: mailRouting(invocationRoot),
               onExecRuleMatch,
@@ -1682,6 +1726,14 @@ export function createLocalServiceOwners(
           throw new Error(
             "Local Agent create identity does not match its store",
           );
+        if (
+          readPrivateLocalAgentProfile(databasePath).folder !==
+          childFolder.folder
+        )
+          throw new AgentCreateRefused(
+            "request_conflict",
+            "the create request already belongs to an Agent with another folder",
+          );
         owners.set(key, pending);
         const release = hold(databasePath);
         try {
@@ -1694,7 +1746,7 @@ export function createLocalServiceOwners(
           agentId,
           name: owner.runtime.name,
           createdBy,
-          workingDirectory: invocationRoot,
+          workingDirectory: childFolder.absolute,
         };
         return Object.freeze(
           model === undefined ? created : { ...created, model },

@@ -10,10 +10,12 @@ const root = process.argv[2];
 const home = process.argv[3];
 if (root === undefined || home === undefined)
   throw new Error("Missing fixture directories");
+// The command to run; a test passes its own to leave processes in other groups.
+const command = process.argv[4] ?? "sleep 600";
 const processes = createPrivateLocalComputerProcesses(root, home);
 const started = await processes
   .scope("fixture")
-  .start({ kind: "shell", command: "sleep 600" }, root, process.env.PATH ?? "");
+  .start({ kind: "shell", command }, root, process.env.PATH ?? "");
 console.log(JSON.stringify({ id: started.id }));
 process.stdin.on("end", () => process.exit(0));
 process.stdin.on("error", () => process.exit(0));

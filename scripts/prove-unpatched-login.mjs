@@ -93,7 +93,7 @@ try {
       "--no-audit",
       "--no-fund",
       ...tarballs,
-      "@earendil-works/pi-ai@1.3.0",
+      "@earendil-works/pi-ai@1.5.2",
       "jose@6.2.11",
       "react@18.3.1",
       "react-dom@18.3.1",

@@ -434,6 +434,36 @@ describe("private Pi credential store", () => {
     expect(refreshes).toBe(1);
   });
 
+  it("seven local collections await a refresh longer than the filesystem lock retry window", async () => {
+    const path = await credentialPath();
+    await seed(createPrivateCredentialStore(path));
+    let refreshes = 0;
+    const provider = oauthProvider(async (current) => {
+      refreshes++;
+      // The store's 20 bounded lock retries last less than two seconds;
+      // a valid Pi OAuth request may take up to fifteen seconds.
+      await new Promise((done) => setTimeout(done, 2_200));
+      return {
+        ...current,
+        access: "synthetic-shared-rotation",
+        expires: Date.now() + 3_600_000,
+      };
+    });
+    const results = await Promise.allSettled(
+      Array.from({ length: 7 }, () => {
+        const models = createModels({
+          credentials: createPrivateCredentialStore(path),
+        });
+        models.setProvider(provider);
+        return models.getAuth(providerId);
+      }),
+    );
+    expect(refreshes).toBe(1);
+    expect(results.map((result) => result.status)).toEqual(
+      Array.from({ length: 7 }, () => "fulfilled"),
+    );
+  });
+
   it("serializes Pi logout after a competing Pi refresh", async () => {
     const path = await credentialPath();
     const refreshStore = createPrivateCredentialStore(path);

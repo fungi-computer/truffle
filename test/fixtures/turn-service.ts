@@ -1,14 +1,20 @@
-// The real Local service listener owning one Shiitake Agent store, run as its
+// The real Local service listener owning Shiitake Agent stores, run as its
 // own process. In "hang" mode the model call never answers and the fixture
 // marks that the turn reached it, so a test can SIGKILL the service mid-turn.
 // In "answer" mode the model replies, so a restarted service can finish it.
+// The service opens whichever store it is asked for, as it does for children
+// created under one project; `databasePath` is only the first store's name.
 import { writeFileSync } from "node:fs";
-import { DatabaseSync } from "node:sqlite";
+import { basename, dirname } from "node:path";
 import { z } from "zod";
 import { fauxModel } from "@fungi.computer/mule/testing";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { Shiitake } from "@fungi.computer/shiitake";
-import { createPrivateSqliteOwner } from "../../src/private-sqlite-owner.js";
+import {
+  createPrivateSqliteOwner,
+  openPrivateWritableSqliteDatabase,
+  storeWriteBusyTimeoutMs,
+} from "../../src/private-sqlite-owner.js";
 import { createPrivateLocalRuntimeHost } from "../../src/private-local-runtime-host.js";
 import { runPrivateLocalService } from "../../src/private-local-service-listener.js";
 import { serviceDirectory } from "../../src/private-local-service-discovery.js";
@@ -28,47 +34,63 @@ const [directory, databasePath, mode, marker] = z
   .parse(process.argv.slice(2));
 
 const faux = fauxModel([]);
-faux.setResponses([fauxAssistantMessage("finished after the restart")]);
+faux.setResponses(
+  Array.from({ length: 8 }, () =>
+    fauxAssistantMessage("finished after the restart"),
+  ),
+);
 
-await runPrivateLocalService(await serviceDirectory(directory), async () => {
-  const database = new DatabaseSync(databasePath);
-  const agent = await Shiitake.make({
-    store: createPrivateSqliteOwner(database),
-    extensions: { roster: [], grants: [] },
-    runtime: createPrivateLocalRuntimeHost(),
-    instructions: {
-      load: () => Promise.resolve({ revision: "kill", text: "Answer" }),
-    },
-    model: {
-      acquire: () =>
-        Promise.resolve({
-          model: faux.model,
-          retryable: () => false,
-          stream: (model, context, options) => {
-            if (mode === "answer") return faux.stream(model, context, options);
-            writeFileSync(marker, "model-started");
-            return new Promise<never>(() => undefined);
-          },
-          release: () => Promise.resolve(),
-        }),
-    },
-  });
-  return {
-    databasePath,
-    agentId: "kill-agent",
-    getSession: agent.session,
-    listSessions: agent.listSessions,
-    createSession: agent.createSession,
-    deleteSession: agent.deleteSession,
-    extensions: agent.extensions,
-    effectiveModel: fixtureEffectiveModel,
-    ...fixtureModelControls,
-    ...fixtureMailControls,
-    name: "kill-agent",
-    bindSessionPath: () => true,
-    close: async () => {
-      await agent.close();
-      database.close();
-    },
-  };
-});
+await runPrivateLocalService(
+  await serviceDirectory(directory),
+  async (open) => {
+    const storePath = open.databasePath ?? databasePath;
+    // The opener and busy timeout the real service uses for an Agent store: a
+    // bare `new DatabaseSync` has no busy timeout and a different transaction
+    // adapter, and fails where the service does not.
+    const database = openPrivateWritableSqliteDatabase(
+      storePath,
+      storeWriteBusyTimeoutMs,
+    );
+    const agent = await Shiitake.make({
+      store: createPrivateSqliteOwner(database),
+      extensions: { roster: [], grants: [] },
+      runtime: createPrivateLocalRuntimeHost(),
+      instructions: {
+        load: () => Promise.resolve({ revision: "kill", text: "Answer" }),
+      },
+      model: {
+        acquire: () =>
+          Promise.resolve({
+            model: faux.model,
+            retryable: () => false,
+            stream: (model, context, options) => {
+              if (mode === "answer")
+                return faux.stream(model, context, options);
+              writeFileSync(marker, "model-started");
+              writeFileSync(`${storePath}.model-started`, "model-started");
+              return new Promise<never>(() => undefined);
+            },
+            release: () => Promise.resolve(),
+          }),
+      },
+    });
+    return {
+      databasePath: storePath,
+      agentId: `kill-agent-${basename(dirname(storePath))}`,
+      getSession: agent.session,
+      listSessions: agent.listSessions,
+      createSession: agent.createSession,
+      deleteSession: agent.deleteSession,
+      extensions: agent.extensions,
+      effectiveModel: fixtureEffectiveModel,
+      ...fixtureModelControls,
+      ...fixtureMailControls,
+      name: `kill-agent-${basename(dirname(storePath))}`,
+      bindSessionPath: () => true,
+      close: async () => {
+        await agent.close();
+        database.close();
+      },
+    };
+  },
+);
