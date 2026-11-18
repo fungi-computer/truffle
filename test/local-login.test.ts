@@ -34,6 +34,7 @@ describe("local login registry", () => {
             method: method.kind,
             host: "local",
             scope: "user",
+            source: "builtin",
           }),
         ).toBe(true);
     for (const provider of registry) {

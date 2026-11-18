@@ -21,7 +21,7 @@ import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 /** Local credentials belong to the one person who owns this machine. */
 const allowedHere = (providerId: string, method: "api_key" | "subscription") =>
   loginAllowed(
-    { providerId, method, host: "local", scope: "user" },
+    { providerId, method, host: "local", scope: "user", source: "builtin" },
     // FUNGI_SUBSCRIPTION_KILL=anthropic,openai turns logins off without a release.
     subscriptionKillSwitchFrom(process.env.FUNGI_SUBSCRIPTION_KILL),
   );
