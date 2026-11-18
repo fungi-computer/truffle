@@ -1,5 +1,25 @@
 # @fungi.computer/truffle
 
+## 0.16.0
+
+### Minor Changes
+
+- Changes since 0.15.4:
+
+  - feat(local): refuse a pasted stored key and scrub it through the Vault port
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/shiitake@0.21.0
+  - @fungi.computer/veil@0.8.1
+  - @fungi.computer/graft@0.2.35
+  - @fungi.computer/knapsack@0.4.20
+  - @fungi.computer/mycelium@0.4.7
+  - @fungi.computer/shiitake-extensions@0.11.10
+  - @fungi.computer/zookeeper@0.0.42
+
 ## 0.15.4
 
 ### Patch Changes

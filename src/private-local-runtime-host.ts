@@ -195,6 +195,8 @@ import {
   type LocalAgentControlDirectory,
 } from "./private-local-agent-control.js";
 import { type SubagentSource } from "@fungi.computer/shiitake-extensions/subagents/host";
+import { createPrivateCredentialStore } from "./private-file-credential-store.js";
+import { openLocalVaultRedaction } from "./private-local-vault-redaction.js";
 
 const initialSessionId = "main";
 const instructionRevision = "local-host-instructions-v4";
@@ -2308,6 +2310,11 @@ export async function openPrivateLocalRuntimeHost(
       model: modelSource,
       instructions: createPrivateLocalInstructionSource(),
       tools: localTools.tools,
+      // Stored keys and sign-in tokens: refused when pasted into a prompt,
+      // scrubbed when output prints one.
+      redaction: openLocalVaultRedaction(
+        createPrivateCredentialStore(configRoot.credentialPath),
+      ),
       // Custody is the Agent's: a waiting Agent whose Session is gone is still
       // present, and its host delivers to that Agent's newest Session.
       recipientStatus: async (
