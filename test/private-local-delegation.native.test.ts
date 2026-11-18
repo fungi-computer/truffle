@@ -16,6 +16,7 @@ import {
 import type { BirdDogMail } from "@fungi.computer/bird-dog";
 import type { SessionSnapshot } from "@fungi.computer/shiitake";
 import { afterEach, expect, it, vi } from "vitest";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { z } from "zod";
 import { SubagentsProjection } from "@fungi.computer/shiitake-extensions/subagents";
@@ -83,6 +84,8 @@ const userLines = (snapshot: SessionSnapshot) =>
 async function project(
   parentSteps: readonly FauxResponseStep[],
   childSteps: readonly FauxResponseStep[],
+  /** The child's own record names the parent as its maker (`createdBy`). */
+  relation: Readonly<{ madeBy?: boolean }> = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "fungi-local-delegation-"));
   temporaryDirectories.push(root);
@@ -124,6 +127,8 @@ async function project(
     const runtime = await openPrivateLocalRuntimeHost(
       {
         ...options,
+        ...(relation.madeBy === true &&
+          options.databasePath === paths.child && { createdBy: ids.parent }),
         providerId: parent ? "faux-parent" : "faux-child",
         modelId: parent ? "parent-model" : "child-model",
       },
@@ -133,6 +138,21 @@ async function project(
     return runtime;
   };
   const owners = createLocalServiceOwners(openRuntime);
+  /** A fresh service over the same stores, as after a restart. */
+  const reopen = async () => {
+    const reopened = createLocalServiceOwners(openRuntime);
+    const select = (databasePath: string) =>
+      reopened.select({
+        invocationRoot: root,
+        databasePath,
+        sessionId: "main",
+      });
+    return {
+      owners: reopened,
+      parent: await select(paths.parent),
+      child: await select(paths.child),
+    };
+  };
   const parent = await owners.select({
     invocationRoot: root,
     databasePath: paths.parent,
@@ -145,7 +165,9 @@ async function project(
   });
   return {
     root: invocationRoot,
+    paths,
     owners,
+    reopen,
     parent,
     child,
     runtimes,
@@ -461,7 +483,7 @@ it("steers a Local reply into the same active parent run at its safe boundary", 
   }
 }, 60_000);
 
-it("lists the Agents one Local conversation created and sent work to, shows a created Agent made by its creator, and shows no other conversation's", async () => {
+it("lists the Agents a Local Agent created, by createdBy, in every one of its conversations, and no peer it only sent work to", async () => {
   const parentContexts: Context[] = [];
   const spawnAndSend: FauxResponseStep = (context) => {
     parentContexts.push(structuredClone(context));
@@ -505,15 +527,11 @@ it("lists the Agents one Local conversation created and sent work to, shows a cr
         const decoded = Schema.decodeUnknownOption(SubagentsProjection)(value);
         if (decoded._tag === "None") return false;
         const { agents } = decoded.value;
-        // Both host rows are recorded: the created Agent and the one sent to.
+        // Only the created Agent is a child; the peer it sent work to is not.
         return (
-          agents.length === 2 &&
-          agents.some(
+          agents.length === 1 &&
+          agents.every(
             (agent) => agent.agentId !== ids.child && agent.sessionId !== null,
-          ) &&
-          agents.some(
-            (agent) =>
-              agent.agentId === ids.child && agent.sessionId === "main",
           ) &&
           agents.every((agent) => agent.state === "idle")
         );
@@ -523,16 +541,9 @@ it("lists the Agents one Local conversation created and sent work to, shows a cr
     const rows = Schema.decodeUnknownSync(SubagentsProjection)(listed);
     // Roster ownership does not depend on opening its footer drawer.
     expect(rows.expanded).toBe(false);
-    // Two sends to one child stay one row; the created Agent is the other.
     expect(rows.more).toBe(0);
-    expect(rows.agents).toHaveLength(2);
-    const child = rows.agents.find((agent) => agent.agentId === ids.child);
-    expect({ sessionId: child?.sessionId, state: child?.state }).toEqual({
-      sessionId: "main",
-      state: "idle",
-    });
-    expect(child?.name).toMatch(/^[a-z]+-[a-z]+$/u);
-    const made = rows.agents.find((agent) => agent.agentId !== ids.child);
+    expect(rows.agents).toHaveLength(1);
+    const [made] = rows.agents;
     expect(made?.state).toBe("idle");
     expect(made?.sessionId).not.toBeNull();
     // The Agent that ran the create is recorded as the creator, from its own host.
@@ -543,28 +554,19 @@ it("lists the Agents one Local conversation created and sent work to, shows a cr
       ).createdBy,
     ).toBe(ids.parent);
     const elsewhere = await owner().createSession("elsewhere");
-    await until(
+    // The parent edge is the Agent's, so another conversation of the same
+    // Agent lists the same child.
+    const other = await until(
       () => slot(elsewhere),
-      // The first read only starts the refresh; wait for its published rows.
-      (value) => value !== undefined && value !== null,
-      "the other conversation's empty view",
+      (value) =>
+        Schema.decodeUnknownOption(SubagentsProjection)(value).pipe(
+          Option.exists(({ agents }) => agents.length === 1),
+        ),
+      "the other conversation's view of the same child",
     );
-    expect(await slot(elsewhere)).toEqual({
-      agents: [],
-      more: 0,
-      expanded: false,
-      uncounted: 0,
-      counts: {
-        needs_you: 0,
-        waiting_on_agent: 0,
-        working: 0,
-        failed: 0,
-        unavailable: 0,
-        idle: 0,
-      },
-      waitingOn: [],
-      escalated: 0,
-      escalatedBy: [],
+    expect(Schema.decodeUnknownSync(SubagentsProjection)(other)).toMatchObject({
+      agents: [{ agentId: made?.agentId, state: "idle" }],
+      counts: { needs_you: 0, idle: 1 },
     });
   } finally {
     await local.owners.close();
@@ -913,19 +915,182 @@ it("a child's question reaches its parent in the parent's own turn, and the pare
   }
 }, 90_000);
 
-it("a new Session on the same Agent cannot answer or pause its earlier Session's child", async () => {
+/**
+ * A parent model that acts only on a person's prompt it has code for and
+ * notes everything else (replies, reports and reminders), so a reminder can
+ * never take the step meant for another of its Sessions.
+ */
+const parentActs = (
+  contexts: Context[],
+  code: (prompt: string, context: Context) => string | undefined,
+): FauxResponseStep => {
+  return (context) => {
+    contexts.push(structuredClone(context));
+    const last = context.messages.at(-1);
+    if (last?.role === "toolResult")
+      return fauxAssistantMessage("Tool finished");
+    const prompt = last?.role === "user" ? JSON.stringify(last.content) : "";
+    const run = code(prompt, context);
+    return run === undefined
+      ? fauxAssistantMessage("Noted")
+      : fauxAssistantMessage(fauxToolCall("execute", { code: run }), {
+          stopReason: "toolUse",
+        });
+  };
+};
+
+/** Delegate on "Delegate this"; any further code comes from the test. */
+const delegatesThen =
+  (
+    more: (prompt: string, context: Context) => string | undefined = () =>
+      undefined,
+  ) =>
+  (prompt: string, context: Context) =>
+    prompt.includes("Delegate this")
+      ? `async () => agents.send({ agentId: ${JSON.stringify(ids.child)}, sessionId: "main", requestId: "find-answer", text: "Find the answer", delivery: "followUp" })`
+      : more(prompt, context);
+
+const setGoal: FauxResponseStep = () =>
+  fauxAssistantMessage(
+    fauxToolCall("execute", {
+      code: `async () => goal.create_goal({ objective: "Find the answer" })`,
+    }),
+    { stopReason: "toolUse" },
+  );
+
+/**
+ * The parent at rest after its child's waiting item and both reminders, so a
+ * restart never cuts a reminder turn short.
+ */
+const parentAtRest = (local: Awaited<ReturnType<typeof project>>) =>
+  until(
+    () => local.parent.session.read({ limit: 100 }),
+    (snapshot) =>
+      snapshot.activity.queue.state === "idle" &&
+      snapshot.messages.filter(
+        ({ value }) =>
+          value.role === "user" &&
+          JSON.stringify(value).includes("This is reminder"),
+      ).length === 2,
+    "the parent at rest after both reminders",
+  );
+
+const childSessionRows = async (local: Awaited<ReturnType<typeof project>>) => {
+  const runtime = local.runtimes.get(ids.child);
+  if (runtime === undefined) throw new Error("Child runtime is not open");
+  return (await runtime.listSessions()).sessions;
+};
+
+/** The parent's own sub-agent footer for one of its Sessions. */
+const parentFooter = async (
+  local: Awaited<ReturnType<typeof project>>,
+  sessionId: string,
+) => {
+  const runtime = local.runtimes.get(ids.parent);
+  if (runtime === undefined) throw new Error("Parent runtime is not open");
+  const slot = (await runtime.getSession(sessionId).read()).extensions[
+    "botanical-session-subagents"
+  ];
+  return slot?.status === "running"
+    ? Option.getOrUndefined(
+        Schema.decodeUnknownOption(SubagentsProjection)(slot.value),
+      )
+    : undefined;
+};
+
+it("a made-by child's goal turn asks its maker, not the person, and reports to the maker", async () => {
   const parentContexts: Context[] = [];
   const childContexts: Context[] = [];
   const local = await project(
+    Array.from({ length: 12 }, () =>
+      parentActs(parentContexts, delegatesThen()),
+    ),
     [
-      delegate(parentContexts),
-      capture(parentContexts, "Delegated; waiting"),
-      capture(parentContexts, "Leaving the question waiting"),
-    ],
-    [
+      setGoal,
+      capture(childContexts, "Goal set"),
+      // The goal's own continuation, which no Agent mail sent.
       askBranch(childContexts),
       capture(childContexts, "Asked about the branch"),
     ],
+    { madeBy: true },
+  );
+  try {
+    await local.parent.session.send("Delegate this", {
+      requestId: "parent-prompt",
+    });
+    const asked = await until(
+      () => local.child.session.read(),
+      (snapshot) => snapshot.attention.some(({ kind }) => kind === "question"),
+      "the goal turn's question",
+    );
+    expect(
+      asked.attention.find(({ kind }) => kind === "question"),
+    ).toMatchObject({
+      inbox: false,
+      waitingOn: { agentId: ids.parent, sessionId: "main" },
+    });
+    // The question was asked in a goal turn, not the turn the mail sent.
+    expect(
+      userLines(asked).some(({ value }) =>
+        JSON.stringify(value).includes("Goal turn"),
+      ),
+    ).toBe(true);
+    // The maker hears of it in its own turn, from the resting child's report.
+    await until(
+      () => Promise.resolve(parentContexts),
+      (contexts) =>
+        contexts.some((context) =>
+          JSON.stringify(context.messages.at(-1)).includes("waiting_on_you"),
+        ),
+      "the report to the maker",
+    );
+    // Nothing waits on the person: the child is not in the person's queue.
+    expect(
+      (await childSessionRows(local)).map((row) => row.state),
+    ).not.toContain("needs_you");
+    const footer = await until(
+      () => parentFooter(local, "main"),
+      (view) => view?.counts.waiting_on_agent === 1,
+      "the maker's footer",
+    );
+    expect(footer).toMatchObject({
+      counts: { needs_you: 0, waiting_on_agent: 1 },
+      agents: [{ agentId: ids.child, state: "waiting_on_agent" }],
+    });
+  } finally {
+    await local.owners.close();
+  }
+}, 90_000);
+
+it("a parent Agent restarted into a new Session pauses, answers and stops its made-by child", async () => {
+  const parentContexts: Context[] = [];
+  const childContexts: Context[] = [];
+  let askId = "";
+  let closed = false;
+  const local = await project(
+    Array.from({ length: 16 }, () =>
+      parentActs(
+        parentContexts,
+        delegatesThen((prompt) =>
+          prompt.includes("Take the earlier child in hand")
+            ? `async () => ({
+                pause: await agents.goal({ agentId: ${JSON.stringify(ids.child)}, sessionId: "main", action: "pause", reason: "Inspect work" }),
+                answer: await agents.answer({ agentId: ${JSON.stringify(ids.child)}, sessionId: "main", askId: ${JSON.stringify(askId)}, requestId: "new-session-answer", answers: { branch: { selected: ["main"] } } }),
+                stop: await agents.goal({ agentId: ${JSON.stringify(ids.child)}, sessionId: "main", action: "clear", reason: "Done here" })
+              })`
+            : undefined,
+        ),
+      ),
+    ),
+    [
+      setGoal,
+      capture(childContexts, "Goal set"),
+      askBranch(childContexts),
+      capture(childContexts, "Asked about the branch"),
+      capture(childContexts, "Echo: main"),
+      capture(childContexts, "Spare"),
+    ],
+    { madeBy: true },
   );
   try {
     await local.parent.session.send("Delegate this", {
@@ -934,62 +1099,197 @@ it("a new Session on the same Agent cannot answer or pause its earlier Session's
     const waiting = await until(
       () => local.child.session.read(),
       (snapshot) =>
-        snapshot.attention.some((item) => item.waitingOn !== undefined),
+        snapshot.activity.queue.state === "idle" &&
+        snapshot.attention.some(({ kind }) => kind === "question"),
       "the child's waiting question",
     );
+    askId = waiting.attention.find(({ kind }) => kind === "question")?.id ?? "";
+    await parentAtRest(local);
+    // The service restarts; the parent comes back in a new Session.
+    await local.owners.close();
+    closed = true;
+    const restarted = await local.reopen();
+    try {
+      const newer = await restarted.owners.select({
+        invocationRoot: local.root,
+        databasePath: local.paths.parent,
+        sessionId: "new-parent-session",
+      });
+      await newer.session.send("Take the earlier child in hand", {
+        requestId: "new-parent-prompt",
+      });
+      const result = await until(
+        () => Promise.resolve(parentContexts),
+        (contexts) =>
+          contexts.some((context) =>
+            JSON.stringify(context.messages.at(-1)).includes("cleared"),
+          ),
+        "the new Session's controls",
+      );
+      const tool = JSON.stringify(
+        result
+          .find((context) =>
+            JSON.stringify(context.messages.at(-1)).includes("cleared"),
+          )
+          ?.messages.at(-1),
+      );
+      expect(tool).not.toContain("not_sender");
+      expect(tool).not.toContain("not_delegator");
+      expect(tool).toContain('\\"status\\":\\"paused\\"');
+      expect(tool).toContain('\\"status\\":\\"answered\\"');
+      expect(tool).toContain('\\"status\\":\\"cleared\\"');
+      // The answer continued the child; nothing is left waiting on anyone.
+      const answered = await until(
+        () => restarted.child.session.read(),
+        (snapshot) =>
+          snapshot.messages.some(
+            ({ value }) =>
+              value.role === "assistant" &&
+              JSON.stringify(value).includes("Echo: main"),
+          ),
+        "the child's answered turn",
+      );
+      expect(
+        answered.attention.filter(({ kind }) => kind === "question"),
+      ).toEqual([]);
+    } finally {
+      await restarted.owners.close();
+    }
+  } finally {
+    if (!closed) await local.owners.close();
+  }
+}, 120_000);
+
+it("a reply sent after the parent's Session is gone lands on the parent Agent's newest Session", async () => {
+  const parentContexts: Context[] = [];
+  const release = Promise.withResolvers<undefined>();
+  const started = Promise.withResolvers<undefined>();
+  const local = await project(
+    Array.from({ length: 8 }, () =>
+      parentActs(parentContexts, delegatesThen()),
+    ),
+    [
+      async () => {
+        started.resolve(undefined);
+        await release.promise;
+        return fauxAssistantMessage("Child result");
+      },
+    ],
+    { madeBy: true },
+  );
+  try {
+    await local.parent.session.send("Delegate this", {
+      requestId: "parent-prompt",
+    });
+    await started.promise;
     await until(
       () => local.parent.session.read(),
       (snapshot) =>
-        snapshot.messages.some(
-          ({ value }) =>
-            value.role === "assistant" &&
-            JSON.stringify(value).includes("Leaving the question waiting"),
-        ),
-      "the original parent's rest",
+        snapshot.activity.queue.state === "idle" &&
+        snapshot.messages.some(({ value }) => value.role === "assistant"),
+      "the parent's delegating turn",
     );
-    const item = waiting.attention[0];
-    if (item === undefined) throw new Error("Missing waiting question");
-    local.parentModel.setResponses([
-      fauxAssistantMessage(
-        fauxToolCall("execute", {
-          code: `async () => ({
-            answer: await agents.answer({agentId:${JSON.stringify(ids.child)},sessionId:"main",askId:${JSON.stringify(item.id)},requestId:"new-session-answer",answers:{branch:{selected:["main"]}}}),
-            goal: await agents.goal({agentId:${JSON.stringify(ids.child)},sessionId:"main",action:"pause",reason:"Inspect work"})
-          })`,
-        }),
-        { stopReason: "toolUse" },
-      ),
-      capture(parentContexts, "New Session tried"),
-    ]);
-    const restarted = await local.owners.select({
-      invocationRoot: local.root,
-      databasePath: local.parent.databasePath,
-      sessionId: "new-parent-session",
+    const parent = local.runtimes.get(ids.parent);
+    if (parent === undefined) throw new Error("Parent runtime is not open");
+    const newest = await parent.createSession("newest-parent-session");
+    expect(await parent.deleteSession("main")).toBe(true);
+    release.resolve(undefined);
+    const landed = await until(
+      () => parent.getSession(newest).read(),
+      (snapshot) =>
+        userLines(snapshot).some(
+          (line) => messageDelegationReply(line.meta) !== undefined,
+        ),
+      "the reply on the newest Session",
+    );
+    const reply = userLines(landed).find(
+      (line) => messageDelegationReply(line.meta) !== undefined,
+    );
+    expect(messageDelegationReply(reply?.meta)).toMatchObject({
+      agentId: ids.child,
+      sessionId: "main",
+      outcome: "completed",
     });
-    await restarted.session.send("Answer the earlier child's question", {
-      requestId: "new-parent-prompt",
+    expect(JSON.stringify(reply?.value)).toContain("Child result");
+    // The reply woke the newest Session; let that turn finish before closing.
+    await until(
+      () => parent.getSession(newest).read(),
+      (snapshot) =>
+        snapshot.activity.queue.state === "idle" &&
+        snapshot.messages.some(({ value }) => value.role === "assistant"),
+      "the newest Session at rest",
+    );
+  } finally {
+    release.resolve(undefined);
+    await local.owners.close();
+  }
+}, 90_000);
+
+it("reopening a made-by child moves a question an older build left with the person to its maker", async () => {
+  const parentContexts: Context[] = [];
+  const childContexts: Context[] = [];
+  const local = await project(
+    Array.from({ length: 8 }, () =>
+      parentActs(parentContexts, delegatesThen()),
+    ),
+    [
+      askBranch(childContexts),
+      capture(childContexts, "Asked about the branch"),
+    ],
+    { madeBy: true },
+  );
+  try {
+    await local.parent.session.send("Delegate this", {
+      requestId: "parent-prompt",
     });
     await until(
-      () => restarted.session.read(),
+      () => local.child.session.read(),
       (snapshot) =>
-        snapshot.messages.some(
-          ({ value }) =>
-            value.role === "assistant" &&
-            JSON.stringify(value).includes("New Session tried"),
-        ),
-      "the new Session's result",
+        snapshot.activity.queue.state === "idle" &&
+        snapshot.attention.some(({ kind }) => kind === "question"),
+      "the child's question",
     );
-    const result = parentContexts
-      .at(-1)
-      ?.messages.findLast((message) => message.role === "toolResult");
-    expect(result).toMatchObject({ isError: false });
-    expect(JSON.stringify(result)).toContain("not_sender");
-    expect(JSON.stringify(result)).toContain("not_delegator");
-    expect((await local.child.session.read()).attention).toMatchObject([
-      { waitingOn: { agentId: ids.parent, sessionId: "main" } },
-    ]);
+    await parentAtRest(local);
   } finally {
     await local.owners.close();
+  }
+  // The exact shape an older build stored (Shiitake's region-17 child on
+  // 2026-11-17): a parked ask and its attention item with no waitingOn, and
+  // an inbox row that needs the person.
+  const store = new DatabaseSync(local.paths.child);
+  try {
+    store.exec(
+      "UPDATE shiitake_extension_records SET value_json = json_remove(value_json, '$.waitingOn') WHERE extension_id = 'botanical-session-question' AND collection = 'asks'",
+    );
+    store.exec(
+      "UPDATE session_attention SET value_json = json_remove(value_json, '$.waitingOn', '$.inbox') WHERE extension_id = 'botanical-session-question'",
+    );
+    store.exec("UPDATE session_inbox SET state = 'needs_you', tier = 0");
+  } finally {
+    store.close();
+  }
+  const reopened = await local.reopen();
+  try {
+    const routed = await until(
+      () => reopened.child.session.read(),
+      (snapshot) =>
+        snapshot.attention.some(
+          ({ kind, waitingOn }) =>
+            kind === "question" && waitingOn !== undefined,
+        ),
+      "the reconciled question",
+    );
+    expect(
+      routed.attention.find(({ kind }) => kind === "question"),
+    ).toMatchObject({
+      inbox: false,
+      waitingOn: { agentId: ids.parent, sessionId: "main" },
+    });
+    expect(
+      (await childSessionRows(local)).map((row) => row.state),
+    ).not.toContain("needs_you");
+  } finally {
+    await reopened.owners.close();
   }
 }, 90_000);
 

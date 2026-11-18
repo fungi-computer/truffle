@@ -94,7 +94,10 @@ export function createPrivateLocalAgentControl(
     storage: Parameters<typeof createConversationAgents>[0];
   }>,
 ) {
-  const conversations = createConversationAgents(input.storage);
+  const conversations = createConversationAgents(
+    input.storage,
+    () => input.agentId,
+  );
   function bound(parentSessionId: string | undefined): AgentControlDirectory {
     const { create, archive, unarchive, answer, escalate, goal, ...ordinary } =
       input.directory;
@@ -150,6 +153,6 @@ export function createPrivateLocalAgentControl(
   return {
     control,
     source: conversations.source(input.directory),
-    directory: conversations.recording(undefined, bound(undefined)),
+    directory: conversations.recording(bound(undefined)),
   };
 }

@@ -1837,6 +1837,18 @@ export async function openPrivateLocalRuntimeHost(
             )
             .get()?.name,
         ) ?? agentId;
+    // The one parent edge: the Agent that made this one, on its own record.
+    const createdBy =
+      z
+        .string()
+        .nullable()
+        .parse(
+          database
+            .prepare(
+              "SELECT created_by FROM private_local_identity WHERE singleton = 1",
+            )
+            .get()?.created_by,
+        ) ?? undefined;
     const modelDatabase = database;
     ensureAgentDefaultModelTable(modelDatabase);
     let initialModel =
@@ -2296,6 +2308,8 @@ export async function openPrivateLocalRuntimeHost(
       model: modelSource,
       instructions: createPrivateLocalInstructionSource(),
       tools: localTools.tools,
+      // Custody is the Agent's: a waiting Agent whose Session is gone is still
+      // present, and its host delivers to that Agent's newest Session.
       recipientStatus: async (
         recipient: import("@fungi.computer/shiitake/extensions").AttentionRecipient,
       ): Promise<
@@ -2315,26 +2329,7 @@ export async function openPrivateLocalRuntimeHost(
             ({ agentId }) => agentId === recipient.agentId,
           );
           if (row === undefined) return "absent";
-          if (row.unreadable !== undefined) return "unknown";
-          const opened = await directory.open(recipient.agentId, signal);
-          try {
-            // Core reads an absent Session as empty, not not-found. Its ordinary
-            // list is the existence authority; a bounded incomplete read is unknown.
-            let after: string | undefined;
-            for (let page = 0; page < 256; page += 1) {
-              const result = await opened.agent.listSessions(after);
-              const session = result.sessions.find(
-                ({ sessionId }) => sessionId === recipient.sessionId,
-              );
-              if (session !== undefined)
-                return session.state === "unavailable" ? "unknown" : "present";
-              if (result.next === undefined) return "absent";
-              after = result.next;
-            }
-            return "unknown";
-          } finally {
-            await opened.release();
-          }
+          return row.unreadable === undefined ? "present" : "unknown";
         } catch (cause) {
           logEvent("recipient.status_unavailable", cause);
           return "unknown";
@@ -2359,6 +2354,7 @@ export async function openPrivateLocalRuntimeHost(
         }
       },
     };
+    if (createdBy !== undefined) Object.assign(hostOptions, { createdBy });
     if (input.mail === undefined) {
       agent = await Shiitake.make(hostOptions);
     } else {

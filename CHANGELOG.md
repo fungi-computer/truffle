@@ -1,5 +1,31 @@
 # @fungi.computer/truffle
 
+## 0.15.3
+
+### Patch Changes
+
+- Changes since 0.15.2:
+
+  - fix(subagents): keep the Agents a conversation sent work to in the footer
+  - fix(subagents): read the host Agent's id when the roster is used
+  - fix(subagents): route a made-by Agent's attention and reports to its maker
+  - fix(subagents): derive the parent edge from createdBy, drop the roster
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.22.0
+  - @fungi.computer/nacre@0.8.1
+  - @fungi.computer/shiitake-extensions@0.11.8
+  - @fungi.computer/shiitake@0.20.3
+  - @fungi.computer/veil@0.8.0
+  - @fungi.computer/graft@0.2.33
+  - @fungi.computer/knapsack@0.4.19
+  - @fungi.computer/mycelium@0.4.6
+  - @fungi.computer/zookeeper@0.0.40
+
 ## 0.15.2
 
 ### Patch Changes

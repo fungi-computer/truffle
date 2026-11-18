@@ -170,6 +170,42 @@ type HeldRuntime = Readonly<{
   release: () => void;
 }>;
 
+/** Pages one recipient read walks before keeping the named Session. */
+const maximumRecipientPages = 256;
+
+/**
+ * A reply or report belongs to the Agent that sent the work, not one of its
+ * Sessions: once the named Session is gone it reaches that Agent's newest
+ * Session. Original work keeps its exact address; an unreadable list keeps
+ * the named Session.
+ */
+async function liveReplyRecipient(
+  owner: Pick<LocalServiceRuntime, "listSessions">,
+  mail: Parameters<LocalServiceRuntime["acceptMail"]>[0],
+): Promise<Parameters<LocalServiceRuntime["acceptMail"]>[0]> {
+  const named = mail.to.sessionId;
+  if (mail.reply === undefined || named === undefined) return mail;
+  let newest: Readonly<{ sessionId: string; createdAt: number }> | undefined;
+  let after: string | undefined;
+  for (let page = 0; page < maximumRecipientPages; page += 1) {
+    const result = await owner.listSessions(after);
+    for (const row of result.sessions) {
+      if (row.sessionId === named) return mail;
+      if (
+        row.state !== "unavailable" &&
+        (newest === undefined || row.createdAt > newest.createdAt)
+      )
+        newest = row;
+    }
+    if (result.next === undefined)
+      return newest === undefined
+        ? mail
+        : { ...mail, to: { ...mail.to, sessionId: newest.sessionId } };
+    after = result.next;
+  }
+  return mail;
+}
+
 // Reopen inputs only. Credentials remain with Local's account custodian.
 const recoveryOwnerSchema = selectionSchema
   .omit({ clientPath: true, sessionId: true, uiAttachmentLifetime: true })
@@ -394,7 +430,10 @@ export function createLocalServiceOwners(
         const sessionlessAcceptance = mail.to.sessionId === undefined;
         // Only select the physical store here. Never bypass that runtime's
         // recipient/sender admission; request keys make acceptance replay-safe.
-        const command = await admitted(owner, () => owner.acceptMail(mail));
+        const addressed = await liveReplyRecipient(owner, mail);
+        const command = await admitted(owner, () =>
+          owner.acceptMail(addressed),
+        );
         if (sessionlessAcceptance && command.sessionId === undefined)
           throw new Error("Sessionless mail acceptance returned no Session");
         return { status: "accepted", receipt: command };
@@ -1211,7 +1250,10 @@ export function createLocalServiceOwners(
           new AbortController().signal,
         );
         try {
-          const receipt = await admitted(owner, () => owner.acceptMail(mail));
+          const addressed = await liveReplyRecipient(owner, mail);
+          const receipt = await admitted(owner, () =>
+            owner.acceptMail(addressed),
+          );
           if (
             mail.to.sessionId === undefined &&
             receipt.sessionId === undefined

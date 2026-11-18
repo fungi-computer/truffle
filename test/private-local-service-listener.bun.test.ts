@@ -80,7 +80,7 @@ async function assertIncompatibleStoreRefusal(
       if (schema !== "local")
         database.exec(`
           CREATE TABLE woodstock_schema (version INTEGER NOT NULL, protocol TEXT NOT NULL);
-          INSERT INTO woodstock_schema VALUES (${schema === "newer" ? "7" : "0"}, 'shiitake.extension/v0');
+          INSERT INTO woodstock_schema VALUES (${schema === "newer" ? "8" : "0"}, 'shiitake.extension/v0');
         `);
     } finally {
       database.close();
@@ -144,7 +144,7 @@ async function assertIncompatibleStoreRefusal(
             .prepare("SELECT version, protocol FROM woodstock_schema")
             .get(),
         ).toEqual({
-          version: schema === "newer" ? 7 : 0,
+          version: schema === "newer" ? 8 : 0,
           protocol: "shiitake.extension/v0",
         });
     } finally {

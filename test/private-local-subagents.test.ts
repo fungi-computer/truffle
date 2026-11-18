@@ -42,21 +42,7 @@ function fixture(
     directory,
     storage: createPrivateSqliteOwner(database),
   });
-  /** A create this host's control accepted for one conversation. */
-  const recordCreated = async (
-    parentSessionId: string,
-    agentId: string,
-    at: number,
-  ) => {
-    // The host prepares its record on first use, never while composing.
-    await subagents.source.read(parentSessionId, 1);
-    database
-      .prepare(
-        "INSERT INTO oyster_conversation_agents(parent_session_id, agent_id, session_id, at) VALUES (?, ?, NULL, ?)",
-      )
-      .run(parentSessionId, agentId, at);
-  };
-  return { create, send, archive, unarchive, subagents, recordCreated };
+  return { create, send, archive, unarchive, subagents };
 }
 
 it("refuses a create that has no invoking Session, so no Agent is identified as its creator", async () => {
@@ -72,15 +58,14 @@ it("refuses a create that has no invoking Session, so no Agent is identified as 
   expect(create).not.toHaveBeenCalled();
 });
 
-it("lists only the Agents this conversation created or sent accepted work to", async () => {
-  const { subagents, recordCreated } = fixture([
+it("lists the Agents this Agent created, the same in every conversation, and no peer it only sent work to", async () => {
+  const { subagents } = fixture([
     { agentId: "maker", name: "Maker", createdBy: null },
     { agentId: "child", name: "Child", createdBy: "maker" },
     { agentId: "peer", name: "Peer", createdBy: null },
     { agentId: "elsewhere", name: "Elsewhere", createdBy: "maker" },
+    { agentId: "cousin", name: "Cousin", createdBy: "child" },
   ]);
-  await recordCreated("main", "child", 1);
-  await recordCreated("another-session", "elsewhere", 1);
   const send = subagents.directory.send;
   if (send === undefined) throw new Error("send is unavailable");
   const invocation = { toolCallId: "call", sendIndex: 0 };
@@ -96,37 +81,19 @@ it("lists only the Agents this conversation created or sent accepted work to", a
     signal,
     invocation,
   );
-  // A second send to the same Agent stays one row.
-  await send(
-    {
-      agentId: "peer",
-      sessionId: "work",
-      requestId: "peer-again",
-      text: "Again",
-      delivery: "followUp",
-    },
-    "main",
-    signal,
-    invocation,
-  );
-  expect(await subagents.source.read("main", 10)).toEqual({
+  const children = {
     agents: [
-      { agentId: "peer", name: "Peer", sessionId: "work" },
       { agentId: "child", name: "Child", sessionId: null },
+      { agentId: "elsewhere", name: "Elsewhere", sessionId: null },
     ],
     more: 0,
-  });
+  };
+  expect(await subagents.source.read("main", 10)).toEqual(children);
+  expect(await subagents.source.read("another-session", 10)).toEqual(children);
+  expect(await subagents.source.read("untouched", 10)).toEqual(children);
   expect(await subagents.source.read("main", 1)).toEqual({
-    agents: [{ agentId: "peer", name: "Peer", sessionId: "work" }],
+    agents: [{ agentId: "child", name: "Child", sessionId: null }],
     more: 1,
-  });
-  expect(await subagents.source.read("another-session", 10)).toEqual({
-    agents: [{ agentId: "elsewhere", name: "Elsewhere", sessionId: null }],
-    more: 0,
-  });
-  expect(await subagents.source.read("untouched", 10)).toEqual({
-    agents: [],
-    more: 0,
   });
 });
 
@@ -145,12 +112,10 @@ it("names the Agent that archives, so the host never trusts the caller for it", 
 });
 
 it("an archived Agent leaves the footer", async () => {
-  const { subagents, recordCreated } = fixture(
+  const { subagents } = fixture(
     [{ agentId: "active", name: "Active", createdBy: "maker" }],
     [{ agentId: "archived", name: "Archived", createdBy: "maker" }],
   );
-  await recordCreated("main", "active", 2);
-  await recordCreated("main", "archived", 1);
   expect(
     (await subagents.source.read("main", 10)).agents.map(
       ({ agentId }) => agentId,

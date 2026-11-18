@@ -115,7 +115,7 @@ function markerOf(path: string): number {
 }
 
 describe("a folder with Agent stores from older Fungi releases", () => {
-  it.each([0, 7])(
+  it.each([0, 8])(
     "keeps refused marker %s byte-identical in place without an archive",
     async (version) => {
       const root = await folder();
@@ -144,7 +144,7 @@ describe("a folder with Agent stores from older Fungi releases", () => {
         refused: [
           {
             databasePath: path,
-            reason: version === 7 ? "newer" : "unreadable",
+            reason: version === 8 ? "newer" : "unreadable",
           },
         ],
       });
@@ -156,7 +156,7 @@ describe("a folder with Agent stores from older Fungi releases", () => {
         }),
       ).rejects.toMatchObject({
         name: "LocalStoreSchemaError",
-        reason: version === 7 ? "newer" : "unreadable",
+        reason: version === 8 ? "newer" : "unreadable",
       });
       expect((await readFile(path)).equals(before)).toBe(true);
       await expect(
@@ -215,7 +215,7 @@ describe("a folder with Agent stores from older Fungi releases", () => {
     await expect(lstat(join(root, ".fungi", "archive"))).rejects.toMatchObject({
       code: "ENOENT",
     });
-    for (const path of upgradable) expect(markerOf(path)).toBe(6);
+    for (const path of upgradable) expect(markerOf(path)).toBe(7);
 
     // The Agents and every Session are still there, now readable by this build.
     const discovery = await readPrivateLocalSessionDiscovery(root);
@@ -280,7 +280,7 @@ describe("a folder with Agent stores from older Fungi releases", () => {
       lease.release();
     }
     expect((await upgradeLocalFolder(root)).upgraded).toHaveLength(1);
-    expect(markerOf(path)).toBe(6);
+    expect(markerOf(path)).toBe(7);
   });
 
   it("leaves refused and upgradable symlinks and their targets in place", async () => {
@@ -446,7 +446,7 @@ describe.each([1, 2, 3, 4, 5] as const)(
             await host.close();
           }
         });
-        expect(markerOf(path)).toBe(6);
+        expect(markerOf(path)).toBe(7);
       },
     );
   },
