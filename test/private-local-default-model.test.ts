@@ -10,7 +10,7 @@ import {
 
 import { ShiitakeError } from "@fungi.computer/shiitake";
 
-import { createPrivateModels } from "../src/local-models.js";
+import { openPrivateModels } from "../src/local-models.js";
 import {
   defaultLocalModel,
   listOfferedLocalModels,
@@ -30,7 +30,7 @@ afterEach(async () => {
 it("lists models only from signed-in providers as provider/model addresses", async () => {
   const directory = await mkdtemp(join(tmpdir(), "fungi-local-offered-"));
   temporaryDirectories.push(directory);
-  const models = createPrivateModels(join(directory, "credentials.json"));
+  const models = await openPrivateModels(join(directory, "credentials.json"));
   expect(models.getModels("anthropic").length).toBeGreaterThan(0);
   vi.spyOn(models, "checkAuth").mockImplementation((provider) =>
     Promise.resolve(
@@ -56,7 +56,7 @@ it.each(["anthropic", "openai"])(
   async (providerId) => {
     const directory = await mkdtemp(join(tmpdir(), "fungi-local-default-"));
     temporaryDirectories.push(directory);
-    const models = createPrivateModels(join(directory, "credentials.json"));
+    const models = await openPrivateModels(join(directory, "credentials.json"));
     vi.spyOn(models, "checkAuth").mockImplementation((provider) =>
       Promise.resolve(
         provider === providerId
@@ -83,7 +83,7 @@ it.each(["anthropic", "openai"])(
 it("refuses an unregistered model with a typed model refusal", async () => {
   const directory = await mkdtemp(join(tmpdir(), "fungi-local-offered-"));
   temporaryDirectories.push(directory);
-  const models = createPrivateModels(join(directory, "credentials.json"));
+  const models = await openPrivateModels(join(directory, "credentials.json"));
   const opening = Promise.resolve().then(() =>
     createPrivateLocalModelSource(models, "openai", "luna", "cache"),
   );
@@ -100,7 +100,7 @@ async function signedIn(
 ) {
   const directory = await mkdtemp(join(tmpdir(), "fungi-local-default-"));
   temporaryDirectories.push(directory);
-  const models = createPrivateModels(join(directory, "credentials.json"));
+  const models = await openPrivateModels(join(directory, "credentials.json"));
   const [openai] = models.getModels("openai");
   if (openai === undefined) throw new Error("Missing the OpenAI catalog");
   // The Fungi catalog arrives from the Hub; its default row is Luna.

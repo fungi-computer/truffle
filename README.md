@@ -60,7 +60,7 @@ bounded claim names, never token or claim values, and preserve the prior entry.
 A turn detects a different OpenAI person by issuer and subject and refuses as
 `account-switched-during-turn`.
 
-Auth tests inject a fixture ChatGPT OAuth provider through `createPrivateModels`
+Auth tests inject a fixture ChatGPT OAuth provider through `openPrivateModels`
 and pass the resulting collection to `runLocalAuthCli`. They do not start Pi's
 callback server or bind an OAuth port. Explicit temporary credential paths and
 real-file size/mtime guards prevent touching the person's credentials. After

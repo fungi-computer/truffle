@@ -13,7 +13,7 @@ import {
 import { Shiitake } from "@fungi.computer/shiitake";
 import { afterEach, expect, it, vi } from "vitest";
 import { openAIAccessToken } from "./openai-fixtures.js";
-import { createPrivateModels } from "../src/local-models.js";
+import { openPrivateModels } from "../src/local-models.js";
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
 import {
   createPrivateLocalModelSource,
@@ -38,7 +38,7 @@ async function openAIRefreshFixture(
   vi.stubEnv("HOME", root);
   const credentialPath = join(root, ".config/fungi/credentials.json");
   const store = createPrivateCredentialStore(credentialPath);
-  const models = createPrivateModels(credentialPath);
+  const models = await openPrivateModels(credentialPath);
   // Issue/pin the disposable credential in the past, then restore real time
   // before testing refresh contention. Future fake time would make a real
   // proper-lockfile mtime appear stale and invalidate the concurrency proof.
@@ -279,7 +279,7 @@ it("parallel OpenAI turns adopt a shared maintained Pi refresh and continue tool
   vi.stubEnv("HOME", root);
   const credentialPath = join(root, ".config/fungi/credentials.json");
   const store = createPrivateCredentialStore(credentialPath);
-  const models = createPrivateModels(credentialPath);
+  const models = await openPrivateModels(credentialPath);
   const nativeFetch = globalThis.fetch;
   const releaseTools = Promise.withResolvers<undefined>();
   const close: (() => Promise<void>)[] = [];
@@ -344,7 +344,7 @@ it("parallel OpenAI turns adopt a shared maintained Pi refresh and continue tool
     const freshSeen: boolean[] = [];
     const sessions = await Promise.all(
       Array.from({ length: 5 }, async (_, index) => {
-        const turnModels = createPrivateModels(credentialPath);
+        const turnModels = await openPrivateModels(credentialPath);
         const provider = turnModels.getProvider("openai");
         if (provider === undefined) throw new Error("Missing OpenAI provider");
         const faux = fauxProvider({
@@ -495,7 +495,7 @@ it.each([
       expires: Date.now() + 3_600_000,
     };
     await store.modify(providerId, () => Promise.resolve(first));
-    const models = createPrivateModels(credentialPath);
+    const models = await openPrivateModels(credentialPath);
     const faux = fauxProvider({
       provider: providerId,
       models: [{ id: "turn-pin", name: "Turn pin" }],
@@ -676,7 +676,7 @@ it.each(["anthropic", "openai"])(
       expires: Date.now() - 1,
     };
     await store.modify(providerId, () => Promise.resolve(original));
-    const models = createPrivateModels(credentialPath);
+    const models = await openPrivateModels(credentialPath);
     const faux = fauxProvider({
       provider: providerId,
       models: [{ id: "refresh-turn" }],
@@ -800,7 +800,7 @@ it.each([
     };
     if (current !== undefined) replacement.accountId = current;
     await store.modify("openai", () => Promise.resolve(pinned));
-    const models = createPrivateModels(credentialPath);
+    const models = await openPrivateModels(credentialPath);
     const clock = vi.spyOn(Date, "now").mockReturnValue(realNow - 3_600_000);
     const turn = await acquireSubscriptionTurn(
       models,

@@ -47,7 +47,7 @@ import { createPrivateLocalRuntimeHost } from "../src/private-local-runtime-host
 import { openPrivateLocalRuntimeHost } from "../src/private-local-runtime-host.js";
 import type { OAuthCredential } from "@earendil-works/pi-ai";
 import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
-import { createPrivateModels } from "../src/local-models.js";
+import { openPrivateModels } from "../src/local-models.js";
 import { LocalStoreSchemaError } from "../src/private-local-session-discovery.js";
 
 /** A synthetic project. Its .git marker stops ancestor skill discovery here,
@@ -191,7 +191,7 @@ it("a running service uses a new subscription login on the next turn without res
   } satisfies OAuthCredential;
   const next = { ...first, access: "fake-service-next" };
   let loginCredential = first;
-  const models = createPrivateModels(credentialPath);
+  const models = await openPrivateModels(credentialPath);
   const faux = fauxProvider({
     provider: "anthropic",
     models: [{ id: "login-fixture", name: "Login fixture" }],

@@ -7,7 +7,7 @@ import { runLocalAuthCli } from "../src/auth-cli.js";
 import { fixtureChatGPTProvider } from "./fixture-chatgpt-provider.js";
 
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
-import { createPrivateModels, listPrivateModels } from "../src/local-models.js";
+import { openPrivateModels, listPrivateModels } from "../src/local-models.js";
 import { openAIAccessToken } from "./openai-fixtures.js";
 
 const tokenEndpoint = "https://auth.openai.com/api/accounts/oauth/token";
@@ -70,7 +70,7 @@ describe("private Pi OpenAI composition", () => {
     const oauth = provider.auth.oauth;
     if (oauth === undefined) throw new Error("Fixture OAuth missing");
     const seen: (string | undefined)[] = [];
-    const models = createPrivateModels(path, {
+    const models = await openPrivateModels(path, {
       providers: [
         {
           ...provider,
@@ -108,7 +108,7 @@ describe("private Pi OpenAI composition", () => {
     ]);
   });
   it("registers Claude Sonnet 5.5 for the Local model picker and execution", async () => {
-    const models = createPrivateModels();
+    const models = await openPrivateModels();
     const selected = models.getModel("anthropic", "claude-sonnet-5-5");
     expect(selected).toMatchObject({
       id: "claude-sonnet-5-5",
@@ -162,7 +162,7 @@ describe("private Pi OpenAI composition", () => {
         "gpt-6-luna",
       ]),
     );
-    const models = createPrivateModels();
+    const models = await openPrivateModels();
     expect(models.getProvider("openai")?.auth.oauth).toBeDefined();
     expect(models.getProvider("openai-codex")).toBeUndefined();
     expect(choices.some((choice) => choice.providerId === "openai-codex")).toBe(
@@ -171,8 +171,8 @@ describe("private Pi OpenAI composition", () => {
     expect(models.getProvider("openai")?.auth.apiKey).toBeDefined();
   });
 
-  it("offers GPT-6.2 Sol at GPT-6.1 Sol's price and GPT-6.2 Astra at 80% of GPT-6 Astra's", () => {
-    const catalog = createPrivateModels().getModels("openai");
+  it("offers GPT-6.2 Sol at GPT-6.1 Sol's price and GPT-6.2 Astra at 80% of GPT-6 Astra's", async () => {
+    const catalog = (await openPrivateModels()).getModels("openai");
     const model = (id: string) => {
       const found = catalog.find((entry) => entry.id === id);
       if (found === undefined) throw new Error(`Missing ${id}`);
@@ -193,8 +193,8 @@ describe("private Pi OpenAI composition", () => {
     });
   });
 
-  it("offers only the logins Veil's provider policy allows locally", () => {
-    const anthropic = createPrivateModels().getProvider("anthropic");
+  it("offers only the logins Veil's provider policy allows locally", async () => {
+    const anthropic = (await openPrivateModels()).getProvider("anthropic");
     // Claude Pro/Max OAuth is offered the way Pi and OpenCode offer it.
     expect(anthropic?.auth.oauth).toBeDefined();
     expect(anthropic?.auth.apiKey).toBeDefined();
@@ -203,7 +203,7 @@ describe("private Pi OpenAI composition", () => {
 
   it("lets Pi refresh an expired credential and persist it for a fresh models instance", async () => {
     const path = await credentialPath();
-    const firstModels = createPrivateModels(path);
+    const firstModels = await openPrivateModels(path);
     const id = providerId(firstModels);
     await createPrivateCredentialStore(path).modify(id, () =>
       Promise.resolve(syntheticExpiredCredential()),
@@ -233,7 +233,7 @@ describe("private Pi OpenAI composition", () => {
     await expect(firstModels.getAuth(id)).resolves.toMatchObject({
       source: "OAuth",
     });
-    const restartedModels = createPrivateModels(path);
+    const restartedModels = await openPrivateModels(path);
     await expect(restartedModels.getAuth(id)).resolves.toMatchObject({
       source: "OAuth",
     });

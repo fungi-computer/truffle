@@ -21,7 +21,7 @@ import {
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { bindSessionExtension } from "@fungi.computer/shiitake/client";
 import { loopContract } from "@fungi.computer/shiitake-extensions/loop";
-import { createPrivateModels } from "../src/local-models.js";
+import { openPrivateModels } from "../src/local-models.js";
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
 import { openPrivateLocalRuntimeHost } from "../src/private-local-runtime-host.js";
 import { writeFreshStore } from "./fixtures/fresh-store.js";
@@ -874,7 +874,7 @@ it("the real idle check reports a running and a queued Watchdog job as work", as
       accountId: "synthetic-account",
     }),
   );
-  const models = createPrivateModels(credentials);
+  const models = await openPrivateModels(credentials);
   const provider = openaiProvider();
   const requested = Promise.withResolvers<undefined>();
   const answer = Promise.withResolvers<undefined>();

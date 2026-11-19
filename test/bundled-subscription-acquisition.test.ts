@@ -23,7 +23,7 @@ afterEach(async () => {
 // bundle written to an empty folder with the worker's esbuild options.
 const entry = `
 import { createPrivateCredentialStore } from "./private-file-credential-store.js";
-import { createPrivateModels } from "./local-models.js";
+import { openPrivateModels } from "./local-models.js";
 import { acquireSubscriptionTurn } from "./subscription-turn.js";
 
 const [credentialPath, providerId] = process.argv.slice(2);
@@ -36,7 +36,7 @@ await createPrivateCredentialStore(credentialPath).modify(providerId, () =>
   }),
 );
 const turn = await acquireSubscriptionTurn(
-  createPrivateModels(credentialPath),
+  (await openPrivateModels(credentialPath)),
   providerId,
   new AbortController().signal,
 );

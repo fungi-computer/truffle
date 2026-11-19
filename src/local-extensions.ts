@@ -13,6 +13,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { pathToFileURL } from "node:url";
 import { Mycelium } from "@fungi.computer/mycelium";
 import {
@@ -22,11 +23,16 @@ import {
   type ExtensionGrantV0,
   type RosteredExtensionV0,
 } from "@fungi.computer/shiitake/extensions";
+import type { ApiKeyAuth, OAuthAuth } from "@earendil-works/pi-ai";
 import * as Predicate from "effect/Predicate";
 import * as Schema from "effect/Schema";
 import npa from "npm-package-arg";
 import writeFileAtomic from "write-file-atomic";
 import { z } from "zod";
+import type {
+  LocalLoginContributionV1,
+  LocalLoginFactoryV1,
+} from "./local-login.js";
 import {
   describeExtensionSkills,
   type ExtensionSkillFolder,
@@ -60,6 +66,13 @@ import {
 const decodeExtensionId = Schema.decodeUnknownSync(ExtensionId);
 const identifier = z.string().regex(/^[a-z][a-z0-9]*(?:[-_.][a-z0-9]+)*$/u);
 const revisionPattern = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$/u;
+const providerIdSchema = z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/u);
+const loginMethodSchema = z.enum(["subscription", "api_key"]);
+/** One model login an extension declares, by provider and method. */
+const declaredLogin = z.strictObject({
+  providerId: providerIdSchema,
+  method: loginMethodSchema,
+});
 
 const manifestSchema = z.strictObject({
   id: z.string().transform((value) => decodeExtensionId(value)),
@@ -89,6 +102,20 @@ const manifestSchema = z.strictObject({
     )
     .max(8)
     .default([]),
+  /**
+   * Empty model-provider login slots this extension may fill. A non-empty list
+   * requires a `./logins` export.
+   */
+  logins: z
+    .array(declaredLogin)
+    .max(8)
+    .refine(
+      (logins) =>
+        new Set(logins.map((login) => `${login.providerId}/${login.method}`))
+          .size === logins.length,
+      { message: "A login is declared once per provider and method" },
+    )
+    .default([]),
 });
 const packageSchema = z.looseObject({
   name: z.string().min(1).max(214),
@@ -116,6 +143,11 @@ const revisionRecord = z.strictObject({
   host: z.string().nullable(),
   client: z.string().nullable(),
   skills: z.string().nullable(),
+  // New fields default, so an installed.json written before them still parses:
+  // readInstalled archives any file that fails to, which would drop every
+  // installed extension.
+  logins: z.array(declaredLogin).default([]),
+  loginsEntry: z.string().nullable().default(null),
 });
 const installedSchema = z.strictObject({
   extensions: z.record(
@@ -149,6 +181,47 @@ const hostModuleSchema = z.looseObject({
     { message: "An extension host entry exports a default factory" },
   ),
 });
+const fn = z.custom((value) => Predicate.isFunction(value));
+const loginsModuleSchema = z.looseObject({
+  default: z.custom<LocalLoginFactoryV1>(
+    (value) => Predicate.isFunction(value),
+    { message: "An extension logins entry exports a default factory" },
+  ),
+});
+/** Pi's own auth objects, checked for the members Pi's collection calls. */
+const oauthAuthSchema = z.custom<OAuthAuth>(
+  (value) =>
+    z
+      .looseObject({
+        name: z.string().min(1),
+        login: fn,
+        refresh: fn,
+        toAuth: fn,
+      })
+      .safeParse(value).success,
+  { message: "A subscription login contributes Pi's OAuth auth object" },
+);
+const apiKeyAuthSchema = z.custom<ApiKeyAuth>(
+  (value) =>
+    z
+      .looseObject({ name: z.string().min(1), login: fn, resolve: fn })
+      .safeParse(value).success,
+  { message: "An API key login contributes Pi's API key auth with a login" },
+);
+const loginContributionsSchema = z.array(
+  z.discriminatedUnion("method", [
+    z.looseObject({
+      providerId: providerIdSchema,
+      method: z.literal("subscription"),
+      oauth: oauthAuthSchema,
+    }),
+    z.looseObject({
+      providerId: providerIdSchema,
+      method: z.literal("api_key"),
+      apiKey: apiKeyAuthSchema,
+    }),
+  ]),
+);
 const rosteredSchema = z.looseObject({
   manifest: z.looseObject({
     id: z.string(),
@@ -168,6 +241,7 @@ export type LocalExtensionFailureReason =
   | "not-enabled"
   | "no-tools"
   | "no-skills"
+  | "no-logins"
   | "not-held"
   | "load";
 
@@ -243,6 +317,8 @@ export type LocalExtensionSummary = Readonly<{
   commit: string | null;
   capabilities: readonly ExtensionCapabilityV0[];
   terminals: readonly string[];
+  /** Model login slots it declares, as `<provider> <method>`. */
+  logins: readonly string[];
 }>;
 
 /** One program a project-enabled extension may open in a terminal pane. */
@@ -275,10 +351,112 @@ export type LocalAgentExtensions = Readonly<{
   diagnostics: readonly Readonly<{ extensionId: string; error: Error }>[];
 }>;
 
+/** One login an enabled extension contributes, before the host merges it. */
+export type LocalExtensionLogin = Readonly<{
+  extensionId: string;
+  contribution: LocalLoginContributionV1;
+}>;
+
+export type LocalExtensionLogins = Readonly<{
+  contributions: readonly LocalExtensionLogin[];
+  /** Enabled extensions that contribute nothing, and why. */
+  diagnostics: readonly Readonly<{ extensionId: string; error: Error }>[];
+}>;
+
+/**
+ * How long one extension's `./logins` entry may take to load and return its
+ * contributions. Every model collection waits for it, so a module that never
+ * settles must cost a bounded delay, not login, doctor and every Agent start.
+ */
+export const loginsLoadTimeoutMs = 5_000;
+
 export type LocalExtensionsOptions = Readonly<{
   /** The selected user home that owns `.fungi/extensions`. */
   home: string;
+  /** Overrides `loginsLoadTimeoutMs`; tests use a short one. */
+  loginsTimeoutMs?: number;
 }>;
+
+/** Entries that already ran out of time in this process; they are not awaited again. */
+const unsettledLoginEntries = new Set<string>();
+
+/** Settle `work`, or fail with `timeout()` once `ms` have passed. */
+async function settleWithin<T>(
+  work: Promise<T>,
+  ms: number,
+  timeout: () => Error,
+): Promise<T> {
+  const cancel = new AbortController();
+  try {
+    return await Promise.race([
+      work,
+      delay(ms, undefined, { signal: cancel.signal }).then(() => {
+        throw timeout();
+      }),
+    ]);
+  } finally {
+    cancel.abort();
+  }
+}
+
+/**
+ * What a write puts on disk. The login fields exist only when they hold
+ * something, so a file that uses no logins keeps the shape an older Fungi, or a
+ * still-running older service, reads with its strict schemas. Those readers
+ * archive a registry they cannot parse, which would drop every installed
+ * extension. Reading restores the defaults.
+ */
+type RevisionOnDisk = Omit<InstalledRevision, "logins" | "loginsEntry"> &
+  Partial<Pick<InstalledRevision, "logins" | "loginsEntry">>;
+
+function revisionOnDisk({
+  logins,
+  loginsEntry,
+  ...record
+}: InstalledRevision): RevisionOnDisk {
+  const onDisk: RevisionOnDisk = record;
+  if (logins.length > 0) onDisk.logins = logins;
+  if (loginsEntry !== null) onDisk.loginsEntry = loginsEntry;
+  return onDisk;
+}
+
+function installedOnDisk(installed: Installed) {
+  return {
+    extensions: Object.fromEntries(
+      Object.entries(installed.extensions).map(([id, entry]) => [
+        id,
+        {
+          ...entry,
+          revisions: Object.fromEntries(
+            Object.entries(entry.revisions).map(([revision, record]) => [
+              revision,
+              revisionOnDisk(record),
+            ]),
+          ),
+        },
+      ]),
+    ),
+  };
+}
+
+type ActivationsOnDisk = Omit<Activations, "logins"> &
+  Partial<Pick<Activations, "logins">>;
+
+function activationsOnDisk({
+  logins,
+  ...activations
+}: Activations): ActivationsOnDisk {
+  const onDisk: ActivationsOnDisk = activations;
+  if (Object.keys(logins).length > 0) onDisk.logins = logins;
+  return onDisk;
+}
+
+/** `<provider> <method>` for each login, the form the CLI prints. */
+function describeLogins(
+  logins: readonly Readonly<{ providerId: string; method: string }>[],
+): readonly string[] {
+  return logins.map((login) => `${login.providerId} ${login.method}`);
+}
 
 function failure(cause: unknown) {
   return cause instanceof Error ? cause : new Error(String(cause));
@@ -424,7 +602,7 @@ export function localExtensions(options: LocalExtensionsOptions) {
     readJson(
       activationsPath,
       activationsSchema,
-      { projects: {}, agents: {} },
+      { projects: {}, agents: {}, logins: {} },
       "delete it, then re-enable your extensions",
     );
 
@@ -440,12 +618,12 @@ export function localExtensions(options: LocalExtensionsOptions) {
       const options = { encoding: "utf8", fsync: true, mode: 0o600 } as const;
       await writeFileAtomic(
         installedPath,
-        `${JSON.stringify(installed, null, 2)}\n`,
+        `${JSON.stringify(installedOnDisk(installed), null, 2)}\n`,
         options,
       );
       await writeFileAtomic(
         activationsPath,
-        `${JSON.stringify(activations, null, 2)}\n`,
+        `${JSON.stringify(activationsOnDisk(activations), null, 2)}\n`,
         options,
       );
       return result;
@@ -477,11 +655,11 @@ export function localExtensions(options: LocalExtensionsOptions) {
     return directory;
   }
 
-  /** A declared `./host` or `./client` export must exist in the installed package. */
+  /** A declared `./host`, `./client` or `./logins` export must exist in the installed package. */
   async function declaredEntry(
     directory: string,
     exports: Readonly<Record<string, string>>,
-    subpath: "./host" | "./client",
+    subpath: "./host" | "./client" | "./logins",
   ) {
     const target = exports[subpath];
     if (target === undefined) return null;
@@ -652,6 +830,16 @@ export function localExtensions(options: LocalExtensionsOptions) {
           selected.pkg.exports,
           "./client",
         );
+        const loginsEntry = await declaredEntry(
+          selected.directory,
+          selected.pkg.exports,
+          "./logins",
+        );
+        if (manifest.logins.length > 0 && loginsEntry === null)
+          throw new LocalExtensionError(
+            "artifact",
+            `${manifest.id} declares model logins but its package exports no ./logins entry`,
+          );
         const skills = await declaredSkills(
           selected.directory,
           manifest.skills,
@@ -732,6 +920,11 @@ export function localExtensions(options: LocalExtensionsOptions) {
             skills === null
               ? null
               : join(target, skills.slice(staging.length + sep.length)),
+          logins: manifest.logins,
+          loginsEntry:
+            loginsEntry === null
+              ? null
+              : join(target, loginsEntry.slice(staging.length + sep.length)),
         };
         await update((installed) => {
           const existing = installed.extensions[manifest.id];
@@ -751,6 +944,7 @@ export function localExtensions(options: LocalExtensionsOptions) {
           commit,
           capabilities: record.capabilities,
           terminals: record.terminals.map((terminal) => terminal.id),
+          logins: describeLogins(record.logins),
           skills: skillNames,
         };
       } finally {
@@ -767,6 +961,7 @@ export function localExtensions(options: LocalExtensionsOptions) {
           Reflect.deleteProperty(project, id);
         for (const agent of Object.values(activations.agents))
           Reflect.deleteProperty(agent, id);
+        Reflect.deleteProperty(activations.logins, id);
         return true;
       });
       // Loaded code and running programs keep their open files until their
@@ -790,6 +985,7 @@ export function localExtensions(options: LocalExtensionsOptions) {
                 commit: record.commit,
                 capabilities: record.capabilities,
                 terminals: record.terminals.map((terminal) => terminal.id),
+                logins: describeLogins(record.logins),
               },
             ];
       });
@@ -816,6 +1012,47 @@ export function localExtensions(options: LocalExtensionsOptions) {
         Reflect.deleteProperty(enabled, id);
         return true;
       });
+    },
+
+    /**
+     * Let the current revision fill the empty model login slots it declares.
+     * User wide: a credential belongs to one person on this machine, so no
+     * project or Agent store scopes it. It applies the next time a model
+     * collection opens.
+     */
+    async enableLogins(id: string) {
+      return update((installed, activations) => {
+        const { revision, record } = currentRevision(installed, id);
+        if (record.loginsEntry === null || record.logins.length === 0)
+          throw new LocalExtensionError(
+            "no-logins",
+            `Extension ${id} declares no model logins`,
+          );
+        activations.logins[id] = revision;
+        return { revision, logins: describeLogins(record.logins) };
+      });
+    },
+
+    async disableLogins(id: string) {
+      return update((_installed, activations) => {
+        if (activations.logins[id] === undefined) return false;
+        Reflect.deleteProperty(activations.logins, id);
+        return true;
+      });
+    },
+
+    /**
+     * What the enabled extensions contribute to model login slots. A module
+     * that fails to load, or whose contributions differ from its declaration,
+     * contributes nothing and yields a typed diagnostic; it is never a
+     * signed-in login. The host decides which contributions it accepts.
+     */
+    async logins(): Promise<LocalExtensionLogins> {
+      const [installed, activations] = await Promise.all([
+        readInstalled(),
+        readActivations(),
+      ]);
+      return loadLogins(installed, activations);
     },
 
     /**
@@ -997,6 +1234,93 @@ export function localExtensions(options: LocalExtensionsOptions) {
       );
     },
   };
+
+  async function loadLogins(
+    installed: z.infer<typeof installedSchema>,
+    activations: z.infer<typeof activationsSchema>,
+  ): Promise<LocalExtensionLogins> {
+    const contributions: LocalExtensionLogin[] = [];
+    const diagnostics: { extensionId: string; error: Error }[] = [];
+    const timeoutMs = options.loginsTimeoutMs ?? loginsLoadTimeoutMs;
+    for (const [id, revision] of Object.entries(activations.logins).sort(
+      ([left], [right]) => left.localeCompare(right),
+    )) {
+      const record = installed.extensions[id]?.revisions[revision];
+      try {
+        if (record === undefined)
+          throw new LocalExtensionError(
+            "not-installed",
+            `Extension ${id}@${revision} is enabled for logins but not installed`,
+          );
+        if (record.loginsEntry === null)
+          throw new LocalExtensionError(
+            "not-installed",
+            `Extension ${id}@${revision} is enabled for logins but its logins entry is not installed`,
+          );
+        const entry = record.loginsEntry;
+        const unsettled = () =>
+          new LocalExtensionError(
+            "load",
+            `Extension ${id} logins did not finish loading within ${String(timeoutMs)} ms and are skipped`,
+          );
+        // A module that already hung is still pending; waiting again would
+        // charge every later collection the same delay.
+        if (unsettledLoginEntries.has(entry)) throw unsettled();
+        const returned = await settleWithin(
+          (async () => {
+            const module = loginsModuleSchema.parse(
+              await import(pathToFileURL(entry).href),
+            );
+            return loginContributionsSchema.parse(await module.default({ z }));
+          })(),
+          timeoutMs,
+          () => {
+            unsettledLoginEntries.add(entry);
+            return unsettled();
+          },
+        );
+        const offered = returned.map(
+          (contribution): LocalLoginContributionV1 =>
+            contribution.method === "subscription"
+              ? {
+                  providerId: contribution.providerId,
+                  method: contribution.method,
+                  oauth: contribution.oauth,
+                }
+              : {
+                  providerId: contribution.providerId,
+                  method: contribution.method,
+                  apiKey: contribution.apiKey,
+                },
+        );
+        const declared = describeLogins(record.logins);
+        const offeredNames = describeLogins(offered);
+        if (
+          offeredNames.length !== declared.length ||
+          !declared.every((name) => offeredNames.includes(name))
+        )
+          throw new LocalExtensionError(
+            "load",
+            `Extension ${id} contributes ${offeredNames.join(", ") || "no logins"} but declares ${declared.join(", ")}`,
+          );
+        for (const contribution of offered)
+          contributions.push({ extensionId: id, contribution });
+      } catch (cause) {
+        diagnostics.push({
+          extensionId: id,
+          error:
+            cause instanceof LocalExtensionError
+              ? cause
+              : new LocalExtensionError(
+                  "load",
+                  `Extension ${id} logins could not load`,
+                  { cause: failure(cause) },
+                ),
+        });
+      }
+    }
+    return { contributions, diagnostics };
+  }
 
   async function loadAgent(
     installed: z.infer<typeof installedSchema>,

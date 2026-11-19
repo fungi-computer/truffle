@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UnsecuredJWT } from "jose";
 import { afterEach, expect, it, vi } from "vitest";
-import { createPrivateModels } from "../src/local-models.js";
+import { openPrivateModels } from "../src/local-models.js";
 import { runLocalAuthCli } from "../src/auth-cli.js";
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
 import { capturePrivateLocalConfigRoot } from "../src/private-local-config-root.js";
@@ -58,7 +58,7 @@ it.each([
     const home = await mkdtemp(join(tmpdir(), "fungi-fixture-login-"));
     const path = join(home, "credentials.json");
     try {
-      const models = createPrivateModels(path, {
+      const models = await openPrivateModels(path, {
         providers: [fixtureChatGPTProvider(access)],
       });
       const outcome = await runLocalAuthCli(

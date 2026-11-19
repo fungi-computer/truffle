@@ -24,6 +24,7 @@ import {
   localExtensions,
   type LocalExtensions,
 } from "../src/local-extensions.js";
+import { loginExtensionDirectory } from "./login-extension-fixture.js";
 import { createPrivateLocalRuntimeHost } from "../src/private-local-runtime-host.js";
 import { createPrivateSqliteOwner } from "../src/private-sqlite-owner.js";
 
@@ -371,4 +372,135 @@ test("an upgrade keeps the accepted revision until re-enabled; disable and remov
   expect(await owner.remove("counter")).toBe(true);
   expect(await owner.list()).toEqual([]);
   expect((await owner.project(project)).terminals).toEqual([]);
+});
+
+const loginRecords = z.object({
+  extensions: z.record(
+    z.string(),
+    z.object({
+      current: z.string(),
+      revisions: z.record(
+        z.string(),
+        z.object({
+          logins: z.array(z.object({ providerId: z.string() })),
+          loginsEntry: z.string().nullable(),
+        }),
+      ),
+    }),
+  ),
+});
+
+async function loginHome(name: string) {
+  const directory = join(scratch, name);
+  await mkdir(directory, { recursive: true });
+  return { directory, owner: localExtensions({ home: directory }) };
+}
+
+async function refusal(promise: Promise<unknown>) {
+  const cause = await promise.catch((error: unknown) => error);
+  expect(cause).toBeInstanceOf(LocalExtensionError);
+  return cause instanceof LocalExtensionError ? cause.reason : undefined;
+}
+
+test("a package declaring model logins without a built ./logins entry is refused", async () => {
+  const { owner: logins } = await loginHome("login-refusals");
+  const missingFile = join(scratch, "logins-missing-file");
+  await cp(loginExtensionDirectory, missingFile, { recursive: true });
+  await rm(join(missingFile, "logins.mjs"));
+  expect(await refusal(logins.add(missingFile, project))).toBe("artifact");
+  const noExport = join(scratch, "logins-no-export");
+  await cp(loginExtensionDirectory, noExport, { recursive: true });
+  const manifest = z
+    .looseObject({ exports: z.record(z.string(), z.string()) })
+    .parse(JSON.parse(await readFile(join(noExport, "package.json"), "utf8")));
+  await writeFile(
+    join(noExport, "package.json"),
+    JSON.stringify({ ...manifest, exports: {} }),
+  );
+  expect(await refusal(logins.add(noExport, project))).toBe("artifact");
+  expect(await logins.list()).toEqual([]);
+});
+
+test("model logins are installed, enabled user-wide, loaded, disabled and removed", async () => {
+  const { directory, owner: logins } = await loginHome("login-lifecycle");
+  const installed = await logins.add(loginExtensionDirectory, project);
+  expect(installed).toMatchObject({
+    id: "login-fixture",
+    capabilities: [],
+    logins: ["fixture subscription"],
+  });
+  const record = loginRecords.parse(
+    JSON.parse(
+      await readFile(
+        join(directory, ".fungi", "extensions", "installed.json"),
+        "utf8",
+      ),
+    ),
+  );
+  const revision = record.extensions["login-fixture"]?.current ?? "";
+  expect(
+    record.extensions["login-fixture"]?.revisions[revision]?.loginsEntry,
+  ).toContain("logins.mjs");
+  expect(await logins.list()).toMatchObject([
+    { id: "login-fixture", logins: ["fixture subscription"] },
+  ]);
+  // Installed is not enabled: nothing contributes yet.
+  expect(await logins.logins()).toEqual({ contributions: [], diagnostics: [] });
+  expect(await logins.enableLogins("login-fixture")).toEqual({
+    revision,
+    logins: ["fixture subscription"],
+  });
+  const enabled = await logins.logins();
+  expect(enabled.diagnostics).toEqual([]);
+  expect(
+    enabled.contributions.map(({ extensionId, contribution }) => [
+      extensionId,
+      contribution.providerId,
+      contribution.method,
+    ]),
+  ).toEqual([["login-fixture", "fixture", "subscription"]]);
+  expect(await logins.disableLogins("login-fixture")).toBe(true);
+  expect(await logins.disableLogins("login-fixture")).toBe(false);
+  expect((await logins.logins()).contributions).toEqual([]);
+  await logins.enableLogins("login-fixture");
+  expect(await logins.remove("login-fixture")).toBe(true);
+  expect(await logins.logins()).toEqual({ contributions: [], diagnostics: [] });
+  expect(
+    z
+      .object({ logins: z.record(z.string(), z.string()).optional() })
+      .parse(
+        JSON.parse(
+          await readFile(
+            join(directory, ".fungi", "extensions", "activations.json"),
+            "utf8",
+          ),
+        ),
+      ).logins,
+    // Nothing uses logins now, so the write leaves the map out.
+  ).toBeUndefined();
+});
+
+test("an extension that declares no model logins cannot enable them", async () => {
+  const { owner: logins } = await loginHome("login-none");
+  await logins.add(fixture, project);
+  expect(await refusal(logins.enableLogins("counter"))).toBe("no-logins");
+  expect(await refusal(logins.enableLogins("absent"))).toBe("not-installed");
+});
+
+test("an enabled extension whose entry file is gone yields a diagnostic, not a login", async () => {
+  const { owner: logins } = await loginHome("login-gone");
+  await logins.add(loginExtensionDirectory, project);
+  await logins.enableLogins("login-fixture");
+  await rm(join(logins.root, "packages", "login-fixture"), {
+    recursive: true,
+    force: true,
+  });
+  const result = await logins.logins();
+  expect(result.contributions).toEqual([]);
+  expect(result.diagnostics.map(({ extensionId }) => extensionId)).toEqual([
+    "login-fixture",
+  ]);
+  expect(result.diagnostics[0]?.error.message).toBe(
+    "Extension login-fixture logins could not load",
+  );
 });

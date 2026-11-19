@@ -19,7 +19,7 @@ import {
 import { fromNodeSqlite } from "@fungi.computer/watchdog/node-sqlite";
 import { bindSessionExtension } from "@fungi.computer/shiitake/client";
 import type { ShiitakeSession } from "@fungi.computer/shiitake";
-import { createPrivateModels } from "../dist/local-models.js";
+import { openPrivateModels } from "../dist/local-models.js";
 import { createPrivateLocalServiceManager } from "../dist/private-local-service.js";
 import { runPrivateLocalService } from "../dist/private-local-service-listener.js";
 import { mcpFormApprovalContract } from "../dist/private-mcp-form-contract.js";
@@ -84,7 +84,7 @@ async function withFormService(
       await ledger.apply(recordId, effect);
     },
   });
-  const models = createPrivateModels(config.credentialPath);
+  const models = await openPrivateModels(config.credentialPath);
   const faux = fauxProvider({
     provider: "anthropic",
     models: [{ id: "form-fixture", name: "Form fixture" }],

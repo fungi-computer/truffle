@@ -3,7 +3,7 @@ import { loginAllowed } from "@fungi.computer/veil/model-credentials";
 import type { AuthInteraction } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 
-import { createPrivateModels } from "../src/local-models.js";
+import { openPrivateModels } from "../src/local-models.js";
 import {
   authInteractionFor,
   localAccountOwner,
@@ -11,8 +11,10 @@ import {
 } from "../src/local-login.js";
 
 describe("local login registry", () => {
-  it("describes the policy-permitted Pi providers as registry data", () => {
-    const registry = localLoginProviders(createPrivateModels().getProviders());
+  it("describes the policy-permitted Pi providers as registry data", async () => {
+    const registry = localLoginProviders(
+      (await openPrivateModels()).getProviders(),
+    );
     const byId = new Map(registry.map((provider) => [provider.id, provider]));
     expect(byId.get("openai")?.methods).toEqual([
       { kind: "api_key", label: "OpenAI API key" },
@@ -43,8 +45,10 @@ describe("local login registry", () => {
     }
   });
 
-  it("offers OpenAI without the retired Codex provider", () => {
-    const registry = localLoginProviders(createPrivateModels().getProviders());
+  it("offers OpenAI without the retired Codex provider", async () => {
+    const registry = localLoginProviders(
+      (await openPrivateModels()).getProviders(),
+    );
     expect(registry.some((provider) => provider.id === "openai")).toBe(true);
     expect(registry.some((provider) => provider.id === "openai-codex")).toBe(
       false,
@@ -265,4 +269,17 @@ it("never presents a failed or unexpected status response as unsigned access", a
   const failure = new Error("Status transport unavailable");
   auth.mockRejectedValue(failure);
   await expect(owner.access(signal)).rejects.toBe(failure);
+});
+
+it("lists the providers a callback resolves asynchronously", async () => {
+  const [openai] = (await openPrivateModels())
+    .getProviders()
+    .filter((provider) => provider.id === "openai");
+  if (openai === undefined) throw new Error("Pi has no openai provider");
+  const owner = localAccountOwner({ auth: vi.fn() }, () =>
+    Promise.resolve([openai]),
+  );
+  expect((await owner.providers()).map((provider) => provider.id)).toEqual([
+    "openai",
+  ]);
 });

@@ -12,7 +12,7 @@ import type {
   Provider,
 } from "@earendil-works/pi-ai";
 import { localLoginProviders } from "./local-login.js";
-import { createPrivateModels } from "./local-models.js";
+import { openPrivateModels } from "./local-models.js";
 import { createPrivateCredentialStore } from "./private-file-credential-store.js";
 import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 export { maximumCredentialStringLength as localAuthInputLimit } from "./private-file-credential-store.js";
@@ -160,11 +160,22 @@ function interactionFor(
   // runs; stamped onto a forwarded `auth_url` event so linear-auth.ts can
   // head it "Sign in to <provider>" instead of a bare "Sign in".
   providerLabel?: string,
+  // Taken from the flow's first choice when it offers it; otherwise the person
+  // is asked. Unlike `method`, never a refusal.
+  preferredMethod?: string,
 ): AuthInteraction {
   let methodOverride = method;
+  let preferred = preferredMethod;
   return {
     signal,
     prompt: async (prompt) => {
+      if (prompt.type === "select" && preferred !== undefined) {
+        const offered = prompt.options.find(
+          (option) => option.id === preferred,
+        );
+        preferred = undefined;
+        if (offered !== undefined) return offered.id;
+      }
       if (prompt.type === "select" && methodOverride !== undefined) {
         const selected = prompt.options.find(
           (option) => option.id === methodOverride,
@@ -305,22 +316,21 @@ async function login(
         ? "Claude for Shiitake"
         : provider.name;
   // Over SSH (including fungi vm, which reaches its Lima VM over SSH) a browser
-  // redirect to this machine's localhost cannot arrive; Claude's copy-code
-  // login works anywhere, so it is the default there.
-  const method =
-    command.method ??
-    (provider.id === "anthropic" &&
+  // redirect to this machine's localhost cannot arrive. A login whose first
+  // choice offers a copy-code method works anywhere, so that is the default
+  // there for any provider; --method overrides it.
+  const sshCopyCode =
+    command.method === undefined &&
     authType === "oauth" &&
-    process.env.SSH_CONNECTION !== undefined
-      ? "copy_code"
-      : undefined);
+    process.env.SSH_CONNECTION !== undefined;
   const interaction = interactionFor(
     signal,
     input,
     output,
     supplied,
-    method,
+    command.method,
     signInLabel,
+    sshCopyCode ? "copy_code" : undefined,
   );
   // Sign in with ChatGPT needs a stable installation UUID in its authorize
   // URL (`ext_agent_host_id`) and shows `agentName` on OpenAI's consent page
@@ -546,7 +556,7 @@ export async function runLocalAuthCli(
   try {
     return await runCommand(
       command,
-      options.models ?? createPrivateModels(credentialPath),
+      options.models ?? (await openPrivateModels(credentialPath)),
       options.interaction?.signal === undefined
         ? controller.signal
         : AbortSignal.any([controller.signal, options.interaction.signal]),

@@ -9,9 +9,9 @@ import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
 import { runPrivateLocalService } from "../src/private-local-service-listener.js";
 import { runLocalAuthCli, type LocalAuthModels } from "../src/auth-cli.js";
-import { createPrivateModels } from "../src/local-models.js";
+import { openPrivateModels } from "../src/local-models.js";
 import { createPrivateLocalServiceManager } from "../src/private-local-service.js";
-import { authInteractionFor } from "../src/local-login.js";
+import { authInteractionFor, localAccountOwner } from "../src/local-login.js";
 import { createWhistleInteractionHost } from "@fungi.computer/whistle/interaction";
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
 import { capturePrivateLocalConfigRoot } from "../src/private-local-config-root.js";
@@ -21,6 +21,11 @@ import {
 } from "../src/private-local-service-discovery.js";
 import { openAIAccessToken } from "./openai-fixtures.js";
 import { fixtureChatGPTProvider } from "./fixture-chatgpt-provider.js";
+import {
+  fixtureProvider,
+  loginExtensionEntry,
+  seedLoginExtension,
+} from "./login-extension-fixture.js";
 
 async function withService(
   runAuth: typeof runLocalAuthCli,
@@ -109,7 +114,7 @@ test("native service auth carries Pi prompts without opening or stopping Session
 test("a blank API key answered through the real runner arrives as plain 'No key entered'", async () => {
   // Pi's own OpenAI key prompt, the real runner and interactionFor; only the
   // credential store is stubbed, and it must never be reached.
-  const openai = createPrivateModels()
+  const openai = (await openPrivateModels())
     .getProviders()
     .find((provider) => provider.id === "openai");
   const apiKey = openai?.auth.apiKey;
@@ -238,7 +243,7 @@ test("cancelling an auth dialog aborts its remote operation and leaves the servi
 
 /**
  * The TUI's in-app /login: the real service runs the real runLocalAuthCli on
- * createPrivateModels with a fixture OAuth provider. No callback listener or
+ * openPrivateModels with a fixture OAuth provider. No callback listener or
  * provider network transport runs; credential paths are explicitly isolated.
  */
 async function inAppOpenAILogin(
@@ -260,10 +265,10 @@ async function inAppOpenAILogin(
     | Readonly<{ completed: false; cause: unknown }>
     | undefined;
   try {
-    const runAuth: typeof runLocalAuthCli = (args, options) =>
+    const runAuth: typeof runLocalAuthCli = async (args, options) =>
       runLocalAuthCli(args, {
         ...options,
-        models: createPrivateModels(path, {
+        models: await openPrivateModels(path, {
           providers: [fixtureChatGPTProvider(access, failure)],
         }),
         getDeviceId: () => createPrivateCredentialStore(path).getDeviceId(),
@@ -550,4 +555,58 @@ test("a provider question the person's dialog cannot show is a typed prompt fail
       );
     },
   );
+});
+
+test("the TUI's /login through the real service sees and signs in an extension's login", async () => {
+  const home = await mkdtemp(join(tmpdir(), "fungi-extension-login-rpc-"));
+  const path = join(home, ".config/fungi/credentials.json");
+  try {
+    await seedLoginExtension(home, {
+      id: "login-fixture",
+      entry: loginExtensionEntry,
+      logins: [{ providerId: "fixture", method: "subscription" }],
+    });
+    const open = () =>
+      openPrivateModels(path, { providers: [fixtureProvider()] });
+    const runAuth: typeof runLocalAuthCli = async (args, options) =>
+      runLocalAuthCli(args, { ...options, models: await open() });
+    await withService(runAuth, async (manager) => {
+      // The registry the in-app /login lists, then the service signs in.
+      const owner = localAccountOwner(manager, async () =>
+        (await open()).getProviders(),
+      );
+      const fixture = (await owner.providers()).find(
+        (provider) => provider.id === "fixture",
+      );
+      assert.deepEqual(
+        fixture?.methods.map((method) => `${method.kind}: ${method.label}`),
+        [
+          "api_key: Fixture API key",
+          "subscription: Fixture subscription · from login-fixture",
+        ],
+      );
+      const interaction = {
+        prompt: () => Promise.resolve("browser"),
+        notify: () => undefined,
+      };
+      await manager.auth(
+        { command: "login", provider: "fixture", authType: "oauth" },
+        interaction,
+      );
+      const status = await manager.auth(
+        { command: "status", provider: "fixture" },
+        interaction,
+      );
+      assert.equal(status.kind, "status");
+      assert.deepEqual(
+        status.providers.map(({ providerId, state }) => [providerId, state]),
+        [["fixture", "configured"]],
+      );
+    });
+    const stored = await createPrivateCredentialStore(path).read("fixture");
+    assert.ok(stored?.type === "oauth");
+    assert.equal(stored.access, "fixture-access");
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
 });

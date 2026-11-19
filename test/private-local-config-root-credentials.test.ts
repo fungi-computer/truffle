@@ -20,7 +20,7 @@ import {
 } from "../src/private-fungi-account.js";
 import { runPrivateLocalWorkerServer } from "../src/private-local-worker-server.js";
 import { runLocalAuthCli, type LocalAuthCliOptions } from "../src/auth-cli.js";
-import { createPrivateModels } from "../src/local-models.js";
+import { openPrivateModels } from "../src/local-models.js";
 import { createLocalServiceOwners } from "../src/private-local-service-owner.js";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -138,7 +138,7 @@ it("keeps worker MCP credentials in A across the workers-file read", async () =>
 it("keeps the auth CLI's delayed installation identity with its selected root", async () => {
   const { a, b, store } = await homes();
   const expectedDeviceId = await store.getDeviceId();
-  const catalog = createPrivateModels(a.credentialPath);
+  const catalog = await openPrivateModels(a.credentialPath);
   let loggedIn = false;
   const models: NonNullable<LocalAuthCliOptions["models"]> = {
     getProviders: () => catalog.getProviders(),

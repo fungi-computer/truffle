@@ -1,7 +1,9 @@
 import type {
+  ApiKeyAuth,
   AuthEvent,
   AuthInteraction,
   AuthPrompt,
+  OAuthAuth,
   Provider,
 } from "@earendil-works/pi-ai";
 import type {
@@ -9,6 +11,7 @@ import type {
   WhistleNotice,
 } from "@fungi.computer/whistle";
 import { interactionTitleLimit } from "@fungi.computer/whistle/wire";
+import type { z } from "zod";
 
 import type { PrivateLocalServiceManager } from "./private-local-service.js";
 
@@ -21,6 +24,26 @@ export const localPopularProviderIds = Object.freeze([
   "kimi-coding",
   "openrouter",
 ]);
+
+/**
+ * What an installed extension's `./logins` entry contributes: Pi's own auth
+ * object for one provider's empty login slot. The host merges it only when
+ * the provider is registered, its slot is empty, Veil permits an extension
+ * there and no other extension claims the same slot.
+ */
+export type LocalLoginContributionV1 =
+  | Readonly<{ providerId: string; method: "subscription"; oauth: OAuthAuth }>
+  | Readonly<{ providerId: string; method: "api_key"; apiKey: ApiKeyAuth }>;
+
+/** The host port an installed extension's `./logins` factory receives. */
+export type LocalLoginHostV1 = Readonly<{ z: typeof z }>;
+
+/** What an installed package's `./logins` entry exports by default. */
+export type LocalLoginFactoryV1 = (
+  host: LocalLoginHostV1,
+) =>
+  | readonly LocalLoginContributionV1[]
+  | Promise<readonly LocalLoginContributionV1[]>;
 
 /** One sign-in method, in the provider registry's vocabulary. */
 export type LocalLoginMethod = Readonly<{
@@ -39,7 +62,7 @@ export type LocalLoginProvider = Readonly<{
  * Describe Pi's providers as registry data. Pi's OAuth sign-in is the
  * provider's consumer subscription; ambient-only API keys (no interactive
  * setup) are not offered. Callers pass the policy-filtered collection from
- * `createPrivateModels`.
+ * `openPrivateModels`, which already carries any extension-filled slots.
  */
 export function localLoginProviders(
   providers: readonly Provider[],
@@ -214,7 +237,7 @@ export function authInteractionFor(
 /** The Local credential owner behind provider-agnostic account commands. */
 export function localAccountOwner(
   manager: Pick<PrivateLocalServiceManager, "auth">,
-  providers: () => readonly Provider[],
+  providers: () => readonly Provider[] | Promise<readonly Provider[]>,
 ) {
   const access = async (signal: AbortSignal) => {
     const result = await manager.auth(
@@ -234,7 +257,7 @@ export function localAccountOwner(
   return {
     popularProviderIds: localPopularProviderIds,
     access,
-    providers: () => Promise.resolve(localLoginProviders(providers())),
+    providers: async () => localLoginProviders(await providers()),
     login: async (
       request: Readonly<{
         providerId: string;

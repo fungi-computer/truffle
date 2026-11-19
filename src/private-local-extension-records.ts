@@ -32,6 +32,12 @@ export const activationsSchema = z.strictObject({
       }),
     ),
   ),
+  /**
+   * Extensions allowed to fill a model login slot, by id to revision. User
+   * wide, because a credential belongs to one person on this machine. The
+   * default keeps every activations.json written before logins existed valid.
+   */
+  logins: z.record(z.string(), z.string()).default({}),
 });
 
 /** Only refused activations belong to the home upgrader, not installed.json. */

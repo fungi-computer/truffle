@@ -1,0 +1,18 @@
+{
+  "name": "fungi-login-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./logins": "./logins.mjs"
+  },
+  "fungi": {
+    "id": "login-fixture",
+    "logins": [
+      {
+        "providerId": "fixture",
+        "method": "subscription"
+      }
+    ]
+  }
+}

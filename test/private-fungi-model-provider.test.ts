@@ -6,7 +6,7 @@ import { createModels } from "@earendil-works/pi-ai";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { fauxModelSource, memoryHost } from "@fungi.computer/shiitake/testing";
 import type { ModelPreference } from "@fungi.computer/shiitake/model-preference";
-import { createPrivateModels, listPrivateModels } from "../src/local-models.js";
+import { openPrivateModels, listPrivateModels } from "../src/local-models.js";
 import {
   createFungiAccountCredentialStore,
   switchFungiAccountTeam,
@@ -171,7 +171,7 @@ it("observes changing Agent defaults and Session overrides from acquired catalog
     ),
   );
   vi.stubGlobal("fetch", fetch);
-  const models = createPrivateModels(path);
+  const models = await openPrivateModels(path);
   let agent: ModelPreference | null = {
     providerId: "fungi",
     modelId: "@fungi/luna",
@@ -250,7 +250,7 @@ it("lists the refreshed hosted catalog through the signed-in Team, using Hub lim
       return Promise.resolve(Response.json(catalog));
     },
   );
-  const models = createPrivateModels(path);
+  const models = await openPrivateModels(path);
   expect(models.getProvider("fungi")?.name).toBe("Fungi");
   const result = await models.refresh({ providers: ["fungi"] });
   expect([...result.errors]).toEqual([]);
@@ -311,7 +311,7 @@ for (const [code, status, expected] of [
             ),
       );
     });
-    const models = createPrivateModels(path);
+    const models = await openPrivateModels(path);
     const refreshed = await models.refresh({ providers: ["fungi"] });
     expect([...refreshed.errors]).toEqual([]);
     const model = models.getModel("fungi", "@fungi/luna");
@@ -348,7 +348,7 @@ it("streams a Fungi reply with usage through Pi's real completion API", async ()
       );
     },
   );
-  const models = createPrivateModels(path);
+  const models = await openPrivateModels(path);
   expect([...(await models.refresh({ providers: ["fungi"] })).errors]).toEqual(
     [],
   );
@@ -372,7 +372,7 @@ it("reports an unreachable Fungi catalog rather than silently returning other pr
     Promise.reject(new Error("Fixture network unavailable")),
   );
   await expect(listPrivateModels(path)).rejects.toThrow("Fungi is unreachable");
-  const models = createPrivateModels(path);
+  const models = await openPrivateModels(path);
   const error = (await models.refresh({ providers: ["fungi"] })).errors.get(
     "fungi",
   );
@@ -387,14 +387,14 @@ it("Veil denies killed Fungi logins and stops an already-registered provider bef
     calls += 1;
     return Promise.resolve(Response.json(catalog));
   });
-  const models = createPrivateModels(path);
+  const models = await openPrivateModels(path);
   expect([...(await models.refresh({ providers: ["fungi"] })).errors]).toEqual(
     [],
   );
   const model = models.getModel("fungi", "@fungi/luna");
   if (model === undefined) throw new Error("Fixture Fungi model missing");
   vi.stubEnv("FUNGI_SUBSCRIPTION_KILL", "fungi");
-  expect(createPrivateModels(path).getProvider("fungi")).toBeUndefined();
+  expect((await openPrivateModels(path)).getProvider("fungi")).toBeUndefined();
   const result = await models.completeSimple(model, {
     messages: [{ role: "user", content: "Hello", timestamp: 0 }],
   });
@@ -412,7 +412,7 @@ it("keeps an unreachable model dispatch on Fungi with actionable text", async ()
       ? Promise.resolve(Response.json(catalog))
       : Promise.reject(new Error("Fixture network unavailable"));
   });
-  const models = createPrivateModels(path);
+  const models = await openPrivateModels(path);
   expect([...(await models.refresh({ providers: ["fungi"] })).errors]).toEqual(
     [],
   );
@@ -432,7 +432,7 @@ it("keeps an unreachable model dispatch on Fungi with actionable text", async ()
 it("opens an explicitly selected Fungi model after refreshing its live catalog", async () => {
   const path = await signedIn();
   vi.stubGlobal("fetch", () => Promise.resolve(Response.json(catalog)));
-  const models = createPrivateModels(path);
+  const models = await openPrivateModels(path);
   expect(models.getModel("fungi", "@fungi/luna")).toBeUndefined();
   const host = await openPrivateLocalRuntimeHost(
     {
@@ -473,7 +473,7 @@ it("uses the current selected Team for both dispatch and its credit refusal afte
           ),
     );
   });
-  const models = createPrivateModels(path);
+  const models = await openPrivateModels(path);
   expect([...(await models.refresh({ providers: ["fungi"] })).errors]).toEqual(
     [],
   );
@@ -510,7 +510,7 @@ it("uses the Hub default for a new Agent and preserves explicit and saved model 
     ],
   };
   vi.stubGlobal("fetch", () => Promise.resolve(Response.json(liveCatalog)));
-  const models = createPrivateModels(path);
+  const models = await openPrivateModels(path);
   const host = await openPrivateLocalRuntimeHost(
     {
       invocationRoot: dirname(path),
@@ -551,7 +551,7 @@ it("keeps an explicit Fungi choice when unreachable and retries there after reco
   vi.stubGlobal("fetch", () =>
     Promise.reject(new Error("Fixture network unavailable")),
   );
-  const models = createPrivateModels(path);
+  const models = await openPrivateModels(path);
   const host = await openPrivateLocalRuntimeHost(
     {
       invocationRoot: dirname(path),
@@ -599,7 +599,7 @@ it("keeps an explicit Fungi choice when unreachable and retries there after reco
 it("refuses signed-out Fungi dispatch even when an explicit alternative is available", async () => {
   const root = await mkdtemp(join(tmpdir(), "fungi-default-signed-out-"));
   roots.push(root);
-  const models = createPrivateModels(join(root, "credentials.json"));
+  const models = await openPrivateModels(join(root, "credentials.json"));
   const source = createPrivateLocalModelSource(
     models,
     "fungi",
@@ -638,7 +638,7 @@ it("keeps a revoked grant refusal in the acquired model stream after catalog acq
           ),
     );
   });
-  const models = createPrivateModels(path);
+  const models = await openPrivateModels(path);
   await models.refresh({ providers: ["fungi"] });
   revoked = true;
   const source = createPrivateLocalModelSource(
@@ -708,7 +708,7 @@ it("replays the model POST body once after refreshing a refused access token", a
       return answer();
     },
   );
-  const models = createPrivateModels(path);
+  const models = await openPrivateModels(path);
   expect([...(await models.refresh({ providers: ["fungi"] })).errors]).toEqual(
     [],
   );

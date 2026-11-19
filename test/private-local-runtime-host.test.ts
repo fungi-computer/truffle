@@ -51,7 +51,7 @@ import { Shiitake } from "@fungi.computer/shiitake";
 import { bindSessionExtension } from "@fungi.computer/shiitake/client";
 import { goalContract } from "@fungi.computer/shiitake-extensions/goal";
 import { loopContract } from "@fungi.computer/shiitake-extensions/loop";
-import { createPrivateModels } from "../src/local-models.js";
+import { openPrivateModels } from "../src/local-models.js";
 import { openAIAccessToken } from "./openai-fixtures.js";
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
 import { createPrivateSqliteOwner } from "../src/private-sqlite-owner.js";
@@ -362,7 +362,7 @@ function expectSidecarLocked(path: string) {
 describe("private local RuntimeHost", () => {
   it("refuses a runnable model when no local provider is signed in", async () => {
     const root = await temporaryDirectory("new-agent-model-default");
-    const models = createPrivateModels(join(root, "credentials.json"));
+    const models = await openPrivateModels(join(root, "credentials.json"));
     const host = await openPrivateLocalRuntimeHost(
       { invocationRoot: root },
       models,
@@ -438,7 +438,7 @@ describe("private local RuntimeHost", () => {
     "passes %s with stable cache identity and automatic continuation to maintained Pi requests",
     async (modelId) => {
       const root = await temporaryDirectory("provider-requests");
-      const models = createPrivateModels(join(root, "credentials.json"));
+      const models = await openPrivateModels(join(root, "credentials.json"));
       const token = openAIAccessToken("synthetic-person");
       await createPrivateCredentialStore(join(root, "credentials.json")).modify(
         "openai",
@@ -1321,7 +1321,7 @@ describe("private local RuntimeHost", () => {
         invocationRoot: root,
         databasePath: first.databasePath,
       },
-      createPrivateModels(join(root, "credentials.json")),
+      await openPrivateModels(join(root, "credentials.json")),
     );
     try {
       const addressed = reopened.getSession("main");
@@ -1708,7 +1708,7 @@ describe("private local RuntimeHost", () => {
 
 describe("private local instructions and model selection", () => {
   it("describes the effective saved model and credential from the Local owner", async () => {
-    const models = createPrivateModels(
+    const models = await openPrivateModels(
       join(await temporaryDirectory("effective-model"), "credentials.json"),
     );
     const checkAuth = vi.spyOn(models, "checkAuth").mockResolvedValue({
@@ -1902,7 +1902,7 @@ describe("private local instructions and model selection", () => {
   });
 
   it("selects only registered OpenAI models and keeps unconfigured egress visible", async () => {
-    const models = createPrivateModels(
+    const models = await openPrivateModels(
       join(await temporaryDirectory("models"), "credentials.json"),
     );
     const source = createPrivateLocalModelSource(

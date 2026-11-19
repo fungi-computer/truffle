@@ -10,7 +10,7 @@ import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { describe, expect, it, vi } from "vitest";
 
 import { localLoginProviders } from "../src/local-login.js";
-import { createPrivateModels } from "../src/local-models.js";
+import { openPrivateModels } from "../src/local-models.js";
 
 import { runLocalAuthCli, type LocalAuthCliOptions } from "../src/auth-cli.js";
 
@@ -246,37 +246,37 @@ describe("Local auth CLI", () => {
     expect(login.mock.calls[0]?.[3]?.agentName).toBe("Shiitake");
   });
 
-  it("defaults Claude's login to copy-code over SSH, where a browser redirect cannot arrive", async () => {
-    vi.stubEnv("SSH_CONNECTION", "192.168.5.2 50000 192.168.5.15 22");
-    try {
+  describe("over SSH, where a browser redirect cannot arrive", () => {
+    const choices = [
+      { id: "browser", label: "Browser login (default)" },
+      { id: "copy_code", label: "Copy code login (headless)" },
+    ];
+    /** One OAuth login whose first choice is `firstChoice`; reports what it was given. */
+    async function sshLogin(
+      firstChoice: readonly { id: string; label: string }[],
+      args: readonly string[],
+      answer = "browser",
+    ) {
+      vi.stubEnv("SSH_CONNECTION", "192.168.5.2 50000 192.168.5.15 22");
       const chosen: string[] = [];
+      const asked: unknown[] = [];
       const providerLogin = vi.fn(
         async (auth: AuthInteraction): Promise<OAuthCredential> => {
           chosen.push(
             await auth.prompt({
-              message: "Select Anthropic login method:",
-              options: [
-                { id: "browser", label: "Browser login (default)" },
-                { id: "copy_code", label: "Copy code login (headless)" },
-              ],
+              message: "Select login method:",
+              options: [...firstChoice],
               type: "select",
             }),
           );
           return oauthCredential();
         },
       );
-      const login = vi.fn<AuthModels["login"]>((_id, _type, auth) =>
-        providerLogin(auth),
-      );
-      const interaction: AuthInteraction = {
-        prompt: vi.fn(() => Promise.reject(new Error("no prompt expected"))),
-        notify: vi.fn(),
-      };
       const models: AuthModels = {
         getProviders: () => [
-          provider("anthropic", {
+          provider("fixture", {
             oauth: {
-              name: "Anthropic",
+              name: "Fixture",
               login: providerLogin,
               refresh: vi.fn(),
               toAuth: vi.fn(),
@@ -284,17 +284,62 @@ describe("Local auth CLI", () => {
           }),
         ],
         checkAuth: vi.fn(),
-        login,
+        login: vi.fn<AuthModels["login"]>((_id, _type, auth) =>
+          providerLogin(auth),
+        ),
         logout: vi.fn(),
       };
       await runLocalAuthCli(
-        ["login", "--provider", "anthropic", "--auth-type", "oauth"],
-        options(models, interaction),
+        ["login", "--provider", "fixture", "--auth-type", "oauth", ...args],
+        options(models, {
+          prompt: (prompt) => {
+            asked.push(prompt);
+            return Promise.resolve(answer);
+          },
+          notify: vi.fn(),
+        }),
       );
-      expect(chosen).toEqual(["copy_code"]);
-    } finally {
-      vi.unstubAllEnvs();
+      return { chosen, asked };
     }
+    it("picks copy-code for any provider whose first choice offers it", async () => {
+      try {
+        const { chosen, asked } = await sshLogin(choices, []);
+        expect(chosen).toEqual(["copy_code"]);
+        expect(asked).toEqual([]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("lets --method choose a different one", async () => {
+      try {
+        const { chosen, asked } = await sshLogin(choices, [
+          "--method",
+          "browser",
+        ]);
+        expect(chosen).toEqual(["browser"]);
+        expect(asked).toEqual([]);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it("asks as usual when the first choice has no copy-code method", async () => {
+      try {
+        const { chosen, asked } = await sshLogin(
+          [
+            { id: "browser", label: "Browser login" },
+            { id: "device_code", label: "Device code" },
+          ],
+          [],
+          "device_code",
+        );
+        expect(chosen).toEqual(["device_code"]);
+        expect(asked).toHaveLength(1);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
   });
 
   it("stamps the resolved provider's display name onto an auth_url notice", async () => {
@@ -614,7 +659,7 @@ describe("Local auth CLI", () => {
 });
 
 it("CLI offers Anthropic methods in the same registry order as /login", async () => {
-  const providers = createPrivateModels()
+  const providers = (await openPrivateModels())
     .getProviders()
     .filter((one) => one.id === "anthropic");
   const [entry] = localLoginProviders(providers);

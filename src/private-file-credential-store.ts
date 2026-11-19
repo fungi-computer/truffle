@@ -11,7 +11,7 @@ import {
   type LocalMachineEnrollment,
 } from "./private-local-mesh-record.js";
 import { chmod, mkdir, open, type FileHandle } from "node:fs/promises";
-import { dirname, isAbsolute, resolve } from "node:path";
+import { basename, dirname, isAbsolute, resolve } from "node:path";
 import type {
   ApiKeyCredential,
   AuthOperationOptions,
@@ -200,6 +200,22 @@ export function resolveDefaultCredentialPath(home: string): string {
     throw new Error("Default credential home must be absolute");
   }
   return resolve(home, ".config", "fungi", "credentials.json");
+}
+
+/**
+ * The home a credential path belongs to, when it is that home's default
+ * credential path. A path chosen some other way belongs to no home.
+ */
+export function defaultCredentialHome(
+  credentialPath: string,
+): string | undefined {
+  const path = resolve(credentialPath);
+  const config = dirname(dirname(path));
+  return basename(path) === "credentials.json" &&
+    basename(dirname(path)) === "fungi" &&
+    basename(config) === ".config"
+    ? dirname(config)
+    : undefined;
 }
 
 function credentialStoreError(message: string): Error {

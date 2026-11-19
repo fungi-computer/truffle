@@ -93,7 +93,7 @@ import {
   type ShiitakeSession,
   type ShiitakeOptions,
 } from "@fungi.computer/shiitake";
-import { createPrivateModels } from "./local-models.js";
+import { openPrivateModels } from "./local-models.js";
 import {
   capturePrivateLocalConfigRoot,
   type PrivateLocalConfigRoot,
@@ -1715,7 +1715,7 @@ export async function openPrivateLocalRuntimeHost(
 ): Promise<PrivateLocalRuntimeHost> {
   const configRoot = input.configRoot ?? capturePrivateLocalConfigRoot();
   const models =
-    suppliedModels ?? createPrivateModels(configRoot.credentialPath);
+    suppliedModels ?? (await openPrivateModels(configRoot.credentialPath));
   const root = await realpath(resolve(input.invocationRoot));
   await ensurePrivateLocalGitExclude(root);
   const selectedProviderId = input.providerId;

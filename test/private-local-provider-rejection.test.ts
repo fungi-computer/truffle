@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { normalizeContext } from "@earendil-works/pi-ai";
 import { isRetryableAssistantError } from "@earendil-works/pi-ai/utils/retry";
 import { afterEach, expect, it, vi } from "vitest";
-import { createPrivateModels } from "../src/local-models.js";
+import { openPrivateModels } from "../src/local-models.js";
 import { createPrivateCredentialStore } from "../src/private-file-credential-store.js";
 import { createPrivateLocalModelSource } from "../src/private-local-runtime-host.js";
 import { openAIAccessToken } from "./openai-fixtures.js";
@@ -50,7 +50,7 @@ async function turnFailureFor(reply: () => Response) {
       throw new Error("Unexpected offline provider request");
     return Promise.resolve(reply());
   });
-  const models = createPrivateModels(credentialPath);
+  const models = await openPrivateModels(credentialPath);
   const source = createPrivateLocalModelSource(
     models,
     "openai",

@@ -13,7 +13,7 @@ import {
 } from "@earendil-works/pi-ai/providers/faux";
 import { mule } from "@fungi.computer/mule";
 import { expect, it } from "vitest";
-import { createPrivateModels } from "../src/local-models.js";
+import { openPrivateModels } from "../src/local-models.js";
 import { createPrivateLocalModelSource } from "../src/private-local-runtime-host.js";
 
 it.each([
@@ -36,9 +36,12 @@ it.each([
         provider: "faux-typed",
         models: [{ id: "owned-model", name: "Owned model" }],
       });
-      const models = createPrivateModels(join(directory, "credentials.json"), {
-        providers: [faux.provider],
-      });
+      const models = await openPrivateModels(
+        join(directory, "credentials.json"),
+        {
+          providers: [faux.provider],
+        },
+      );
       const source = createPrivateLocalModelSource(
         models,
         "faux-typed",

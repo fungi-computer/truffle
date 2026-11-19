@@ -4,7 +4,7 @@ import process from "node:process";
 import { join } from "node:path";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import {
-  createPrivateModels,
+  openPrivateModels,
   createPrivateCredentialStore,
 } from "@fungi.computer/truffle";
 import { runLocalAuthCli } from "@fungi.computer/truffle/auth";
@@ -27,7 +27,7 @@ const grant = {
   refresh: "fixture-packed-refresh",
   expires: Date.now() + 3_600_000,
 };
-const models = createPrivateModels(path, {
+const models = await openPrivateModels(path, {
   providers: [
     {
       ...provider,

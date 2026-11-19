@@ -18,7 +18,6 @@ import type {
 import { logEvent } from "./log-event.js";
 import { modeWithinCeiling } from "./private-local-permission-mode.js";
 import { resolveAgentFolder } from "./private-local-sandbox-policy.js";
-import { createPrivateModels } from "./local-models.js";
 import {
   capturePrivateLocalConfigRoot,
   type PrivateLocalConfigRoot,
@@ -245,10 +244,7 @@ type RecoveryLoad =
 /** One service owns each store, independently of how many clients select it. */
 export function createLocalServiceOwners(
   openRuntime: OpenLocalServiceRuntime = (input) =>
-    openPrivateLocalRuntimeHost(
-      input,
-      createPrivateModels(input.configRoot.credentialPath),
-    ),
+    openPrivateLocalRuntimeHost(input),
   recoveryDirectory?: string,
   /** The installed-extension owner that decides what each Agent holds. */
   suppliedExtensions?: Pick<

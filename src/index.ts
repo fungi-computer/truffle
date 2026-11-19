@@ -17,9 +17,10 @@ export type {
 } from "./private-mcp-form-elicitation.js";
 export type { PrivateCredentialStore } from "./private-file-credential-store.js";
 export {
-  createPrivateModels,
+  openPrivateModels,
   listPrivateModels,
   type PrivateLocalModelChoice,
+  type PrivateModelsOptions,
 } from "./local-models.js";
 export {
   resolveAgentStartupModel,
