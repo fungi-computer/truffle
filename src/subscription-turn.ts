@@ -8,6 +8,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { z } from "zod";
 import { ShiitakeError } from "@fungi.computer/shiitake";
+import { inactiveSubscriptionNotice } from "./local-login.js";
 import { readOpenAIPerson } from "./private-openai-claims.js";
 import { anthropicGrantIdentity } from "./subscription-identity.js";
 
@@ -247,7 +248,9 @@ export async function acquireSubscriptionTurn(
       throw new ShiitakeError(
         "model",
         "rejected",
-        "Turn provider is not signed in. Run /login or choose another model with /model.",
+        pin?.type === "oauth" && provider.auth.oauth === undefined
+          ? `${provider.name}: ${inactiveSubscriptionNotice} Choose another model with /model.`
+          : "Turn provider is not signed in. Run /login or choose another model with /model.",
       );
   } catch (error) {
     pin = undefined;

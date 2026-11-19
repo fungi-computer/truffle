@@ -195,8 +195,9 @@ describe("private Pi OpenAI composition", () => {
 
   it("offers only the logins Veil's provider policy allows locally", async () => {
     const anthropic = (await openPrivateModels()).getProvider("anthropic");
-    // Claude Pro/Max OAuth is offered the way Pi and OpenCode offer it.
-    expect(anthropic?.auth.oauth).toBeDefined();
+    // Fungi includes no Claude subscription sign-in: Veil leaves that slot to
+    // an installed extension, and the API key stays.
+    expect(anthropic?.auth.oauth).toBeUndefined();
     expect(anthropic?.auth.apiKey).toBeDefined();
     expect(anthropic?.getModels().length).toBeGreaterThan(0);
   });

@@ -11,8 +11,14 @@ import type {
   Models,
   Provider,
 } from "@earendil-works/pi-ai";
-import { localLoginProviders } from "./local-login.js";
+import {
+  inactiveSubscriptionNotice,
+  inactiveSubscriptions,
+  localLoginProviders,
+  type SavedCredential,
+} from "./local-login.js";
 import { openPrivateModels } from "./local-models.js";
+import { modelCredentialPermission } from "@fungi.computer/veil/model-credentials";
 import { createPrivateCredentialStore } from "./private-file-credential-store.js";
 import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 export { maximumCredentialStringLength as localAuthInputLimit } from "./private-file-credential-store.js";
@@ -34,6 +40,12 @@ export type LocalAuthStatus =
       providerName: string;
       state: "configured";
       type: AuthType;
+    }>
+  | Readonly<{
+      /** A saved subscription sign-in that no provider slot serves now. */
+      providerId: string;
+      providerName: string;
+      state: "inactive";
     }>;
 export type LocalAuthResult =
   | Readonly<{ kind: "completed" }>
@@ -66,6 +78,12 @@ export type LocalAuthCliOptions = {
   output?: NodeJS.WritableStream;
   signals?: SignalProcess;
   interaction?: AuthInteraction;
+  /**
+   * The saved credentials, to report subscription sign-ins no slot serves.
+   * Defaults to the store of the collection Local opens itself, and to none
+   * for a collection the caller supplies.
+   */
+  saved?: () => Promise<readonly SavedCredential[]>;
   /** Stable host identity for Pi's ChatGPT sign-in. Defaults to the local store's. */
   getDeviceId?: () => Promise<string>;
 };
@@ -251,10 +269,19 @@ async function chooseAuthType(
   supplied?: AuthInteraction,
 ): Promise<AuthType> {
   if (requested !== undefined) {
-    if (!declaresAuthType(provider, requested))
-      throw new Error(
-        `${providerLabel(provider)} does not offer ${requested} login`,
+    if (!declaresAuthType(provider, requested)) {
+      const permission = modelCredentialPermission(
+        provider.id,
+        requested === "oauth" ? "subscription" : "api_key",
+        "local",
       );
+      // A slot only an extension may fill: say so, instead of "does not offer".
+      throw new Error(
+        permission.status === "extension"
+          ? `${providerLabel(provider)}: ${permission.reason}. Enable one with fungi extension enable logins <id>.`
+          : `${providerLabel(provider)} does not offer ${requested} login`,
+      );
+    }
     return requested;
   }
   const options = authMethodOptions(provider);
@@ -312,9 +339,7 @@ async function login(
   const signInLabel =
     authType === "oauth" && provider.id === "openai"
       ? "ChatGPT for Shiitake"
-      : authType === "oauth" && provider.id === "anthropic"
-        ? "Claude for Shiitake"
-        : provider.name;
+      : provider.name;
   // Over SSH (including fungi vm, which reaches its Lima VM over SSH) a browser
   // redirect to this machine's localhost cannot arrive. A login whose first
   // choice offers a copy-code method works anywhere, so that is the default
@@ -372,22 +397,31 @@ function statusLines(
       ? [`${label(status)}: signed in (${credentialLabel[status.type]})`]
       : [],
   );
+  // A kept subscription sign-in is always worth a line, even in the summary.
+  const inactive = statuses.flatMap((status) =>
+    status.state === "inactive"
+      ? [`${label(status)}: ${inactiveSubscriptionNotice}`]
+      : [],
+  );
   if (explicit)
     return [
       ...signedIn,
+      ...inactive,
       ...statuses.flatMap((status) =>
         status.state === "unconfigured"
           ? [`${label(status)}: not signed in`]
           : [],
       ),
     ];
-  const others = statuses.length - signedIn.length;
+  const others = statuses.length - signedIn.length - inactive.length;
   return signedIn.length === 0
     ? [
+        ...inactive,
         `Model providers: none signed in (${String(others)} available). Run fungi login.`,
       ]
     : [
         ...signedIn,
+        ...inactive,
         `${String(others)} other providers not signed in. Run fungi login to add one.`,
       ];
 }
@@ -397,9 +431,11 @@ async function status(
   providerId: string | undefined,
   signal: AbortSignal,
   output: NodeJS.WritableStream,
+  saved: () => Promise<readonly SavedCredential[]>,
   interaction?: AuthInteraction,
 ): Promise<LocalAuthResult> {
   const providers = models.getProviders();
+  const inactive = inactiveSubscriptions(await saved(), providers);
   const selected =
     providerId === undefined
       ? providers
@@ -411,11 +447,17 @@ async function status(
     const checked = await models.checkAuth(provider.id, { signal });
     statuses.push(
       checked === undefined
-        ? {
-            providerId: provider.id,
-            providerName: provider.name,
-            state: "unconfigured",
-          }
+        ? inactive.some((entry) => entry.providerId === provider.id)
+          ? {
+              providerId: provider.id,
+              providerName: provider.name,
+              state: "inactive",
+            }
+          : {
+              providerId: provider.id,
+              providerName: provider.name,
+              state: "unconfigured",
+            }
         : {
             providerId: provider.id,
             providerName: provider.name,
@@ -424,6 +466,11 @@ async function status(
           },
     );
   }
+  // A saved sign-in whose provider this collection no longer lists.
+  if (providerId === undefined)
+    for (const entry of inactive)
+      if (!providers.some((provider) => provider.id === entry.providerId))
+        statuses.push({ ...entry, state: "inactive" });
   for (const line of statusLines(statuses, providerId !== undefined))
     writeMessage(output, interaction, line);
   return {
@@ -453,18 +500,28 @@ async function runCommand(
   input: NodeJS.ReadableStream,
   output: NodeJS.WritableStream,
   host: LoginHost,
+  saved: () => Promise<readonly SavedCredential[]>,
   interaction?: AuthInteraction,
 ): Promise<LocalAuthResult> {
   if (command.type === "status")
-    return status(models, command.provider, signal, output, interaction);
+    return status(models, command.provider, signal, output, saved, interaction);
   if (command.type === "login") {
     await login(models, command, signal, input, output, host, interaction);
     return { kind: "completed" };
   }
   const providers = models.getProviders();
+  // A kept subscription sign-in that nothing serves can still be removed.
+  const kept = new Set(
+    inactiveSubscriptions(await saved(), providers).map(
+      (entry) => entry.providerId,
+    ),
+  );
   const candidates =
     command.provider === undefined
-      ? await signedInProviders(models, providers, signal)
+      ? [
+          ...(await signedInProviders(models, providers, signal)),
+          ...providers.filter((provider) => kept.has(provider.id)),
+        ]
       : providers;
   if (candidates.length === 0) {
     writeMessage(
@@ -554,6 +611,11 @@ export async function runLocalAuthCli(
     options.getDeviceId ??
     (() => createPrivateCredentialStore(credentialPath).getDeviceId());
   try {
+    const saved =
+      options.saved ??
+      (options.models === undefined
+        ? () => createPrivateCredentialStore(credentialPath).list()
+        : () => Promise.resolve([]));
     return await runCommand(
       command,
       options.models ?? (await openPrivateModels(credentialPath)),
@@ -563,6 +625,7 @@ export async function runLocalAuthCli(
       options.input ?? process.stdin,
       output,
       { getDeviceId },
+      saved,
       options.interaction,
     );
   } finally {

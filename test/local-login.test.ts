@@ -21,12 +21,10 @@ describe("local login registry", () => {
       { kind: "subscription", label: "Sign in with ChatGPT" },
     ]);
     expect(byId.has("openai-codex")).toBe(false);
-    // Pi's own label, not a provider-specific override.
-    expect(
-      byId
-        .get("anthropic")
-        ?.methods.find((method) => method.kind === "subscription")?.label,
-    ).toBe("Anthropic (Claude Pro/Max)");
+    // Fungi includes no Claude subscription sign-in; the API key stays.
+    expect(byId.get("anthropic")?.methods.map((method) => method.kind)).toEqual(
+      ["api_key"],
+    );
     // The registry offers exactly what Veil's policy allows here.
     for (const provider of registry)
       for (const method of provider.methods)

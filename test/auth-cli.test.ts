@@ -658,10 +658,10 @@ describe("Local auth CLI", () => {
   });
 });
 
-it("CLI offers Anthropic methods in the same registry order as /login", async () => {
+it("CLI offers OpenAI methods in the same registry order as /login", async () => {
   const providers = (await openPrivateModels())
     .getProviders()
-    .filter((one) => one.id === "anthropic");
+    .filter((one) => one.id === "openai");
   const [entry] = localLoginProviders(providers);
   expect(entry?.methods.map((method) => method.kind)).toEqual([
     "api_key",
@@ -675,7 +675,7 @@ it("CLI offers Anthropic methods in the same registry order as /login", async ()
     logout: () => Promise.resolve(),
   };
   await runLocalAuthCli(
-    ["login", "--provider", "anthropic"],
+    ["login", "--provider", "openai"],
     options(models, {
       prompt: (prompt) => {
         prompts.push(prompt);

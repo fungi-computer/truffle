@@ -24,6 +24,7 @@ import { fixtureChatGPTProvider } from "./fixture-chatgpt-provider.js";
 import {
   fixtureProvider,
   loginExtensionEntry,
+  piClaudeLoginsEntry,
   seedLoginExtension,
 } from "./login-extension-fixture.js";
 
@@ -497,11 +498,18 @@ test("Pi's Anthropic browser sign-in opens the paste dialog through the service,
     });
   });
   try {
+    // Fungi includes no Claude sign-in of its own; Pi's real flow arrives the
+    // way a person gets it, through an installed extension.
+    await seedLoginExtension(credentials, {
+      id: "pi-claude",
+      entry: piClaudeLoginsEntry,
+      logins: [{ providerId: "anthropic", method: "subscription" }],
+    });
     await withService(
       (args, options) =>
         runLocalAuthCli(args, {
           ...options,
-          credentialPath: join(credentials, "credentials.json"),
+          credentialPath: join(credentials, ".config/fungi/credentials.json"),
         }),
       async (manager) => {
         await assert.rejects(

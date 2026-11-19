@@ -234,7 +234,7 @@ it("uses another logged-in provider when an earlier login check fails, without e
       boundary: "model",
       cause: "rejected",
       message:
-        "No signed-in model provider is available. Use your own Claude or ChatGPT subscription: /login in a Session, or fungi login --provider anthropic --auth-type oauth (Claude) or fungi login --provider openai --auth-type oauth (ChatGPT) in the CLI. For hosted Fungi: fungi login --provider fungi.",
+        "No signed-in model provider is available. Use your own ChatGPT subscription: /login in a Session, or fungi login --provider openai --auth-type oauth in the CLI. An API key or an extension's sign-in works too. For hosted Fungi: fungi login --provider fungi.",
     });
   } finally {
     report.mockRestore();

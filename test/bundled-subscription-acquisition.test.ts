@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { build } from "esbuild";
 import { afterEach, expect, it } from "vitest";
+import { seedLoginExtension } from "./login-extension-fixture.js";
 import { openAIAccessToken } from "./openai-fixtures.js";
 
 const run = promisify(execFile);
@@ -45,9 +46,14 @@ await turn.release();
 process.stdout.write(auth?.auth.apiKey ?? "");
 `;
 
-async function acquireFromBundle(providerId: string, access: string) {
+async function acquireFromBundle(
+  providerId: string,
+  access: string,
+  prepare?: (root: string) => Promise<void>,
+) {
   const root = await mkdtemp(join(tmpdir(), "fungi-bundled-acquisition-"));
   roots.push(root);
+  await prepare?.(root);
   // Like the packed Spore: the worker sits in dist/ beside nothing but its
   // own bundle, under a package manifest.
   await writeFile(
@@ -68,7 +74,7 @@ async function acquireFromBundle(providerId: string, access: string) {
   });
   const { stdout } = await run(
     "bun",
-    [outfile, join(root, "credentials.json"), providerId],
+    [outfile, join(root, ".config", "fungi", "credentials.json"), providerId],
     {
       cwd: root,
       env: { ...process.env, FIXTURE_ACCESS: access },
@@ -77,9 +83,32 @@ async function acquireFromBundle(providerId: string, access: string) {
   return stdout;
 }
 
-it("a bundled service worker resolves the Claude subscription's OAuth flow", async () => {
-  const access = "fixture-claude-access";
-  expect(await acquireFromBundle("anthropic", access)).toBe(access);
+it("a bundled service worker resolves a subscription sign-in an installed extension supplies", async () => {
+  const access = "fixture-extension-access";
+  expect(
+    await acquireFromBundle("anthropic", access, async (root) => {
+      const entry = join(root, "extension", "logins.mjs");
+      await mkdir(join(root, "extension"), { recursive: true });
+      await writeFile(
+        entry,
+        `export default () => [{
+          providerId: "anthropic",
+          method: "subscription",
+          oauth: {
+            name: "Fixture plan",
+            login: async () => { throw new Error("not used"); },
+            refresh: async () => { throw new Error("not used"); },
+            toAuth: async (credential) => ({ apiKey: credential.access }),
+          },
+        }];`,
+      );
+      await seedLoginExtension(root, {
+        id: "fixture-plan",
+        entry,
+        logins: [{ providerId: "anthropic", method: "subscription" }],
+      });
+    }),
+  ).toBe(access);
 }, 120_000);
 
 it("a bundled service worker resolves the ChatGPT subscription's OAuth flow", async () => {

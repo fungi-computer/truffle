@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import type { Provider } from "@earendil-works/pi-ai";
 import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { z } from "zod";
+import { openPrivateModels } from "../src/local-models.js";
+import { defaultCredentialHome } from "../src/private-file-credential-store.js";
 
 /** The fixture package: a fake provider's subscription sign-in. */
 export const loginExtensionDirectory = fileURLToPath(
@@ -109,4 +111,27 @@ export async function seedLoginExtension(
     join(root, "activations.json"),
     `${JSON.stringify(activations, null, 2)}\n`,
   );
+}
+
+/** An extension that returns Pi's own Claude OAuth object, as a real one does. */
+export const piClaudeLoginsEntry = fileURLToPath(
+  new URL("./fixtures/claude-extension/logins.mjs", import.meta.url),
+);
+
+/**
+ * Open the model collection of the home a default-shaped credential path
+ * belongs to, with the Pi Claude extension installed and enabled there. Fungi
+ * includes no Claude sign-in of its own, so a test of Pi's real Claude OAuth
+ * flow gets it the way a person does: through an extension.
+ */
+export async function openModelsWithPiClaude(credentialPath: string) {
+  const home = defaultCredentialHome(credentialPath);
+  if (home === undefined)
+    throw new Error("The credential path does not belong to a home");
+  await seedLoginExtension(home, {
+    id: "pi-claude",
+    entry: piClaudeLoginsEntry,
+    logins: [{ providerId: "anthropic", method: "subscription" }],
+  });
+  return openPrivateModels(credentialPath);
 }

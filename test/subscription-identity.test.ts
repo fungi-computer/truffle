@@ -12,7 +12,7 @@ import {
   registerSubscriptionTurnOwner,
 } from "../src/subscription-turn.js";
 import { openAIAccessToken } from "./openai-fixtures.js";
-import { openPrivateModels } from "../src/local-models.js";
+import { openModelsWithPiClaude } from "./login-extension-fixture.js";
 
 const homes: string[] = [];
 afterEach(async () => {
@@ -163,7 +163,7 @@ it.each([false, true])(
         expires_in: 3600,
       });
     });
-    const models = await openPrivateModels(credentialPath);
+    const models = await openModelsWithPiClaude(credentialPath);
     const model = models.getModels("anthropic")[0];
     if (model === undefined) throw new Error("Missing fixture model");
     const turns = await Promise.all(
@@ -246,7 +246,7 @@ it("a cancelled 401 recovery commits its rotated token without replaying inferen
       expires: Date.now() + 3_600_000,
     }),
   );
-  const models = await openPrivateModels(credentialPath);
+  const models = await openModelsWithPiClaude(credentialPath);
   const model = models.getModels("anthropic")[0];
   if (model === undefined) throw new Error("Missing fixture model");
   const controller = new AbortController();
@@ -326,7 +326,7 @@ it.each([
       Response.json({ error: "fixture refresh refused" }, { status: 400 }),
     );
   });
-  const models = await openPrivateModels(credentialPath);
+  const models = await openModelsWithPiClaude(credentialPath);
   const model = models.getModels("anthropic")[0];
   if (model === undefined) throw new Error("Missing fixture model");
   const controller = new AbortController();

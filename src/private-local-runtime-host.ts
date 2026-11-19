@@ -196,6 +196,10 @@ import {
 } from "./private-local-agent-control.js";
 import { type SubagentSource } from "@fungi.computer/shiitake-extensions/subagents/host";
 import { createPrivateCredentialStore } from "./private-file-credential-store.js";
+import {
+  inactiveSubscriptionNotice,
+  inactiveSubscriptions,
+} from "./local-login.js";
 import { openLocalVaultRedaction } from "./private-local-vault-redaction.js";
 
 const initialSessionId = "main";
@@ -384,6 +388,26 @@ export type LocalRuntimeConfiguration = Readonly<{
   fungiMcp: PrivateFungiMcpConnectionOptions | undefined;
   clientPath: string;
 }>;
+
+/**
+ * The refusal when no provider can start a turn. When Local opened the
+ * collection itself, it also names kept subscription sign-ins nothing serves.
+ */
+async function noSignedInModelNotice(
+  models: Models,
+  credentialPath: string | undefined,
+): Promise<string> {
+  const base =
+    "No signed-in model provider is available. Use your own ChatGPT subscription: /login in a Session, or fungi login --provider openai --auth-type oauth in the CLI. An API key or an extension's sign-in works too. For hosted Fungi: fungi login --provider fungi.";
+  if (credentialPath === undefined) return base;
+  const inactive = inactiveSubscriptions(
+    await createPrivateCredentialStore(credentialPath).list(),
+    models.getProviders(),
+  );
+  return inactive.length === 0
+    ? base
+    : `${base} ${inactive.map((entry) => `${entry.providerName}: ${inactiveSubscriptionNotice}`).join(" ")}`;
+}
 
 function isErrnoException(error: Error): error is NodeJS.ErrnoException {
   return "code" in error;
@@ -883,6 +907,8 @@ export function createPrivateLocalModelSource(
   selectedOwnerReasoning?: ThinkingLevel,
   defaults?: Readonly<{
     agent?: () => ModelPreference | null;
+    /** Where Local opened the collection from: only then are saved sign-ins named. */
+    credentialPath?: string | undefined;
   }>,
   onModelStreamRecord?: LocalModelStreamObserver,
 ): ModelSource &
@@ -934,7 +960,7 @@ export function createPrivateLocalModelSource(
       throw new ShiitakeError(
         "model",
         "rejected",
-        "No signed-in model provider is available. Use your own Claude or ChatGPT subscription: /login in a Session, or fungi login --provider anthropic --auth-type oauth (Claude) or fungi login --provider openai --auth-type oauth (ChatGPT) in the CLI. For hosted Fungi: fungi login --provider fungi.",
+        await noSignedInModelNotice(models, defaults?.credentialPath),
       );
     const choice = startup.preference;
     const selectedProvider = choice.providerId;
@@ -2300,7 +2326,11 @@ export async function openPrivateLocalRuntimeHost(
       selectedModelId,
       providerCacheKey,
       input.reasoning,
-      { agent: readAgentModel },
+      {
+        agent: readAgentModel,
+        credentialPath:
+          suppliedModels === undefined ? configRoot.credentialPath : undefined,
+      },
       input.onModelStreamRecord,
     );
     const hostOptions = {

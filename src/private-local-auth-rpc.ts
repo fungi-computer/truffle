@@ -39,6 +39,11 @@ const authStatusSchema = z.discriminatedUnion("state", [
     state: z.literal("configured"),
     type: z.enum(["oauth", "api_key"]),
   }),
+  z.object({
+    providerId: z.string(),
+    providerName: z.string(),
+    state: z.literal("inactive"),
+  }),
 ]);
 const authResultSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("completed") }),

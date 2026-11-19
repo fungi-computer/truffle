@@ -45,6 +45,35 @@ export type LocalLoginFactoryV1 = (
   | readonly LocalLoginContributionV1[]
   | Promise<readonly LocalLoginContributionV1[]>;
 
+/** A saved credential, as a credential store lists it. */
+export type SavedCredential = Readonly<{ providerId: string; type: string }>;
+
+/**
+ * What Local says, in one place, about a saved subscription sign-in that no
+ * provider slot currently serves. The record is kept untouched: it works again
+ * once an installed extension fills the slot.
+ */
+export const inactiveSubscriptionNotice =
+  "saved subscription sign-in kept, inactive. Fungi no longer includes this sign-in; enable an extension that provides it (fungi extension enable logins <id>), or use an API key.";
+
+/**
+ * The saved subscription sign-ins whose provider has no subscription slot in
+ * this collection: nothing deletes them, and nothing serves them until an
+ * extension fills the slot.
+ */
+export function inactiveSubscriptions(
+  saved: readonly SavedCredential[],
+  providers: readonly Provider[],
+): readonly Readonly<{ providerId: string; providerName: string }>[] {
+  return saved.flatMap(({ providerId, type }) => {
+    if (type !== "oauth") return [];
+    const provider = providers.find((candidate) => candidate.id === providerId);
+    return provider?.auth.oauth === undefined
+      ? [{ providerId, providerName: provider?.name ?? providerId }]
+      : [];
+  });
+}
+
 /** One sign-in method, in the provider registry's vocabulary. */
 export type LocalLoginMethod = Readonly<{
   kind: "api_key" | "subscription";

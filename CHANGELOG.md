@@ -1,5 +1,25 @@
 # @fungi.computer/truffle
 
+## 0.18.0
+
+### Minor Changes
+
+- Changes since 0.17.2:
+
+  - fix(spore): name the plan in the sign-in door and make the vm help provider
+    neutral
+  - feat(truffle): provide the claude subscription sign-in only through an
+    extension
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/veil@0.11.0
+  - @fungi.computer/shiitake@0.21.8
+  - @fungi.computer/graft@0.2.43
+  - @fungi.computer/shiitake-extensions@0.11.18
+  - @fungi.computer/zookeeper@0.0.50
+
 ## 0.17.2
 
 ### Patch Changes
