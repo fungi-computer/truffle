@@ -1,5 +1,22 @@
 # @fungi.computer/truffle
 
+## 0.18.3
+
+### Patch Changes
+
+- Changes since 0.18.2:
+
+  - fix(hub): send a failed start's reason only to readers that decode it
+  - fix(hub): keep the reason a start failed on the alarm path
+
+- Updated dependencies
+  - @fungi.computer/agar@0.23.2
+  - @fungi.computer/nacre@0.8.5
+  - @fungi.computer/shiitake@0.21.10
+  - @fungi.computer/graft@0.2.45
+  - @fungi.computer/shiitake-extensions@0.11.21
+  - @fungi.computer/zookeeper@0.0.52
+
 ## 0.18.2
 
 ### Patch Changes

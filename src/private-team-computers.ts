@@ -8,8 +8,10 @@ import {
 } from "./private-fungi-account.js";
 
 const stateSchema = z.discriminatedUnion("state", [
+  z.strictObject({ state: z.enum(["running", "sleeping", "starting"]) }),
   z.strictObject({
-    state: z.enum(["running", "sleeping", "starting", "start_failed"]),
+    state: z.literal("start_failed"),
+    reason: z.string().min(1).max(1_024).exactOptional(),
   }),
   z.strictObject({
     state: z.literal("queued"),
@@ -43,7 +45,10 @@ async function control<T extends z.ZodType>(
   options.signal?.throwIfAborted();
   const text = await callFungiMcpControl(
     endpoint,
-    `return await computers.${operation}(${JSON.stringify(input)});`,
+    operation === "state"
+      ? // A Hub from before `reason` refuses the key; ask it plainly instead.
+        `try { return await computers.state(${JSON.stringify({ ...input, reason: true })}); } catch { return await computers.state(${JSON.stringify(input)}); }`
+      : `return await computers.${operation}(${JSON.stringify(input)});`,
     { ...options, timeoutMs: operation === "start" ? 30 * 60 * 1_000 : 60_000 },
   );
   options.signal?.throwIfAborted();
@@ -153,13 +158,14 @@ export async function startPrivateTeamComputer(
     (state) => ({ state }),
     (error: unknown) => ({ error }),
   );
-  // A full host answers the start with its queue place; the Hub keeps that
-  // start and runs it when a slot frees, so watch the state until it runs.
-  let queued = false;
+  // A full host answers the start with its queue place, and a booting one
+  // with "starting"; the Hub keeps that start and runs it, so watch the
+  // state until it runs.
+  let watching = false;
   try {
     for (;;) {
-      if (queued) await delay(1_000, undefined, { signal });
-      const outcome = queued
+      if (watching) await delay(1_000, undefined, { signal });
+      const outcome = watching
         ? undefined
         : await Promise.race([
             completion,
@@ -171,9 +177,13 @@ export async function startPrivateTeamComputer(
           options.onState(outcome.state);
           return computer;
         }
-        if (outcome.state.state !== "queued")
+        // "starting": the host admitted it and still boots it.
+        if (
+          outcome.state.state !== "queued" &&
+          outcome.state.state !== "starting"
+        )
           throw new Error("The Hub did not confirm that the Computer started.");
-        queued = true;
+        watching = true;
         options.onState(outcome.state);
         continue;
       }
@@ -185,9 +195,13 @@ export async function startPrivateTeamComputer(
         { ...options, signal },
       );
       if (state.state === "start_failed")
-        throw new Error("The Computer could not start. Try again.");
+        throw new Error(
+          state.reason === undefined
+            ? "The Computer could not start. Try again."
+            : `The Computer didn't start: ${state.reason}. Try again.`,
+        );
       options.onState(state);
-      if (queued && state.state === "running") return computer;
+      if (watching && state.state === "running") return computer;
     }
   } finally {
     polling.abort();
