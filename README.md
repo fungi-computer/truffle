@@ -20,15 +20,22 @@ to embed.
 
 ## Subscription sign-in
 
-To change your Claude or ChatGPT subscription account, log out and log in:
+To change your ChatGPT subscription account, log out and log in:
 
 ```sh
-fungi logout --provider anthropic
-fungi login --provider anthropic --auth-type oauth
+fungi logout --provider openai
+fungi login --provider openai --auth-type oauth
 ```
 
-Use `--provider openai` for ChatGPT. Local does not import subscription
-credentials from another account manager.
+Local does not import subscription credentials from another account manager.
+
+An installed extension can fill a subscription sign-in slot Fungi does not
+provide (see [Installed extensions](#installed-extensions)). When no extension
+fills a slot, a saved subscription sign-in stays in the credential file
+untouched and `fungi status` reports it as kept and inactive;
+`fungi logout --provider <id>` removes it, and installing an extension that
+provides it brings it back. `fungi login --provider <id> --auth-type oauth` for
+such a slot says an extension is needed instead of "does not offer".
 
 Fungi remains the credential refresher. Local pins the Anthropic/OpenAI account
 at the accepted turn boundary, including all subsequent tool iterations. Pi
@@ -481,6 +488,19 @@ in a pane. Installed code is trusted and runs as you.
 [`local-extensions.bun.test.ts`](test/local-extensions.bun.test.ts) installs the
 [counter fixture](test/fixtures/extension-counter/) from a disposable bare Git
 repository and calls its tools through the real workerd `execute`.
+
+A package may also declare `fungi.logins` and export `./logins`: Pi's own
+`OAuthAuth` or `ApiKeyAuth` for an empty login slot of a provider Local already
+lists. `fungi extension enable logins <id>` records a user-wide activation, and
+`openPrivateModels` merges it only when the slot is empty after the built-in
+pass, Veil allows an extension there and no other extension claims the slot (two
+claimants are both refused with a diagnostic). Veil leaves the Claude
+subscription slot to an extension, so Local includes no sign-in of its own for
+it.
+[`local-login-contributions.test.ts`](test/local-login-contributions.test.ts)
+and
+[`claude-subscription-migration.test.ts`](test/claude-subscription-migration.test.ts)
+prove the merge rules and that a saved sign-in survives untouched.
 
 ## Team connections and ACP
 

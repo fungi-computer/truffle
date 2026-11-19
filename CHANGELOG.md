@@ -1,5 +1,17 @@
 # @fungi.computer/truffle
 
+## 0.18.1
+
+### Patch Changes
+
+- Changes since 0.18.0:
+
+  - fix(truffle): name the Files root for Home's instruction files, and format
+    the touched tests
+
+- Updated dependencies
+  - @fungi.computer/shiitake-extensions@0.11.19
+
 ## 0.18.0
 
 ### Minor Changes
