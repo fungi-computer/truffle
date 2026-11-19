@@ -142,6 +142,8 @@ it.skipIf(process.platform !== "linux")(
         database.close();
       }
       const second = await start("deliver");
+      // The first process persisted the retry with a 15 s first backoff (see
+      // the fixture), leaving the restart about 14 s instead of about 1 s.
       expect(Date.now()).toBeLessThan(dueAt);
       // No sleeps, clock changes or client request to either Agent: recovery
       // must retain the real Watchdog timer and autonomously deliver when due.

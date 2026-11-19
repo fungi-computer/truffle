@@ -1,4 +1,4 @@
-import { expect, it } from "bun:test";
+import { afterAll, expect, it } from "bun:test";
 import { spawn, type Subprocess } from "bun";
 import {
   mkdir,
@@ -23,7 +23,10 @@ import {
 } from "../src/private-local-service-discovery.js";
 
 const fixture = join(import.meta.dir, "fixtures", "idle-owners-service.ts");
-const agentsPerRound = 16;
+// Each Agent is a real runtime host and SQLite store, so the round is as small
+// as still proves the bound: one round alone exceeds the allowance below.
+const agentsPerRound = 8;
+const releasePasses = 5;
 
 /**
  * Released Agents a conservative stack scan may still pin at one sample, the
@@ -172,14 +175,15 @@ it.skipIf(process.platform !== "linux")(
       // with the Agents ever opened.
       const idle = await sample(second.child, second.record.pid);
       const released: Awaited<ReturnType<typeof sample>>[] = [];
-      for (let pass = 0; pass < 8; pass += 1) {
+      for (let pass = 0; pass < releasePasses; pass += 1) {
         await openRound(secondBase);
         await untilNoneListed();
         released.push(await sample(second.child, second.record.pid));
       }
       // JSC scans the stack conservatively, so a collection may still miss
-      // the last released Agents; that never grows per round. Eight rounds
-      // open 128 distinct Agents, so a leak exceeds both bounds at once.
+      // the last released Agents; that never grows per round. Five rounds
+      // open 40 distinct Agents, and one round of 8 already exceeds the
+      // allowance, so a per-Agent leak exceeds both bounds at once.
       for (const { stores, statements } of released) {
         expect(stores).toBeLessThanOrEqual(pinnedAgentAllowance);
         expect(statements - idle.statements).toBeLessThanOrEqual(
@@ -203,35 +207,66 @@ it.skipIf(process.platform !== "linux")(
 const acpFixture = join(import.meta.dir, "fixtures", "acp-stdio-process.ts");
 const acpResponse = z.looseObject({ id: z.number().optional() });
 
+/**
+ * One service for the three departures: each editor has its own route in it,
+ * so none depends on another, and the service's start is paid once. It must
+ * still stop cleanly when the last editor is gone.
+ */
+const acpHome = mkdtemp(join(tmpdir(), "fungi-acp-route-"));
+const acpDirectory = acpHome.then(async (home) =>
+  serviceDirectory(join(home, ".fungi", "service")),
+);
+let acpServiceStarted: ReturnType<typeof startAcpService> | undefined;
+/** Started by the first departure test, so nothing runs while other tests do. */
+const acpService = () => (acpServiceStarted ??= startAcpService());
+const startAcpService = async () => {
+  const home = await acpHome;
+  const directory = await acpDirectory;
+  await mkdir(join(home, "project"));
+  const service = spawn([process.execPath, fixture, directory, "20"], {
+    cwd: home,
+    env: { PATH: process.env.PATH, HOME: home },
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  for (let attempt = 0; attempt < 400; attempt += 1) {
+    if ((await readServiceRecord(directory))?.pid === service.pid)
+      return service;
+    await Bun.sleep(25);
+  }
+  throw new Error("The idle-owner service did not start");
+};
+afterAll(async () => {
+  try {
+    const service = await acpServiceStarted;
+    if (service !== undefined) {
+      if (service.exitCode === null) service.kill("SIGTERM");
+      // A service that already died fails here too, as it did in each test.
+      expect(await service.exited).toBe(0);
+    }
+  } finally {
+    await rm(await acpHome, { recursive: true, force: true });
+  }
+});
+
 /** An editor leaves by signal or by closing stdin; either frees its route. */
 for (const departure of ["SIGTERM", "SIGHUP", "stdin-eof"] as const)
   it.skipIf(process.platform !== "linux")(
     `fungi acp releases its service route when its editor leaves by ${departure}`,
     async () => {
-      const home = await mkdtemp(join(tmpdir(), "fungi-acp-route-"));
-      const directory = await serviceDirectory(join(home, ".fungi", "service"));
+      await acpService();
+      const home = await acpHome;
+      const directory = await acpDirectory;
       const project = join(home, "project");
-      await mkdir(project);
       const children: Subprocess[] = [];
       try {
-        const service = spawn([process.execPath, fixture, directory, "20"], {
-          cwd: home,
-          env: { PATH: process.env.PATH, HOME: home },
-          stdout: "inherit",
-          stderr: "inherit",
-        });
-        children.push(service);
-        for (let attempt = 0; attempt < 400; attempt += 1) {
-          if ((await readServiceRecord(directory))?.pid === service.pid) break;
-          await Bun.sleep(25);
-        }
         const acp = spawn(
           [
             process.execPath,
             acpFixture,
             directory,
             project,
-            join(home, "route"),
+            join(home, `route-${departure}`),
           ],
           {
             cwd: home,
@@ -277,7 +312,7 @@ for (const departure of ["SIGTERM", "SIGHUP", "stdin-eof"] as const)
         await reply(2);
         // The editor's route keeps its Agent owned while it is connected, even
         // across several idle sweeps.
-        const routeFile = join(home, "route");
+        const routeFile = join(home, `route-${departure}`);
         for (let attempt = 0; attempt < 100; attempt += 1) {
           if (await Bun.file(routeFile).exists()) break;
           await Bun.sleep(20);
@@ -292,15 +327,12 @@ for (const departure of ["SIGTERM", "SIGHUP", "stdin-eof"] as const)
         await acp.exited;
         // Its route is gone; one leaked per closed editor before.
         expect(await routed()).toBe(false);
-        service.kill("SIGTERM");
-        expect(await service.exited).toBe(0);
       } finally {
         for (const child of children)
           if (child.exitCode === null) {
             child.kill("SIGKILL");
             await child.exited;
           }
-        await rm(home, { recursive: true, force: true });
       }
     },
     60_000,

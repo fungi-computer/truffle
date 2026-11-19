@@ -54,68 +54,78 @@ async function openFiles(pid: number, paths: readonly string[]) {
   return count;
 }
 
-it("orderly shutdown ends event observers before saving recovery", async () => {
-  const home = await realpath(
-    await mkdtemp(join(tmpdir(), "fungi-event-observer-stop-")),
-  );
-  const oldHome = process.env.HOME;
-  process.env.HOME = home;
-  const directory = join(home, "service");
-  const project = join(home, "project");
-  await mkdir(directory);
-  await mkdir(project);
-  const models = createModels();
-  const provider = fauxProvider({
-    provider: "faux-idle",
-    models: [{ id: "idle-model", name: "Idle" }],
-  });
-  models.setProvider(provider.provider);
-  const owners = createLocalServiceOwners(
-    (options) =>
-      openPrivateLocalRuntimeHost(
-        { ...options, providerId: "faux-idle", modelId: "idle-model" },
-        models,
-      ),
-    directory,
-    undefined,
-    3_600_000,
-  );
-  let closeResponse: (() => Promise<void>) | undefined;
-  try {
-    const selected = await owners.select({
-      invocationRoot: project,
-      sessionId: "main",
+// Like its siblings, an explicit bound: the work is a few hundred ms, but a
+// loaded host must not trip bun's 5s default on a cold runtime start.
+const orderlyStopBoundMs = 60_000;
+
+it(
+  "orderly shutdown ends event observers before saving recovery",
+  async () => {
+    const home = await realpath(
+      await mkdtemp(join(tmpdir(), "fungi-event-observer-stop-")),
+    );
+    const oldHome = process.env.HOME;
+    process.env.HOME = home;
+    const directory = join(home, "service");
+    const project = join(home, "project");
+    await mkdir(directory);
+    await mkdir(project);
+    const models = createModels();
+    const provider = fauxProvider({
+      provider: "faux-idle",
+      models: [{ id: "idle-model", name: "Idle" }],
     });
-    const databasePath = selected.databasePath;
-    selected.release();
-    const response = await owners.serve(
-      { invocationRoot: project, databasePath },
-      new Request("http://127.0.0.1/sessions/main/events"),
+    models.setProvider(provider.provider);
+    const owners = createLocalServiceOwners(
+      (options) =>
+        openPrivateLocalRuntimeHost(
+          { ...options, providerId: "faux-idle", modelId: "idle-model" },
+          models,
+        ),
+      directory,
+      undefined,
+      3_600_000,
     );
-    expect(response.headers.get("content-type")).toContain("text/event-stream");
-    if (response.body === null) throw new Error("Missing Session event body");
-    const reader = response.body.getReader();
-    closeResponse = () => reader.cancel();
-    expect((await reader.read()).done).toBe(false);
-    // Keep the real response open: a client's local EventSource.close() does
-    // not acknowledge server cancellation. No command or mail is pending.
-    await owners.close();
-    const saved = decodeOwners(
-      await readFile(join(directory, "owners.json"), "utf8"),
-    );
-    expect(saved.map((value) => value.databasePath)).toEqual([]);
-    // The service ended its observer without waiting for the client to cancel.
-    while (!(await reader.read()).done) {
-      // Consume any frames already buffered before orderly stop.
+    let closeResponse: (() => Promise<void>) | undefined;
+    try {
+      const selected = await owners.select({
+        invocationRoot: project,
+        sessionId: "main",
+      });
+      const databasePath = selected.databasePath;
+      selected.release();
+      const response = await owners.serve(
+        { invocationRoot: project, databasePath },
+        new Request("http://127.0.0.1/sessions/main/events"),
+      );
+      expect(response.headers.get("content-type")).toContain(
+        "text/event-stream",
+      );
+      if (response.body === null) throw new Error("Missing Session event body");
+      const reader = response.body.getReader();
+      closeResponse = () => reader.cancel();
+      expect((await reader.read()).done).toBe(false);
+      // Keep the real response open: a client's local EventSource.close() does
+      // not acknowledge server cancellation. No command or mail is pending.
+      await owners.close();
+      const saved = decodeOwners(
+        await readFile(join(directory, "owners.json"), "utf8"),
+      );
+      expect(saved.map((value) => value.databasePath)).toEqual([]);
+      // The service ended its observer without waiting for the client to cancel.
+      while (!(await reader.read()).done) {
+        // Consume any frames already buffered before orderly stop.
+      }
+    } finally {
+      await closeResponse?.();
+      await owners.close();
+      if (oldHome === undefined) delete process.env.HOME;
+      else process.env.HOME = oldHome;
+      await rm(home, { recursive: true, force: true });
     }
-  } finally {
-    await closeResponse?.();
-    await owners.close();
-    if (oldHome === undefined) delete process.env.HOME;
-    else process.env.HOME = oldHome;
-    await rm(home, { recursive: true, force: true });
-  }
-});
+  },
+  orderlyStopBoundMs,
+);
 
 // The live service kept every Agent that had ever delegated: its idle check
 // read each delegation's settlement by reopening the child, and at shutdown

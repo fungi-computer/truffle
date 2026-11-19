@@ -14,6 +14,8 @@ const [directory, parentPath, childId, phase] = z
   .tuple([z.string(), z.string(), z.string(), z.enum(["withhold", "deliver"])])
   .parse(process.argv.slice(2));
 const makeMailRoom = mail.createPrivateLocalMailRoom;
+/** The first retry delay the withheld reply is persisted with. */
+const withheldRetryDelayMs = 15_000;
 let refused = false;
 let reported = false;
 await mock.module("../../dist/private-local-mail.js", () => ({
@@ -42,7 +44,7 @@ await mock.module("../../dist/private-local-mail.js", () => ({
       }
       return result;
     });
-    return makeMailRoom(database, {
+    const room = makeMailRoom(database, {
       ...options,
       deliver: (message) => {
         if (phase === "deliver") return options.deliver(message);
@@ -50,6 +52,31 @@ await mock.module("../../dist/private-local-mail.js", () => ({
         return Promise.reject(new Error("Test-owned parent is unreachable"));
       },
     });
+    if (phase === "deliver") return room;
+    // Only the first process schedules the refused reply's retry with a long
+    // first backoff, so the persisted retry falls due well after the restart
+    // even on a loaded box (the real two-second backoff left about one second
+    // for the whole restart). The test stops this process once the retry is
+    // persisted; the restarted process keeps Post's real policy and must arm
+    // the retained timer itself.
+    return {
+      ...room,
+      hostJobs: {
+        ...room.hostJobs,
+        open: (watchdog: Parameters<typeof room.hostJobs.open>[0]) => {
+          const opened = room.hostJobs.open(watchdog);
+          return {
+            ...opened,
+            retryPolicy: async (
+              job: Parameters<typeof opened.retryPolicy>[0],
+            ) => ({
+              ...(await opened.retryPolicy(job)),
+              baseMs: withheldRetryDelayMs,
+            }),
+          };
+        },
+      },
+    };
   },
 }));
 const { runPrivateLocalService } =
