@@ -22,6 +22,41 @@ const computerSchema = z.looseObject({
   computerId: z.string().min(1).max(256),
   name: z.string().min(1).max(256),
 });
+const sizeSchema = z.enum(["small", "default", "large"]);
+const creationSchema = z.discriminatedUnion("kind", [
+  z.strictObject({
+    kind: z.literal("created"),
+    requestId: z.string(),
+    computer: z.strictObject({
+      computerId: z.string().min(1).max(256),
+      name: z.string().min(1).max(256),
+      size: sizeSchema,
+    }),
+  }),
+  z.strictObject({
+    kind: z.enum(["uncertain", "denied", "conflict", "invalid"]),
+    requestId: z.string(),
+  }),
+]);
+const stopSchema = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("stopped") }),
+  z.strictObject({ kind: z.enum(["denied", "busy", "uncertain"]) }),
+]);
+const deletionSchema = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("deleted") }),
+  z.strictObject({
+    kind: z.enum(["denied", "mismatch", "unsupported", "uncertain"]),
+  }),
+]);
+export type ComputerStop = z.output<typeof stopSchema>;
+export type ComputerDeletion = z.output<typeof deletionSchema>;
+export type ComputerSize = z.output<typeof sizeSchema>;
+type CreationRequest = {
+  name?: string;
+  size?: ComputerSize;
+  requestId?: string;
+};
+export type ComputerCreation = z.output<typeof creationSchema>;
 const pageSchema = z.looseObject({
   computers: z.array(computerSchema).max(100),
   nextOffset: z.number().int().nonnegative().nullable(),
@@ -35,10 +70,12 @@ export type Options = Readonly<{
 
 async function control<T extends z.ZodType>(
   endpoint: URL,
-  operation: "list" | "state" | "start",
+  operation: "list" | "state" | "start" | "create" | "stop" | "delete",
   input:
     | Readonly<{ computerId: string }>
-    | Readonly<{ limit: number; offset: number }>,
+    | Readonly<{ computerId: string; confirmHandle: string }>
+    | Readonly<{ limit: number; offset: number }>
+    | Readonly<CreationRequest>,
   schema: T,
   options: Options,
 ): Promise<z.output<T>> {
@@ -90,6 +127,24 @@ async function directory(endpoint: URL, options: Options) {
   );
 }
 
+/** The one Computer a name or id selects, or the plain reason none does. */
+function selectComputer(
+  computers: readonly z.output<typeof computerSchema>[],
+  name: string,
+) {
+  const matches = computers.filter(
+    (computer) => computer.computerId === name || computer.name === name,
+  );
+  const computer = matches[0];
+  if (computer === undefined || matches.length !== 1)
+    throw new Error(
+      matches.length === 0
+        ? `No Computer named ${name} in this Team.`
+        : `Computer ${name} is ambiguous; use its id.`,
+    );
+  return computer;
+}
+
 /** Team directory and real runtime liveness, using Local's existing authenticated MCP transport. */
 export async function listPrivateTeamComputers(
   rawEndpoint: string,
@@ -129,17 +184,7 @@ export async function startPrivateTeamComputer(
       input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
   };
   const { endpoint } = fungiMcpTeamEndpoint(rawEndpoint);
-  const computers = await directory(endpoint, options);
-  const matches = computers.filter(
-    (computer) => computer.computerId === name || computer.name === name,
-  );
-  const computer = matches[0];
-  if (computer === undefined || matches.length !== 1)
-    throw new Error(
-      matches.length === 0
-        ? `No Computer named ${name} in this Team.`
-        : `Computer ${name} is ambiguous; use its id.`,
-    );
+  const computer = selectComputer(await directory(endpoint, options), name);
   options.onState({ state: "starting" });
   const polling = new AbortController();
   const signal =
@@ -206,4 +251,112 @@ export async function startPrivateTeamComputer(
   } finally {
     polling.abort();
   }
+}
+
+/** The Computer a name or id selects, with its live runtime state and no wake. */
+export async function describePrivateTeamComputer(
+  rawEndpoint: string,
+  name: string,
+  input: Options = {},
+) {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
+  const { endpoint } = fungiMcpTeamEndpoint(rawEndpoint);
+  const computer = selectComputer(await directory(endpoint, options), name);
+  return {
+    ...computer,
+    ...(await control(
+      endpoint,
+      "state",
+      { computerId: computer.computerId },
+      stateSchema,
+      options,
+    )),
+  };
+}
+
+/**
+ * Create a Computer. The answer always carries the `requestId` the Hub used:
+ * to settle an uncertain attempt, pass that `requestId` back with the original
+ * name and size, and the Hub answers it instead of making a second Computer.
+ */
+export async function createPrivateTeamComputer(
+  rawEndpoint: string,
+  creation: Readonly<{
+    name?: string | undefined;
+    size?: ComputerSize | undefined;
+    requestId?: string | undefined;
+  }>,
+  input: Options = {},
+): Promise<ComputerCreation> {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
+  const { endpoint } = fungiMcpTeamEndpoint(rawEndpoint);
+  const request: CreationRequest = {};
+  if (creation.requestId !== undefined) request.requestId = creation.requestId;
+  if (creation.name !== undefined) request.name = creation.name;
+  if (creation.size !== undefined) request.size = creation.size;
+  return await control(endpoint, "create", request, creationSchema, options);
+}
+
+/** Stop one Computer now; its files are kept. The Hub answers who may. */
+export async function stopPrivateTeamComputer(
+  rawEndpoint: string,
+  name: string,
+  input: Options = {},
+): Promise<Readonly<{ computerId: string; name: string }> & ComputerStop> {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
+  const { endpoint } = fungiMcpTeamEndpoint(rawEndpoint);
+  const computer = selectComputer(await directory(endpoint, options), name);
+  return {
+    computerId: computer.computerId,
+    name: computer.name,
+    ...(await control(
+      endpoint,
+      "stop",
+      { computerId: computer.computerId },
+      stopSchema,
+      options,
+    )),
+  };
+}
+
+/**
+ * Delete the one Computer the person confirmed, by its id, sending the name they
+ * were shown as the Hub's `confirmHandle`. Nothing here reads the directory
+ * again: a Computer renamed or replaced after the question was asked fails the
+ * Hub's check ("mismatch" or "denied") instead of being deleted in its place.
+ */
+export async function deletePrivateTeamComputer(
+  rawEndpoint: string,
+  confirmed: Readonly<{ computerId: string; name: string }>,
+  input: Options = {},
+): Promise<Readonly<{ computerId: string; name: string }> & ComputerDeletion> {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
+  const { endpoint } = fungiMcpTeamEndpoint(rawEndpoint);
+  return {
+    computerId: confirmed.computerId,
+    name: confirmed.name,
+    ...(await control(
+      endpoint,
+      "delete",
+      { computerId: confirmed.computerId, confirmHandle: confirmed.name },
+      deletionSchema,
+      options,
+    )),
+  };
 }

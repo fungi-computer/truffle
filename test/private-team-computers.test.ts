@@ -11,8 +11,12 @@ import type {
   CallToolResult,
 } from "@modelcontextprotocol/client";
 import {
+  createPrivateTeamComputer,
+  deletePrivateTeamComputer,
+  describePrivateTeamComputer,
   listPrivateTeamComputers,
   startPrivateTeamComputer,
+  stopPrivateTeamComputer,
 } from "../src/private-team-computers.js";
 
 type FakeComputerReply =
@@ -20,7 +24,12 @@ type FakeComputerReply =
       computers: readonly { computerId: string; name: string }[];
       nextOffset: number | null;
     }>
-  | Readonly<{ state: string; position?: number }>;
+  | Readonly<{ state: string; position?: number }>
+  | Readonly<{
+      kind: string;
+      requestId?: string;
+      computer?: { computerId: string; name: string; size: string };
+    }>;
 const endpoint = "https://hub.test/api/teams/team-1/mcp";
 async function withHub(
   run: (options: { credentialPath: string; fetch: FetchLike }) => Promise<void>,
@@ -326,6 +335,150 @@ it("does not start a missing name or accept a non-running start confirmation", a
         };
       starts++;
       return { state: "sleeping" };
+    },
+  );
+});
+
+it("describes one Computer by name or id with its real state and never starts it", async () => {
+  const calls: string[] = [];
+  await withHub(
+    async (options) => {
+      expect(
+        await describePrivateTeamComputer(endpoint, "cedar", options),
+      ).toEqual({
+        computerId: "a",
+        name: "cedar",
+        size: "small",
+        state: "sleeping",
+      });
+      expect(
+        await describePrivateTeamComputer(endpoint, "b", options),
+      ).toMatchObject({
+        name: "birch",
+      });
+      await expect(
+        describePrivateTeamComputer(endpoint, "elm", options),
+      ).rejects.toThrow("No Computer named elm in this Team.");
+      expect(calls.some((code) => code.includes("computers.start"))).toBe(
+        false,
+      );
+    },
+    (code) => {
+      calls.push(code);
+      if (code.includes("computers.list"))
+        return {
+          computers: [
+            { computerId: "a", name: "cedar", size: "small" },
+            { computerId: "b", name: "birch", size: "default" },
+          ],
+          nextOffset: null,
+        };
+      return { state: "sleeping" };
+    },
+  );
+});
+
+it("creates a Computer through the Team control door with one request id and optional name and size", async () => {
+  const codes: string[] = [];
+  await withHub(
+    async (options) => {
+      expect(
+        await createPrivateTeamComputer(
+          endpoint,
+          { name: "cedar", size: "small", requestId: "req-1" },
+          options,
+        ),
+      ).toEqual({
+        kind: "created",
+        requestId: "req-1",
+        computer: { computerId: "a", name: "cedar", size: "small" },
+      });
+      // Nothing omitted is sent: the Hub names it, picks the default size and
+      // mints the request id.
+      await createPrivateTeamComputer(endpoint, {}, options);
+      expect(codes).toEqual([
+        'return await computers.create({"requestId":"req-1","name":"cedar","size":"small"});',
+        "return await computers.create({});",
+      ]);
+      // A refusal is data, not a throw.
+      expect(
+        await createPrivateTeamComputer(
+          endpoint,
+          { requestId: "req-3" },
+          options,
+        ),
+      ).toEqual({ kind: "denied", requestId: "req-3" });
+    },
+    (code) => {
+      codes.push(code);
+      if (code.includes("req-3")) return { kind: "denied", requestId: "req-3" };
+      return {
+        kind: "created",
+        requestId: code.includes("req-1") ? "req-1" : "minted-by-hub",
+        computer: { computerId: "a", name: "cedar", size: "small" },
+      };
+    },
+  );
+});
+
+it("stops the Computer a name selects through the control door and returns the Hub's answer as data", async () => {
+  const codes: string[] = [];
+  await withHub(
+    async (options) => {
+      expect(await stopPrivateTeamComputer(endpoint, "cedar", options)).toEqual(
+        {
+          computerId: "a",
+          name: "cedar",
+          kind: "stopped",
+        },
+      );
+      await expect(
+        stopPrivateTeamComputer(endpoint, "elm", options),
+      ).rejects.toThrow("No Computer named elm in this Team.");
+      expect(codes.filter((code) => code.includes("computers.stop"))).toEqual([
+        'return await computers.stop({"computerId":"a"});',
+      ]);
+    },
+    (code) => {
+      codes.push(code);
+      if (code.includes("computers.list"))
+        return {
+          computers: [{ computerId: "a", name: "cedar" }],
+          nextOffset: null,
+        };
+      return { kind: "stopped" };
+    },
+  );
+});
+
+it("deletes by the confirmed id with the confirmed name as the handle, without reading the directory again", async () => {
+  const codes: string[] = [];
+  await withHub(
+    async (options) => {
+      expect(
+        await deletePrivateTeamComputer(
+          endpoint,
+          { computerId: "a", name: "cedar" },
+          options,
+        ),
+      ).toEqual({ computerId: "a", name: "cedar", kind: "deleted" });
+      // A refusal (a rename or a replacement since the question) is data.
+      expect(
+        await deletePrivateTeamComputer(
+          endpoint,
+          { computerId: "b", name: "cedar" },
+          options,
+        ),
+      ).toEqual({ computerId: "b", name: "cedar", kind: "mismatch" });
+      // Only the delete reached the Hub: no listing could rename the target.
+      expect(codes).toEqual([
+        'return await computers.delete({"computerId":"a","confirmHandle":"cedar"});',
+        'return await computers.delete({"computerId":"b","confirmHandle":"cedar"});',
+      ]);
+    },
+    (code) => {
+      codes.push(code);
+      return { kind: code.includes('"b"') ? "mismatch" : "deleted" };
     },
   );
 });

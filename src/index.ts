@@ -112,8 +112,19 @@ export {
   type LocalAcpStdioOptions,
 } from "./private-local-acp-stdio.js";
 export {
+  createPrivateTeamComputer,
+  deletePrivateTeamComputer,
+  describePrivateTeamComputer,
   listPrivateTeamComputers,
   startPrivateTeamComputer,
+  stopPrivateTeamComputer,
+  type ComputerCreation,
+  type ComputerSize,
 } from "./private-team-computers.js";
+export {
+  mintPrivateComputerSshCertificate,
+  pipePrivateComputerSsh,
+  type ComputerSshMint,
+} from "./private-computer-ssh.js";
 
 export { runTrackerGitCredential } from "./tracker-git-credential.js";
