@@ -19,6 +19,7 @@ it("reports unusable family identity without exposing the token", () => {
         source: "local-runtime",
         operation: "fungi-account.pending-revoke-identity",
         failureKind: "Error",
+        failureTag: "ERR_JWT_INVALID",
       }),
     );
   } finally {

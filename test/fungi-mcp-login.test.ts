@@ -269,6 +269,7 @@ it("logout offline still removes the login and reports revocation unconfirmed", 
         source: "local-runtime",
         operation: "fungi-account.revoke",
         failureKind: "Error",
+        failureTag: "FungiMcpUnreachableError",
       }),
     );
     expect(event).not.toContain("fetch failed");

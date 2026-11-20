@@ -116,3 +116,51 @@ it("logs a recorder failure's typed cause, not its session content", () => {
     JSON.stringify(localFailureMetadata("service.request", retry)),
   ).not.toContain(privateText);
 });
+
+it("names the failure by tag or code and never by its message", () => {
+  const secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789ABCD";
+  const refused = Object.assign(new Error(`connect failed with ${secret}`), {
+    code: "ECONNRESET",
+  });
+  class ProviderTimeout extends Error {
+    public override readonly name = "ProviderTimeout";
+  }
+  const hostile = Object.assign(new Error("x"), { code: `bad ${secret}` });
+  const store = new ShiitakeError("store", "rejected", `text ${secret}`);
+
+  expect(localFailureMetadata("service.request", refused)).toMatchObject({
+    failureKind: "Error",
+    failureTag: "ECONNRESET",
+  });
+  expect(
+    localFailureMetadata("service.request", new ProviderTimeout(secret)),
+  ).toMatchObject({ failureTag: "ProviderTimeout" });
+  expect(localFailureMetadata("service.request", store)).toMatchObject({
+    failureTag: "store:rejected",
+  });
+  // A plain Error, a non-Error and a code outside the closed charset carry no
+  // tag at all, so no message text can reach the record.
+  for (const cause of [new Error(secret), secret, hostile])
+    expect(localFailureMetadata("service.request", cause)).not.toHaveProperty(
+      "failureTag",
+    );
+  for (const cause of [refused, store, hostile]) {
+    expect(JSON.stringify(localFailureMetadata("op", cause))).not.toContain(
+      secret,
+    );
+    const line = encodeServiceLogRecord({
+      source: "local-service",
+      timestamp: "2026-11-19T10:00:00.000Z",
+      pid: 1,
+      version: "test",
+      event: "failure",
+      failure: localFailureMetadata("op", cause),
+    });
+    expect(line).not.toContain(secret);
+  }
+  const report = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  logEvent("service.request", refused);
+  expect(z.string().parse(report.mock.calls[0]?.[0])).toContain(
+    '"failureTag":"ECONNRESET"',
+  );
+});

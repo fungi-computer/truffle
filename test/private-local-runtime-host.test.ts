@@ -989,18 +989,22 @@ describe("private local RuntimeHost", () => {
           source: "local-runtime",
           operation: "shiitake_reconciliation_failed",
           failureKind: "Error",
+          failureTag: "runtime:rejected",
         }),
         expect.anything(),
       );
       // Runtime Core retains the original failure for close, even after recovery.
-      await expect(agent.close()).rejects.toThrow(
+      const closing = agent;
+      agent = undefined;
+      await expect(closing.close()).rejects.toThrow(
         "Runtime reconciliation failed",
       );
     } finally {
+      // Restore the clock first: a rejected close must not leak fake timers.
+      vi.useRealTimers();
+      diagnostic.mockRestore();
       await agent?.close();
       database.close();
-      diagnostic.mockRestore();
-      vi.useRealTimers();
     }
   });
 

@@ -1,5 +1,17 @@
 # @fungi.computer/truffle
 
+## 0.18.5
+
+### Patch Changes
+
+- Changes since 0.18.4:
+
+  - fix(computer): resolve an agent's relative file paths from /workspace
+  - fix(local): tag failure records with the failure's code or name
+
+- Updated dependencies
+  - @fungi.computer/shiitake-extensions@0.11.23
+
 ## 0.18.4
 
 ### Patch Changes

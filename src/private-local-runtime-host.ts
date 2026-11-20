@@ -1498,7 +1498,6 @@ export async function createPrivateLocalTools(
         ...composed.roster,
         forms.extension,
         homeExtension({
-          instructionsRoot: "",
           computers: {
             read: () => [
               {
