@@ -330,7 +330,8 @@ test("an installed.json and activations.json from before model logins parse clea
   expect(output).toBe("");
   expect(await readFile(installed, "utf8")).toBe(installedText);
   expect(await readFile(activations, "utf8")).toBe(activationsText);
-  expect(await readdir(extensionRoot)).toEqual([
+  // readdir order is the filesystem's, not alphabetical.
+  expect((await readdir(extensionRoot)).sort()).toEqual([
     "activations.json",
     "installed.json",
   ]);
