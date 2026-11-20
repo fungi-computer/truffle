@@ -234,7 +234,7 @@ test("a diagnostics disposal failure cannot strand registration or lease", async
 test("an owned service keeps status and real turns working after a reported native short write", async () => {
   // Application closure is intentionally loaded only for this later proof,
   // never by the separate primitive-only native-fs test file.
-  const { runPrivateLocalService } =
+  const { runPrivateLocalService, stopPrivateLocalService } =
     await import("../src/private-local-service-listener.js");
   const { createPrivateLocalServiceManager } =
     await import("../src/private-local-service.js");
@@ -377,7 +377,7 @@ test("an owned service keeps status and real turns working after a reported nati
     );
   } finally {
     try {
-      if (started) process.emit("SIGTERM", "SIGTERM");
+      if (started) stopPrivateLocalService(directory);
       await running;
       expect(await readServiceRecord(directory)).toBeUndefined();
       expect(await serviceOwnerIsLive(directory)).toBe(false);

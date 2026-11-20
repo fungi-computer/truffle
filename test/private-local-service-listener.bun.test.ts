@@ -27,7 +27,10 @@ import {
   liveServiceStatusSchema,
 } from "../src/private-local-service-discovery.js";
 import { createPrivateLocalServiceManager } from "../src/private-local-service.js";
-import { runPrivateLocalService } from "../src/private-local-service-listener.js";
+import {
+  runPrivateLocalService,
+  stopPrivateLocalService,
+} from "../src/private-local-service-listener.js";
 import { createPrivateLocalServiceShutdown } from "../src/private-local-service-listener.js";
 import { createLocalServiceOwners } from "../src/private-local-service-owner.js";
 import { capturePrivateLocalConfigRoot } from "../src/private-local-config-root.js";
@@ -297,7 +300,7 @@ it("a running service uses a new subscription login on the next turn without res
     assert.deepEqual(seen, [true, true]);
     assert.deepEqual(await manager.status(), before);
   } finally {
-    stopInProcessService();
+    stopInProcessService(directory);
     await running;
     await rm(root, { recursive: true, force: true });
   }
@@ -305,10 +308,11 @@ it("a running service uses a new subscription login on the next turn without res
 
 /**
  * `fungi stop` SIGTERMs the service process. These listeners run inside the
- * test process, so deliver the signal to its handler instead of the process.
+ * test process, so stop the one for `directory` through its own handle, which
+ * drains as SIGTERM does without a process-wide signal.
  */
-function stopInProcessService() {
-  process.emit("SIGTERM", "SIGTERM");
+function stopInProcessService(directory: string) {
+  stopPrivateLocalService(directory);
 }
 
 it.each(["held", "eio", "invalid-json", "non-array"])(
@@ -614,7 +618,7 @@ it.each([
         );
         expect(accepted.status).toBe(200);
       }
-      stopInProcessService();
+      stopInProcessService(directory);
       await running;
       prefix = undefined;
       const saved = [{ invocationRoot: root, databasePath }];
@@ -684,7 +688,7 @@ it.each([
             finished = true;
           });
           recoveryStopRequested = true;
-          stopInProcessService();
+          stopInProcessService(directory);
           expect((await fetch(`${prefix}/select`, request)).status).toBe(503);
           expect(await handshake(record)).toBe(true);
           expect(await serviceOwnerIsLive(directory)).toBe(true);
@@ -718,7 +722,7 @@ it.each([
     } finally {
       releaseReopen.resolve(undefined);
       if (prefix !== undefined && !recoveryStopRequested)
-        stopInProcessService();
+        stopInProcessService(directory);
       await running;
       await rm(root, { recursive: true, force: true });
     }
@@ -772,7 +776,7 @@ describe("private Local service listener", () => {
         "local_store_second",
       ]);
     } finally {
-      if (prefix !== undefined) stopInProcessService();
+      if (prefix !== undefined) stopInProcessService(directory);
       await running;
       await rm(root, { recursive: true, force: true });
     }
@@ -806,7 +810,7 @@ describe("private Local service listener", () => {
           .parse(await response.json()),
       ).toEqual({ code: "internal_error", error: "store could not be opened" });
     } finally {
-      if (prefix !== undefined) stopInProcessService();
+      if (prefix !== undefined) stopInProcessService(directory);
       await running;
       await rm(root, { recursive: true, force: true });
     }
@@ -1147,7 +1151,7 @@ describe("private Local service listener", () => {
       const stopping = running.then(() => {
         stopSettled = true;
       });
-      stopInProcessService();
+      stopInProcessService(directory);
       await sleep(20);
       expect(stopSettled).toBe(false);
       expect(await handshake(record)).toBe(true);
@@ -1174,7 +1178,7 @@ describe("private Local service listener", () => {
       closing.resolve(undefined);
       try {
         if (record !== undefined && (await handshake(record)))
-          stopInProcessService();
+          stopInProcessService(directory);
       } catch (cause) {
         logEvent("listener-proof.stop-service", cause);
         cleanupFailures.push(cause);

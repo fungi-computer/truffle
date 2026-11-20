@@ -20,7 +20,10 @@ import {
   readServiceRecord,
   serviceDirectory,
 } from "../dist/private-local-service-discovery.js";
-import { runPrivateLocalService } from "../dist/private-local-service-listener.js";
+import {
+  runPrivateLocalService,
+  stopPrivateLocalService,
+} from "../dist/private-local-service-listener.js";
 import { createPrivateLocalServiceManager } from "../dist/private-local-service.js";
 
 const nativeNames = [
@@ -253,13 +256,13 @@ it.skipIf(process.platform !== "linux")(
         }
       }
       signaled = true;
-      process.emit("SIGTERM", "SIGTERM");
+      stopPrivateLocalService(fixture.directory);
       await running;
       expect(existsSync(stagedPatch)).toBe(false);
       expect(await fixture.staged()).toEqual([]);
       expect(await readServiceRecord(fixture.directory)).toBeUndefined();
     } finally {
-      if (published && !signaled) process.emit("SIGTERM", "SIGTERM");
+      if (published && !signaled) stopPrivateLocalService(fixture.directory);
       try {
         await running;
       } finally {

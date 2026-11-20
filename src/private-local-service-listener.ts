@@ -132,6 +132,31 @@ export function createPrivateLocalServiceShutdown(input: {
   };
 }
 
+/** The services this process is running, by directory, and how each is told to stop. */
+const runningServices = new Map<
+  string,
+  (reason: "SIGINT" | "SIGTERM") => void
+>();
+
+/**
+ * Stop the service this process runs for `directory` through its ordinary
+ * signal lifecycle (the drain `SIGTERM` or `SIGINT` starts), without a
+ * process-wide signal. `process.emit("SIGTERM")` reaches every listener the
+ * process has, including Miniflare's exit hook, which ends the process with
+ * 143 while a sandboxed command is running and skips the drain. Returns false
+ * when no service is running for the directory, so a stop that arrives before
+ * the listener is ready, or after it ended, does nothing.
+ */
+export function stopPrivateLocalService(
+  directory: string,
+  reason: "SIGINT" | "SIGTERM" = "SIGTERM",
+): boolean {
+  const stop = runningServices.get(directory);
+  if (stop === undefined) return false;
+  stop(reason);
+  return true;
+}
+
 /** Native Bun listener retained from TUI; service owns both listener and stores. */
 export async function runPrivateLocalService(
   directory: string,
@@ -679,6 +704,7 @@ export async function runPrivateLocalService(
     onReady?.();
     process.on("SIGINT", onInterrupt);
     process.on("SIGTERM", onTerminate);
+    runningServices.set(directory, onSignal);
     // Health and shutdown must answer before any saved Agent is reopened.
     // Owner shutdown tracks this task; requests share its ordinary ownerFor.
     void owners.restore();
@@ -694,6 +720,8 @@ export async function runPrivateLocalService(
     diagnostics.stopping(recordWritten ? "runtime-failure" : "startup-failure");
     throw cause;
   } finally {
+    if (runningServices.get(directory) === onSignal)
+      runningServices.delete(directory);
     process.off("SIGINT", onInterrupt);
     process.off("SIGTERM", onTerminate);
     try {

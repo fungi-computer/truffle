@@ -18,7 +18,10 @@ import {
   readServiceRecord,
   serviceDirectory,
 } from "../src/private-local-service-discovery.js";
-import { runPrivateLocalService } from "../src/private-local-service-listener.js";
+import {
+  runPrivateLocalService,
+  stopPrivateLocalService,
+} from "../src/private-local-service-listener.js";
 import { createPrivateLocalServiceManager } from "../src/private-local-service.js";
 import { initFreshStore } from "./fixtures/fresh-store.js";
 import {
@@ -184,9 +187,9 @@ it("admits schedule controls only through the private Local owner capability", a
       },
     ]);
   } finally {
-    // Like the retained listener tests, invoke this in-process service's handler.
-    // manager.stop() would signal the test process; there is no HTTP stop route.
-    process.emit("SIGTERM", "SIGTERM");
+    // Like the retained listener tests, stop this in-process service through its
+    // handle. manager.stop() would signal the test process; there is no HTTP stop route.
+    stopPrivateLocalService(directory);
     await running;
     await rm(root, { recursive: true, force: true });
   }

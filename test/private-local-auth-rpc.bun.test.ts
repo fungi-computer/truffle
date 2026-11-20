@@ -7,7 +7,10 @@ import { sleep } from "bun";
 import { UnsecuredJWT } from "jose";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { registerBunOAuthFlows } from "@earendil-works/pi-ai/bun-oauth";
-import { runPrivateLocalService } from "../src/private-local-service-listener.js";
+import {
+  runPrivateLocalService,
+  stopPrivateLocalService,
+} from "../src/private-local-service-listener.js";
 import { runLocalAuthCli, type LocalAuthModels } from "../src/auth-cli.js";
 import { openPrivateModels } from "../src/local-models.js";
 import { createPrivateLocalServiceManager } from "../src/private-local-service.js";
@@ -61,7 +64,7 @@ async function withService(
     })(),
   ]);
   // `fungi stop` SIGTERMs the service; this listener shares the test process.
-  process.emit("SIGTERM", "SIGTERM");
+  stopPrivateLocalService(directory);
   const service = await settled;
   const removed = await Promise.allSettled([
     rm(root, { recursive: true, force: true }),

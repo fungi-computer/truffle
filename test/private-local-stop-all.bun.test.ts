@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import { mkdir, mkdtemp } from "node:fs/promises";
 import { join } from "node:path";
-import { runPrivateLocalService } from "../src/private-local-service-listener.js";
+import {
+  runPrivateLocalService,
+  stopPrivateLocalService,
+} from "../src/private-local-service-listener.js";
 import { createPrivateLocalServiceManager } from "../src/private-local-service.js";
 import {
   serviceDirectory,
@@ -76,8 +79,8 @@ test("the real service stops descendants after the parent stops and keeps their 
   } finally {
     try {
       // The listener is embedded in this test process. The current manager
-      // correctly refuses to terminate its own process; use its signal handler.
-      process.emit("SIGTERM", "SIGTERM");
+      // correctly refuses to terminate its own process; use its stop handle.
+      stopPrivateLocalService(directory);
       await running;
     } finally {
       if (previousHome === undefined) delete process.env.HOME;

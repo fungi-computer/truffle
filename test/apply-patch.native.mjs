@@ -985,6 +985,16 @@ test("installed OpenAI Pi adapter streams raw patch and replays matching custom 
       },
     ),
   };
+  // A system message's `toolsAdded` reaches a model that supports
+  // message-anchored tool additions (Pi 1.5's catalog marks gpt-6-astra) as an
+  // `additional_tools` input item, not the request's top-level `tools`.
+  const addedTools = (request) => {
+    const added = request.input.filter(
+      (item) => item.type === "additional_tools",
+    );
+    assert.equal(added.length, 1, JSON.stringify(request.input));
+    return added[0].tools;
+  };
   const tool = surface.tools[0];
   const tools = {
     role: "system",
@@ -996,7 +1006,8 @@ test("installed OpenAI Pi adapter streams raw patch and replays matching custom 
     .streamSimple(model, { messages: [tools] }, options)
     .result();
   assert.equal(first.stopReason, "toolUse", JSON.stringify(first));
-  assert.equal(requests[0].tools[0].type, "custom");
+  assert.ok(model.compat.supportsAdditionalTools);
+  assert.equal(addedTools(requests[0])[0].type, "custom");
   const call = first.content.find((part) => part.type === "toolCall");
   assert.deepEqual(call.arguments, { patch: text });
   const result = await direct(tool, call.arguments.patch, call.id);
@@ -1046,7 +1057,7 @@ test("installed OpenAI Pi adapter streams raw patch and replays matching custom 
       options,
     )
     .result();
-  assert.equal(requests[2].tools[0].type, "function");
+  assert.equal(addedTools(requests[2])[0].type, "function");
   assert.equal(
     await readFile(join(root, "raw.txt"), "utf8"),
     "raw text reached the native engine\n",

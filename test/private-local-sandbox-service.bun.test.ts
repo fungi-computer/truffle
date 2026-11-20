@@ -20,7 +20,10 @@ import {
   serviceDirectory,
   type ServiceRecord,
 } from "../dist/private-local-service-discovery.js";
-import { runPrivateLocalService } from "../dist/private-local-service-listener.js";
+import {
+  runPrivateLocalService,
+  stopPrivateLocalService,
+} from "../dist/private-local-service-listener.js";
 import {
   createPrivateLocalServiceManager,
   LocalSandboxUnavailable,
@@ -200,7 +203,7 @@ it.skipIf(process.platform !== "linux")(
         await permitted.close();
       }
     } finally {
-      process.emit("SIGTERM", "SIGTERM");
+      stopPrivateLocalService(directory);
       try {
         await running;
       } finally {

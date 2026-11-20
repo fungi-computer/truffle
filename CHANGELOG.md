@@ -1,5 +1,25 @@
 # @fungi.computer/truffle
 
+## 0.19.4
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/watchdog@0.1.5
+  - @fungi.computer/agar@0.25.1
+  - @fungi.computer/approvals@0.2.5
+  - @fungi.computer/bird-dog@0.3.8
+  - @fungi.computer/carrier@0.2.6
+  - @fungi.computer/shiitake@0.21.16
+  - @fungi.computer/shiitake-extensions@0.12.5
+  - @fungi.computer/veil@0.11.6
+  - @fungi.computer/seam@0.2.7
+  - @fungi.computer/mycelium@0.4.9
+  - @fungi.computer/nacre@0.8.8
+  - @fungi.computer/graft@0.2.51
+  - @fungi.computer/zookeeper@0.0.58
+  - @fungi.computer/knapsack@0.4.24
+
 ## 0.19.3
 
 ### Patch Changes

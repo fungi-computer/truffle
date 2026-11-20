@@ -21,7 +21,10 @@ import { bindSessionExtension } from "@fungi.computer/shiitake/client";
 import type { ShiitakeSession } from "@fungi.computer/shiitake";
 import { openPrivateModels } from "../dist/local-models.js";
 import { createPrivateLocalServiceManager } from "../dist/private-local-service.js";
-import { runPrivateLocalService } from "../dist/private-local-service-listener.js";
+import {
+  runPrivateLocalService,
+  stopPrivateLocalService,
+} from "../dist/private-local-service-listener.js";
 import { mcpFormApprovalContract } from "../dist/private-mcp-form-contract.js";
 import {
   openPrivateLocalRuntimeHost,
@@ -167,7 +170,7 @@ async function withFormService(
       },
     });
   } finally {
-    process.emit("SIGTERM", "SIGTERM");
+    stopPrivateLocalService(config.serviceDirectory);
     try {
       await running;
     } finally {
