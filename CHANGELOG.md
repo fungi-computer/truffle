@@ -1,5 +1,21 @@
 # @fungi.computer/truffle
 
+## 0.19.3
+
+### Patch Changes
+
+- Changes since 0.19.2:
+
+  - fix(veil): hold back only text that could begin a stored value
+
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/shiitake@0.21.15
+  - @fungi.computer/veil@0.11.5
+  - @fungi.computer/graft@0.2.50
+  - @fungi.computer/shiitake-extensions@0.12.4
+  - @fungi.computer/zookeeper@0.0.57
+
 ## 0.19.2
 
 ### Patch Changes

@@ -25,8 +25,10 @@ export function openLocalVaultRedaction(
       const values: string[] = [];
       for (const { providerId } of await credentials.list())
         values.push(...secretValues(await credentials.read(providerId)));
+      // Short-prefix fingerprints stay in this process too, so live output
+      // holds back only text that begins a stored value.
       return createFingerprintRedactor(
-        await createFingerprintSet(ownerKey, values),
+        await createFingerprintSet(ownerKey, values, { prefixes: true }),
       );
     },
   };
