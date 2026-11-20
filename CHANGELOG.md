@@ -1,5 +1,26 @@
 # @fungi.computer/truffle
 
+## 0.19.2
+
+### Patch Changes
+
+- Changes since 0.19.1:
+
+  - fix(agar): say which Agents may still be running and why
+  - fix(hub): stop four Agents at once and count helpers a key may not stop
+
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.25.0
+  - @fungi.computer/shiitake-extensions@0.12.3
+  - @fungi.computer/nacre@0.8.7
+  - @fungi.computer/shiitake@0.21.14
+  - @fungi.computer/knapsack@0.4.23
+  - @fungi.computer/mycelium@0.4.8
+  - @fungi.computer/veil@0.11.4
+  - @fungi.computer/graft@0.2.49
+  - @fungi.computer/zookeeper@0.0.56
+
 ## 0.19.1
 
 ### Patch Changes

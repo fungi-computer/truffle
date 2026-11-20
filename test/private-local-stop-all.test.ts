@@ -153,8 +153,7 @@ it.each(["settles", "times out"])(
             agentId: "child",
             name: "child",
             outcome: "failed",
-            reason:
-              "Agent did not answer within 5 seconds; stop is unconfirmed",
+            reason: "it didn't answer within 5 seconds",
           },
           { agentId: "parent", name: "parent", outcome: "idle" },
         ]);

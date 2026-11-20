@@ -15,8 +15,7 @@ import {
 export { LocalSandboxUnavailable } from "./private-local-containment.js";
 import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import { takePendingExtensionArchiveNotices } from "./private-local-extension-archive-notice.js";
-import { stopAllResultSchema } from "./private-local-stop-all.js";
-export type { StopAllResult } from "./private-local-stop-all.js";
+import { agentStopAllResultSchema } from "@fungi.computer/agar/agents";
 import {
   LocalAgentSelectionAmbiguous,
   LocalSessionPathConflict,
@@ -640,7 +639,7 @@ export function createPrivateLocalServiceManager(
         );
         if (!response.ok)
           throw new Error(`Stop all failed (${String(response.status)})`);
-        return stopAllResultSchema.parse(await response.json());
+        return agentStopAllResultSchema.parse(await response.json());
       },
       effectiveModel: async (
         request: Readonly<{ signal?: AbortSignal | undefined }> = {},

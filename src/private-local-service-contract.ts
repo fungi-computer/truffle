@@ -9,7 +9,7 @@ import type {
 } from "@fungi.computer/shiitake";
 import type { PrivateLocalModelChoice } from "./local-models.js";
 import type { PrivateLocalEffectiveModel } from "./private-local-effective-model.js";
-import type { StopAllResult } from "./private-local-stop-all.js";
+import type { AgentStopAllResult as StopAllResult } from "@fungi.computer/agar/agents";
 import type { ServiceDiagnosticsStatus } from "./private-local-service-log.js";
 import type { LocalSandboxStatus } from "./private-local-sandbox.js";
 import type { LocalPermissionMode } from "./private-local-permission-mode.js";

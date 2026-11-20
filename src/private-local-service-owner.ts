@@ -23,7 +23,7 @@ import {
   type PrivateLocalConfigRoot,
 } from "./private-local-config-root.js";
 import type { ServiceLogLifecycle } from "./private-local-service-log.js";
-import type { StopAllResult } from "./private-local-stop-all.js";
+import type { AgentStopAllResult as StopAllResult } from "@fungi.computer/agar/agents";
 import { AdmissionGate } from "./private-local-admission-gate.js";
 import {
   readFungiMcpSelection,
@@ -2079,6 +2079,8 @@ export function createLocalServiceOwners(
       rootAgentId: request.agentId,
       agents: [],
       discoveryFailures: [],
+      // The Local owner may stop every Agent in its project.
+      notPermitted: 0,
     };
     const agents = new Map<
       string,
@@ -2184,9 +2186,7 @@ export function createLocalServiceOwners(
           })(),
           new Promise<never>((_resolve, reject) => {
             timer = setTimeout(() => {
-              const error = new Error(
-                "Agent did not answer within 5 seconds; stop is unconfirmed",
-              );
+              const error = new Error("it didn't answer within 5 seconds");
               deadline.abort(error);
               reject(error);
             }, 5_000);
