@@ -1,5 +1,22 @@
 # @fungi.computer/truffle
 
+## 0.19.0
+
+### Minor Changes
+
+- Changes since 0.18.6:
+
+  - feat(tui): add fungi computer run
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/veil@0.11.3
+  - @fungi.computer/shiitake@0.21.12
+  - @fungi.computer/graft@0.2.47
+  - @fungi.computer/shiitake-extensions@0.12.1
+  - @fungi.computer/zookeeper@0.0.54
+
 ## 0.18.6
 
 ### Patch Changes

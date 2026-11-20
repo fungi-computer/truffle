@@ -360,3 +360,46 @@ export async function deletePrivateTeamComputer(
     )),
   };
 }
+
+const pricesSchema = z.strictObject({
+  unitsPerUsd: z.number().int().positive(),
+  hourly: z.strictObject({
+    small: z.number().int().nonnegative(),
+    default: z.number().int().nonnegative(),
+    large: z.number().int().nonnegative(),
+  }),
+});
+export type ComputerPrices = z.output<typeof pricesSchema>;
+
+/**
+ * What each Computer size costs an hour awake, from the Hub's price book, or
+ * undefined when this host has none to give (an Oyster, or an older Hub).
+ */
+export async function readPrivateComputerPrices(
+  rawEndpoint: string,
+  input: Options = {},
+): Promise<ComputerPrices | undefined> {
+  const options = {
+    ...input,
+    credentialPath:
+      input.credentialPath ?? capturePrivateLocalConfigRoot().credentialPath,
+  };
+  const { endpoint } = fungiMcpTeamEndpoint(rawEndpoint);
+  options.signal?.throwIfAborted();
+  const text = await callFungiMcpControl(
+    endpoint,
+    "return await computers.prices({});",
+    { ...options, timeoutMs: 30_000 },
+  );
+  if (text === undefined) return undefined;
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw new Error("The Hub returned an invalid Computer price response.");
+  }
+  const result = pricesSchema.safeParse(value);
+  if (!result.success)
+    throw new Error("The Hub returned an invalid Computer price response.");
+  return result.data;
+}

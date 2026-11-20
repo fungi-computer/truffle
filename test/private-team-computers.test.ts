@@ -15,6 +15,7 @@ import {
   deletePrivateTeamComputer,
   describePrivateTeamComputer,
   listPrivateTeamComputers,
+  readPrivateComputerPrices,
   startPrivateTeamComputer,
   stopPrivateTeamComputer,
 } from "../src/private-team-computers.js";
@@ -29,7 +30,8 @@ type FakeComputerReply =
       kind: string;
       requestId?: string;
       computer?: { computerId: string; name: string; size: string };
-    }>;
+    }>
+  | Readonly<{ unitsPerUsd: number | string; hourly: Record<string, number> }>;
 const endpoint = "https://hub.test/api/teams/team-1/mcp";
 async function withHub(
   run: (options: { credentialPath: string; fetch: FetchLike }) => Promise<void>,
@@ -480,5 +482,44 @@ it("deletes by the confirmed id with the confirmed name as the handle, without r
       codes.push(code);
       return { kind: code.includes('"b"') ? "mismatch" : "deleted" };
     },
+  );
+});
+
+it("reads each size's hourly price from the Hub, and nothing from a host without prices", async () => {
+  const prices = {
+    unitsPerUsd: 100_000,
+    hourly: { small: 1_500, default: 3_000, large: 6_000 },
+  };
+  const codes: string[] = [];
+  await withHub(
+    async (options) => {
+      expect(await readPrivateComputerPrices(endpoint, options)).toEqual(
+        prices,
+      );
+      expect(codes).toEqual(["return await computers.prices({});"]);
+    },
+    (code) => {
+      codes.push(code);
+      return prices;
+    },
+  );
+  // An Oyster or an older Hub has no prices operation: the call fails there.
+  await withHub(
+    async (options) => {
+      expect(
+        await readPrivateComputerPrices(endpoint, options),
+      ).toBeUndefined();
+    },
+    () => {
+      throw new Error("computers.prices is not a function");
+    },
+  );
+  await withHub(
+    async (options) => {
+      await expect(
+        readPrivateComputerPrices(endpoint, options),
+      ).rejects.toThrow("The Hub returned an invalid Computer price response.");
+    },
+    () => ({ unitsPerUsd: "lots", hourly: {} }),
   );
 });

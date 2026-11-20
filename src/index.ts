@@ -114,11 +114,13 @@ export {
 export {
   createPrivateTeamComputer,
   deletePrivateTeamComputer,
+  readPrivateComputerPrices,
   describePrivateTeamComputer,
   listPrivateTeamComputers,
   startPrivateTeamComputer,
   stopPrivateTeamComputer,
   type ComputerCreation,
+  type ComputerPrices,
   type ComputerSize,
 } from "./private-team-computers.js";
 export {
