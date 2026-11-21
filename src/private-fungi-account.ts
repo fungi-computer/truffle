@@ -62,7 +62,7 @@ import {
 
 const credentialId = "fungi";
 const localScopes =
-  "openid profile email offline_access models:invoke git:tracker billing:read";
+  "openid profile email offline_access models:invoke computer:execute git:tracker billing:read";
 const callbackHost = "127.0.0.1";
 const callbackPath = "/oauth/callback";
 const registrationPath = "/client-registration";

@@ -1,5 +1,30 @@
 # @fungi.computer/truffle
 
+## 0.20.5
+
+### Patch Changes
+
+- Changes since 0.20.4:
+
+  - fix(local): preserve SSH refusal body read failures
+  - fix(local): explain Computer scope re-login for SSH refusals
+  - fix(auth): require first-party Computer execution scope
+
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/agar@0.27.2
+  - @fungi.computer/approvals@0.2.6
+  - @fungi.computer/shiitake-extensions@0.13.0
+  - @fungi.computer/shiitake@0.22.4
+  - @fungi.computer/nacre@0.9.3
+  - @fungi.computer/knapsack@0.4.27
+  - @fungi.computer/mycelium@0.4.12
+  - @fungi.computer/veil@0.11.9
+  - @fungi.computer/graft@0.2.56
+  - @fungi.computer/zookeeper@0.0.63
+
 ## 0.20.4
 
 ### Patch Changes

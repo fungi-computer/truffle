@@ -112,7 +112,9 @@ describe("fitLocalImage", () => {
         name === "gif" ? [1, 1] : [512, 384],
       );
     }
-  });
+    // Three 1,200 x 900 encodes plus the GIF fixture exceed 5 s at 25% CPU
+    // (measured at 5.9 s); retain room for loaded gate runners.
+  }, 20_000);
 
   it("steps down to a smaller edge when 512 px is still over budget", async () => {
     // Raw noise at 512 px is over 100 KB as a quality-80 JPEG, so a smaller step wins.

@@ -45,9 +45,21 @@ async function signedIn() {
   });
   return {
     credentialPath,
+    provider,
     cleanup: () => rm(root, { recursive: true, force: true }),
   };
 }
+
+it("requests the first-party Computer scope in Local login metadata", async () => {
+  const { provider, cleanup } = await signedIn();
+  try {
+    expect(provider.clientMetadata.scope?.split(" ")).toContain(
+      "computer:execute",
+    );
+  } finally {
+    await cleanup();
+  }
+});
 
 it("mints a certificate for the public key alone, with the saved login as bearer", async () => {
   const { credentialPath, cleanup } = await signedIn();
@@ -101,6 +113,33 @@ it("names the cause of each Hub refusal, and refuses an answer that is not plain
         credentialPath,
         fetch,
       });
+    await expect(
+      mint(() =>
+        Promise.resolve(
+          new Response(null, {
+            status: 403,
+            headers: {
+              "WWW-Authenticate":
+                'Bearer error="insufficient_scope", scope="computer:execute"',
+            },
+          }),
+        ),
+      ),
+    ).rejects.toThrow(
+      `This sign-in predates Computer access. Run fungi login --fungi-mcp ${endpoint} and retry.`,
+    );
+    await expect(
+      mint(() =>
+        Promise.resolve(
+          Response.json(
+            { error: "Local authorization requires computer:execute" },
+            { status: 403 },
+          ),
+        ),
+      ),
+    ).rejects.toThrow(
+      `This sign-in predates Computer access. Run fungi login --fungi-mcp ${endpoint} and retry.`,
+    );
     await expect(mint(refuse(403))).rejects.toThrow(
       "You can't get an SSH certificate on this Computer. SSH needs a Team member who can run commands on it.",
     );

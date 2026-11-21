@@ -184,8 +184,12 @@ it.each(["completed", "failed", "cancelled"] as const)(
   async (outcome) => {
     const parentContexts: Context[] = [];
     const childStarted = Promise.withResolvers<undefined>();
+    // A child that settles by itself waits here until the parent has been
+    // seen idle, so its reply can only arrive after the parent's turn ended.
+    const parentSeenIdle = Promise.withResolvers<undefined>();
     const childStep: FauxResponseStep = async (_context, options) => {
       childStarted.resolve(undefined);
+      if (outcome !== "cancelled") await parentSeenIdle.promise;
       if (outcome === "cancelled")
         await new Promise<void>((resolve) => {
           if (options?.signal?.aborted === true) resolve();
@@ -224,6 +228,7 @@ it.each(["completed", "failed", "cancelled"] as const)(
       const idle = await until(
         () => local.parent.session.read(),
         (snapshot) =>
+          snapshot.activity.queue.state === "idle" &&
           snapshot.messages.some(
             ({ value }) =>
               value.role === "assistant" &&
@@ -232,6 +237,7 @@ it.each(["completed", "failed", "cancelled"] as const)(
         "the parent's delegating turn",
       );
       expect(userLines(idle)).toHaveLength(1);
+      parentSeenIdle.resolve(undefined);
       if (outcome === "cancelled") await local.child.session.abort();
       const settled = await until(
         () => local.parent.session.read(),
@@ -308,6 +314,7 @@ it.each(["completed", "failed", "cancelled"] as const)(
         ).slice(1, -1),
       );
     } finally {
+      parentSeenIdle.resolve(undefined);
       await local.owners.close();
     }
   },

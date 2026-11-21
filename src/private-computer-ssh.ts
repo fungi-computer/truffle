@@ -1,4 +1,7 @@
-import type { FetchLike } from "@modelcontextprotocol/client";
+import {
+  extractWWWAuthenticateParams,
+  type FetchLike,
+} from "@modelcontextprotocol/client";
 import { z } from "zod";
 import { capturePrivateLocalConfigRoot } from "./private-local-config-root.js";
 import {
@@ -111,7 +114,9 @@ function withCredentials(options: ComputerSshOptions) {
   };
 }
 
-/** One plain sentence for a Hub refusal, naming its cause by status. */
+const refusalSchema = z.object({ error: z.string() });
+
+/** One plain sentence for a Hub refusal, naming its cause. */
 async function refusal(
   response: Response,
   doing: string,
@@ -119,16 +124,34 @@ async function refusal(
 ): Promise<Error> {
   // A 409 carries one of two reasons in its body; the phrase names the hosted one.
   let body = "";
-  if (response.status === 409) body = await response.text();
+  let missingComputerScope = false;
+  if (response.status === 403) {
+    const parsed = refusalSchema.safeParse(
+      await response.json().catch((cause: unknown) => {
+        if (cause instanceof SyntaxError) return null;
+        throw cause;
+      }),
+    );
+    missingComputerScope =
+      parsed.success && parsed.data.error.includes("computer:execute");
+  } else if (response.status === 409) body = await response.text();
   else await response.body?.cancel();
   if (response.status === 401)
     return new Error(
       `The Hub did not accept your sign-in. Run fungi login --fungi-mcp ${endpoint} and retry.`,
     );
-  if (response.status === 403)
+  if (response.status === 403) {
+    if (
+      extractWWWAuthenticateParams(response).error === "insufficient_scope" ||
+      missingComputerScope
+    )
+      return new Error(
+        `This sign-in predates Computer access. Run fungi login --fungi-mcp ${endpoint} and retry.`,
+      );
     return new Error(
       `You can't ${doing} on this Computer. SSH needs a Team member who can run commands on it.`,
     );
+  }
   if (response.status === 404)
     return new Error("The Hub has no such Computer in this Team.");
   if (response.status === 409)
