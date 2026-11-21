@@ -33,6 +33,8 @@ export { ensurePrivateLocalGitExclude } from "./private-local-git-exclude.js";
 export { createPrivateWorkerdSandbox } from "./private-workerd-sandbox.js";
 export {
   signInFungiAccount,
+  signInFungiAccountWithDeviceCode,
+  type FungiDeviceCode,
   launchPlatformBrowser,
   signOutFungiAccount,
   readFungiAccountStatus,

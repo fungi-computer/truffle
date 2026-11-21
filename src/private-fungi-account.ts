@@ -10,6 +10,7 @@ import {
   type ServerResponse,
 } from "node:http";
 import { randomBytes } from "node:crypto";
+import { setTimeout as sleep } from "node:timers/promises";
 import { spawn } from "node:child_process";
 import process from "node:process";
 import { dirname, resolve } from "node:path";
@@ -63,6 +64,9 @@ import {
 const credentialId = "fungi";
 const localScopes =
   "openid profile email offline_access models:invoke computer:execute git:tracker billing:read";
+/** The Hub's one ownerless client for RFC 8628 device login. */
+const deviceClientId = "fungi-device";
+const deviceGrantType = "urn:ietf:params:oauth:grant-type:device_code";
 const callbackHost = "127.0.0.1";
 const callbackPath = "/oauth/callback";
 const registrationPath = "/client-registration";
@@ -1026,10 +1030,17 @@ async function retryPendingLogout(
 }
 
 /** Complete first-party registration and OAuth authorization in a foreground TUI. */
-export async function signInFungiAccount(
+/**
+ * Check the Hub and settle a saved login for another origin before any sign-in
+ * flow shows a browser URL or a device code.
+ */
+async function prepareSignIn(
   rawEndpoint: string | URL,
-  input: PrivateFungiAccountLoginOptions = {},
-): Promise<void> {
+  input: PrivateFungiAccountLoginOptions,
+): Promise<{
+  endpoint: URL;
+  options: PrivateFungiAccountLoginOptions & { credentialPath: string };
+}> {
   const options = {
     ...input,
     credentialPath:
@@ -1073,6 +1084,14 @@ export async function signInFungiAccount(
     const logout = await removeSavedLogin(saved, options);
     if (logout.unconfirmedComputers.length > 0) throw new Error(logout.message);
   }
+  return { endpoint, options };
+}
+
+export async function signInFungiAccount(
+  rawEndpoint: string | URL,
+  input: PrivateFungiAccountLoginOptions = {},
+): Promise<void> {
+  const { endpoint, options } = await prepareSignIn(rawEndpoint, input);
   const fetchImpl = ownFungiFetch(
     endpoint.origin,
     options.fetch,
@@ -1222,6 +1241,10 @@ export async function signInFungiAccount(
     ]);
     if (!clientId)
       throw new Error("OAuth callback arrived before Local registration");
+    if (previousClientId === deviceClientId && clientId !== previousClientId)
+      throw new Error(
+        "This computer signed in with fungi login --device. Run fungi login --device again, or detach its Computers and sign out before switching to browser sign-in.",
+      );
     if (previousClientId !== undefined && clientId !== previousClientId)
       throw new Error(
         "Fungi Local registration belongs to another account. Use the browser account for your saved login, or detach its Computers and sign out before switching accounts.",
@@ -1267,6 +1290,197 @@ export async function signInFungiAccount(
       });
     });
   }
+}
+
+/** What `fungi login --device` shows: open this page and enter this code. */
+export type FungiDeviceCode = Readonly<{
+  userCode: string;
+  verificationUri: string;
+  verificationUriComplete: string;
+  expiresInSeconds: number;
+}>;
+
+const deviceCodeResponse = z.looseObject({
+  device_code: z.string().min(1),
+  user_code: z.string().min(1).max(32),
+  verification_uri: z.url(),
+  verification_uri_complete: z.url(),
+  expires_in: z.number().int().positive(),
+  interval: z.number().int().positive().optional(),
+});
+const deviceTokenResponse = z.looseObject({
+  access_token: z.string().min(1),
+  refresh_token: z.string().min(1),
+  token_type: z.string().min(1),
+  expires_in: z.number().optional(),
+  scope: z.string().optional(),
+});
+const deviceTokenError = z.looseObject({
+  error: z.string(),
+  error_description: z.string().optional(),
+});
+
+/** Read the Hub's RFC 6749 error body without hiding a non-JSON answer. */
+async function oauthErrorOf(response: Response) {
+  const text = await response.text();
+  try {
+    const parsed = deviceTokenError.safeParse(JSON.parse(text));
+    if (parsed.success) return parsed.data;
+  } catch (cause) {
+    logEvent("fungi-account.device-error-body", cause);
+  }
+  return {
+    error: "unexpected_response",
+    error_description: `the Hub answered ${String(response.status)}`,
+  };
+}
+
+/**
+ * Sign in a terminal without a local browser (RFC 8628). The person opens the
+ * Hub's /device page on any signed-in browser, checks the code and approves.
+ */
+export async function signInFungiAccountWithDeviceCode(
+  rawEndpoint: string | URL,
+  input: PrivateFungiAccountLoginOptions & {
+    /** Shows the page and code; called once before polling starts. */
+    showDeviceCode: (code: FungiDeviceCode) => void;
+  },
+): Promise<void> {
+  const { endpoint, options } = await prepareSignIn(rawEndpoint, input);
+  const fetchImpl = ownFungiFetch(
+    endpoint.origin,
+    options.fetch,
+    options.signal,
+  );
+  const resource = new URL("/api/teams", endpoint.origin).href;
+  const started = await fetchImpl(
+    new URL("/api/auth/device/code", endpoint.origin),
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": `Fungi CLI (${process.platform}; ${process.arch})`,
+      },
+      body: new URLSearchParams({
+        client_id: deviceClientId,
+        scope: localScopes,
+        resource,
+      }),
+    },
+  );
+  if (!started.ok) {
+    const failure = await oauthErrorOf(started);
+    throw new Error(
+      started.status === 429
+        ? "Too many device sign-ins from this network. Wait an hour and try again."
+        : `Fungi couldn't start device sign-in: ${failure.error_description ?? failure.error}`,
+    );
+  }
+  const code = deviceCodeResponse.parse(await started.json());
+  if (
+    new URL(code.verification_uri).origin !== endpoint.origin ||
+    new URL(code.verification_uri_complete).origin !== endpoint.origin
+  )
+    throw new Error("Fungi device sign-in named a page on another origin");
+  input.showDeviceCode({
+    userCode: code.user_code,
+    verificationUri: code.verification_uri,
+    verificationUriComplete: code.verification_uri_complete,
+    expiresInSeconds: code.expires_in,
+  });
+  const deadline = Date.now() + code.expires_in * 1_000;
+  let interval = (code.interval ?? 5) * 1_000;
+  for (;;) {
+    await sleep(interval, undefined, { signal: options.signal });
+    if (Date.now() >= deadline)
+      throw new Error(
+        "The code expired before it was approved. Run fungi login --device again.",
+      );
+    const response = await fetchImpl(
+      new URL("/api/auth/oauth2/token", endpoint.origin),
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: deviceGrantType,
+          device_code: code.device_code,
+          client_id: deviceClientId,
+          resource,
+        }),
+      },
+    );
+    if (response.ok) {
+      await saveDeviceLogin(
+        endpoint,
+        options,
+        deviceTokenResponse.parse(await response.json()),
+      );
+      break;
+    }
+    const failure = await oauthErrorOf(response);
+    if (failure.error === "authorization_pending") continue;
+    // RFC 8628 §3.5: every slow_down adds five seconds for the rest of polling.
+    if (failure.error === "slow_down") {
+      interval += 5_000;
+      continue;
+    }
+    throw new Error(
+      failure.error === "access_denied"
+        ? "Device sign-in was denied in the browser."
+        : failure.error === "expired_token"
+          ? "The code expired before it was approved. Run fungi login --device again."
+          : `Fungi refused device sign-in: ${failure.error_description ?? failure.error}`,
+    );
+  }
+  await retryPendingLogout(endpoint, options);
+  await chooseFungiAccountTeam(endpoint, options);
+}
+
+/**
+ * Keep a saved login's account: a device approval from another account never
+ * replaces a login whose Computers belong to the first one.
+ */
+async function saveDeviceLogin(
+  endpoint: URL,
+  options: PrivateFungiAccountLoginOptions & { credentialPath: string },
+  tokens: z.output<typeof deviceTokenResponse>,
+): Promise<void> {
+  const saved = await readCredential(options.credentialPath);
+  const previous =
+    saved?.issuer === endpoint.origin && saved.access !== ""
+      ? loginIdentity(endpoint.origin, saved.access)
+      : undefined;
+  const next = loginIdentity(endpoint.origin, tokens.access_token);
+  if (previous !== undefined && previous.userId !== next?.userId) {
+    const revoked = await revokeSavedGrant(
+      savedCredentialSchema.parse({
+        type: "oauth",
+        access: tokens.access_token,
+        refresh: tokens.refresh_token,
+        expires: 0,
+        clientId: deviceClientId,
+        issuer: endpoint.origin,
+      }),
+      options.fetch,
+    );
+    throw new Error(
+      `That browser approved a different Fungi account than this computer's saved login.${
+        revoked
+          ? ""
+          : " Fungi couldn't confirm the new login was revoked; sign it out from Account in the Hub."
+      } Approve with the saved account, or detach this computer's Computers and sign out before switching accounts.`,
+    );
+  }
+  const provider = privateFungiAccountOAuthProvider({
+    credentialPath: options.credentialPath,
+    endpoint,
+  });
+  await provider.saveClientInformation({
+    client_id: deviceClientId,
+    redirect_uris: [],
+    token_endpoint_auth_method: "none",
+  });
+  await provider.saveTokens(tokens);
 }
 
 const teamPageSchema = z.looseObject({

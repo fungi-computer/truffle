@@ -1,5 +1,24 @@
 # @fungi.computer/truffle
 
+## 0.21.0
+
+### Minor Changes
+
+- Changes since 0.20.5:
+
+  - feat(hub): sign in a terminal with fungi login --device
+  - fix(auth): reconcile device login with current Local grants
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/agar@0.28.0
+  - @fungi.computer/nacre@0.9.4
+  - @fungi.computer/shiitake@0.22.5
+  - @fungi.computer/graft@0.2.57
+  - @fungi.computer/shiitake-extensions@0.13.1
+  - @fungi.computer/zookeeper@0.0.64
+
 ## 0.20.5
 
 ### Patch Changes
