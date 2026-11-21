@@ -2,12 +2,12 @@ import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { rmSync } from "node:fs";
 import { userInfo } from "node:os";
-import { createNativePayloadStaging } from "./private-local-native-staging.js";
 import type { NativeSourceReader } from "./private-local-bwrap.js";
 import { z } from "zod";
 import {
   establishLocalSandbox,
   LocalSandboxUnavailable,
+  stageNativeForHost,
   sandboxUnavailableReason,
   sandboxUnavailableReasonSchema,
   type SandboxUnavailableReason,
@@ -124,10 +124,7 @@ export function createLocalSandboxControls(
   const needsNativeSandbox = (input.platform ?? process.platform) === "linux";
   const ownNative = () => {
     try {
-      return createNativePayloadStaging(
-        input.project,
-        input.readNativePatchSource,
-      );
+      return stageNativeForHost(input.project, input.readNativePatchSource);
     } catch (cause) {
       throw new LocalSandboxUnavailable(sandboxUnavailableReason(cause));
     }

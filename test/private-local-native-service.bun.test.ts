@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import {
+  access,
   copyFile,
   mkdir,
   mkdtemp,
@@ -20,6 +21,7 @@ import {
   readServiceRecord,
   serviceDirectory,
 } from "../dist/private-local-service-discovery.js";
+import { LocalSandboxUnavailable } from "../dist/private-local-containment.js";
 import {
   runPrivateLocalService,
   stopPrivateLocalService,
@@ -108,6 +110,101 @@ async function isolatedInstall() {
     },
   };
 }
+
+/** Report this glibc to the service's host probe until the returned restore runs. */
+function hostGlibc(version: string) {
+  const original = process.report.getReport.bind(process.report);
+  process.report.getReport = () => ({
+    header: { glibcVersionRuntime: version },
+  });
+  return () => {
+    process.report.getReport = original;
+  };
+}
+
+for (const failure of ["missing", "mismatched"] as const)
+  it.skipIf(process.platform !== "linux")(
+    `real Local startup on a glibc 2.34 host ignores a ${failure} native package: Full access starts, Workspace and Read-only are refused before any command`,
+    async () => {
+      const fixture = await isolatedInstall();
+      const restore = hostGlibc("2.34");
+      const running = runPrivateLocalService(
+        fixture.directory,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        fixture.configRoot,
+      );
+      let signaled = false;
+      try {
+        if (failure === "missing")
+          await rm(join(fixture.packageBin, ".."), { recursive: true });
+        else await writeFile(fixture.patch, "tampered native executable");
+        let record;
+        for (let attempt = 0; attempt < 200; attempt++) {
+          record = await readServiceRecord(fixture.directory);
+          if (record !== undefined) break;
+          await sleep(25);
+        }
+        assert.ok(record, "Local service did not start on an unsupported host");
+        // The native package was never read or staged.
+        expect(existsSync(join(fixture.runtime, "fungi"))).toBe(false);
+        const manager = createPrivateLocalServiceManager({
+          directory: fixture.directory,
+          home: fixture.configRoot.home,
+        });
+        const project = join(fixture.root, "project");
+        await mkdir(join(project, ".git"), { recursive: true });
+        for (const mode of ["workspace", "read-only"] as const)
+          await assert.rejects(
+            manager.connect({ invocationRoot: project, mode }),
+            (cause: unknown) => {
+              assert.ok(cause instanceof LocalSandboxUnavailable);
+              assert.equal(cause.reason.kind, "unsupported");
+              assert.match(cause.reason.message, /glibc 2\.35 or newer/u);
+              return true;
+            },
+          );
+        // Nothing was created for a refused sandboxed mode.
+        await assert.rejects(access(join(project, ".fungi", "agents")), {
+          code: "ENOENT",
+        });
+        // With no mode chosen, Full access is the default and says why.
+        const connection = await manager.connect({ invocationRoot: project });
+        try {
+          expect(await connection.sandboxStatus()).toMatchObject({
+            mode: "full-access",
+            available: false,
+            reason: { kind: "unsupported" },
+          });
+        } finally {
+          await connection.close();
+        }
+        // An explicit Full access request starts too.
+        const explicit = join(fixture.root, "explicit");
+        await mkdir(join(explicit, ".git"), { recursive: true });
+        const yolo = await manager.connect({
+          invocationRoot: explicit,
+          mode: "full-access",
+        });
+        await yolo.close();
+        signaled = true;
+        process.emit("SIGTERM", "SIGTERM");
+        await running;
+      } finally {
+        restore();
+        if (!signaled) process.emit("SIGTERM", "SIGTERM");
+        try {
+          await running;
+        } finally {
+          await fixture.close();
+        }
+      }
+    },
+    30_000,
+  );
 
 for (const failure of ["missing", "mismatched"] as const)
   it.skipIf(process.platform !== "linux")(

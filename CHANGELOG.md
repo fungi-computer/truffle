@@ -1,5 +1,18 @@
 # @fungi.computer/truffle
 
+## 0.20.0
+
+### Minor Changes
+
+- Changes since 0.19.4:
+
+  - feat(spore): start in Full access on a Linux host too old for the OS sandbox
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/shiitake-extensions@0.12.6
+
 ## 0.19.4
 
 ### Patch Changes

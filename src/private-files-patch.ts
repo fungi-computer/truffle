@@ -9,6 +9,7 @@ import {
   runPrivateInvocationProcess,
   type LocalSandboxLaunch,
 } from "./private-invocation-computer.js";
+import { nativeSandboxHost } from "./private-local-host-support.js";
 import {
   createNativePayloadStaging,
   packagedPatchPath,
@@ -61,6 +62,9 @@ export async function createPrivateFilesPatch(
   read: FilesPort["read"],
   sandbox?: LocalSandboxLaunch,
 ): Promise<FilesPatch | undefined> {
+  // The packaged engine needs the same glibc as the sandbox, so a host that
+  // cannot sandbox never advertises it, and never reads the native package.
+  if (nativeSandboxHost().kind === "unsupported") return undefined;
   const executable = packagedPatchPath();
   try {
     // Advertise the installed helper if present; only the verified private

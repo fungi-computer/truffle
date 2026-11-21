@@ -1,7 +1,11 @@
 import { spawnSync } from "node:child_process";
 import { closeSync, openSync, realpathSync } from "node:fs";
 import { userInfo } from "node:os";
-import { LocalBwrapUnavailable } from "./private-local-bwrap.js";
+import {
+  LocalBwrapUnavailable,
+  type NativeSourceReader,
+} from "./private-local-bwrap.js";
+import { nativeSandboxHost } from "./private-local-host-support.js";
 import {
   createNativePayloadStaging,
   type NativePayloadStaging,
@@ -35,6 +39,35 @@ export class LocalSandboxUnavailable extends Error {
   }
 }
 
+/**
+ * The staging of a host that cannot run the sandbox: it reads no native
+ * package, and every use refuses with the host's own reason, so a sandboxed
+ * mode is turned away before any Agent command or Files helper runs.
+ */
+function createUnsupportedHostStaging(message: string): NativePayloadStaging {
+  const refuse = (): never => {
+    throw new LocalSandboxUnavailable({ kind: "unsupported", message });
+  };
+  return {
+    admitProject: refuse,
+    patch: refuse,
+    linux: refuse,
+    probeFilter: refuse,
+    close: () => undefined,
+  };
+}
+
+/** The service's or one probe's staging: the host's refusal where it cannot sandbox. */
+export function stageNativeForHost(
+  project: string,
+  readNativeSource?: NativeSourceReader,
+): NativePayloadStaging {
+  const host = nativeSandboxHost();
+  return host.kind === "unsupported"
+    ? createUnsupportedHostStaging(host.reason)
+    : createNativePayloadStaging(project, readNativeSource);
+}
+
 export type SandboxCommand = Readonly<{
   executable: string;
   args: readonly string[];
@@ -61,6 +94,8 @@ export type SandboxAdmission =
 export function sandboxUnavailableReason(
   cause: unknown,
 ): SandboxUnavailableReason {
+  // An owner that already knows why the sandbox is unavailable says so itself.
+  if (cause instanceof LocalSandboxUnavailable) return cause.reason;
   if (cause instanceof UnsafeGitMarker)
     return { kind: "folder", message: cause.message };
   if (cause instanceof UnsafeSandboxFolder)
@@ -128,9 +163,7 @@ export function establishLocalSandbox(
   try {
     native =
       staging ??
-      (platform === "linux"
-        ? createNativePayloadStaging(input.project)
-        : undefined);
+      (platform === "linux" ? stageNativeForHost(input.project) : undefined);
     const environmentTmp =
       platform === "linux" ? "/tmp" : input.temporaryDirectory;
     let closed = false;

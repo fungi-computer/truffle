@@ -22,11 +22,11 @@ import {
 } from "./private-local-service-log.js";
 import { stopAllRequestSchema } from "./private-local-stop-all.js";
 import { FungiMcpSelectionConflict } from "./private-fungi-mcp-selection.js";
-import { LocalSandboxUnavailable } from "./private-local-containment.js";
 import {
-  createNativePayloadStaging,
-  type NativePayloadStaging,
-} from "./private-local-native-staging.js";
+  LocalSandboxUnavailable,
+  stageNativeForHost,
+} from "./private-local-containment.js";
+import { type NativePayloadStaging } from "./private-local-native-staging.js";
 import { nativePackageStartupError } from "./private-local-native-install-error.js";
 import { LocalBwrapUnavailable } from "./private-local-bwrap.js";
 import { writeFileSync } from "node:fs";
@@ -441,7 +441,10 @@ export async function runPrivateLocalService(
   try {
     // Verify and stage before publishing discovery, even without a selected Agent.
     try {
-      native = createNativePayloadStaging(directory);
+      // A host that cannot run the sandbox never reads the native package: it
+      // starts with a staging that refuses the sandboxed modes, and Full access
+      // runs. Everywhere else a missing or invalid package refuses startup.
+      native = stageNativeForHost(directory);
     } catch (cause) {
       if (cause instanceof LocalBwrapUnavailable) {
         // A detached child has no stderr. Only this classified startup refusal
