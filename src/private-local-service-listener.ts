@@ -138,21 +138,31 @@ const runningServices = new Map<
   (reason: "SIGINT" | "SIGTERM") => void
 >();
 
+/** Stops asked for a directory whose service is not running yet, until it starts. */
+const pendingStops = new Map<string, "SIGINT" | "SIGTERM">();
+
 /**
  * Stop the service this process runs for `directory` through its ordinary
  * signal lifecycle (the drain `SIGTERM` or `SIGINT` starts), without a
  * process-wide signal. `process.emit("SIGTERM")` reaches every listener the
  * process has, including Miniflare's exit hook, which ends the process with
- * 143 while a sandboxed command is running and skips the drain. Returns false
- * when no service is running for the directory, so a stop that arrives before
- * the listener is ready, or after it ended, does nothing.
+ * 143 while a sandboxed command is running and skips the drain. Returns true
+ * when a running service was told to stop. When none is running yet, the stop
+ * is kept for the service this process starts for the directory, which stops
+ * as soon as it is ready, so a signal that lands in the startup window is not
+ * lost; it returns false. A pending stop ends with the service that consumed
+ * it, or with the service that fails to start.
  */
 export function stopPrivateLocalService(
   directory: string,
   reason: "SIGINT" | "SIGTERM" = "SIGTERM",
 ): boolean {
   const stop = runningServices.get(directory);
-  if (stop === undefined) return false;
+  if (stop === undefined) {
+    // The first request wins, as the drain's own deadline never restarts.
+    if (!pendingStops.has(directory)) pendingStops.set(directory, reason);
+    return false;
+  }
   stop(reason);
   return true;
 }
@@ -708,6 +718,12 @@ export async function runPrivateLocalService(
     process.on("SIGINT", onInterrupt);
     process.on("SIGTERM", onTerminate);
     runningServices.set(directory, onSignal);
+    // A stop that arrived before this service was ready is honoured now.
+    const pending = pendingStops.get(directory);
+    if (pending !== undefined) {
+      pendingStops.delete(directory);
+      onSignal(pending);
+    }
     // Health and shutdown must answer before any saved Agent is reopened.
     // Owner shutdown tracks this task; requests share its ordinary ownerFor.
     void owners.restore();
@@ -725,6 +741,7 @@ export async function runPrivateLocalService(
   } finally {
     if (runningServices.get(directory) === onSignal)
       runningServices.delete(directory);
+    pendingStops.delete(directory);
     process.off("SIGINT", onInterrupt);
     process.off("SIGTERM", onTerminate);
     try {

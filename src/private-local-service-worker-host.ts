@@ -1,6 +1,9 @@
 import { parentPort, workerData } from "node:worker_threads";
 import { z } from "zod";
-import { runPrivateLocalService } from "./private-local-service-listener.js";
+import {
+  runPrivateLocalService,
+  stopPrivateLocalService,
+} from "./private-local-service-listener.js";
 import { serviceDirectory } from "./private-local-service-discovery.js";
 import { createServiceStreamCapture } from "./private-local-service-log.js";
 import type { LocalModelStreamObserver } from "./private-local-service-trace.js";
@@ -40,8 +43,16 @@ export async function runLocalServiceWorker(
   const heartbeat = new BigInt64Array(input.heartbeat);
   const capture = createServiceStreamCapture(input.directory);
   if (capture.failed()) Atomics.store(heartbeat, 1, 1n);
+  // The supervisor relays the process's signal. The listener is stopped through
+  // its own handle: emitting the signal here would also reach Miniflare's exit
+  // hook, which ends the worker with 143 while a sandboxed command runs and
+  // skips the drain.
+  const service = await serviceDirectory(input.directory);
   const onMessage = (message: unknown) => {
-    process.emit(z.enum(["SIGTERM", "SIGINT"]).parse(message));
+    stopPrivateLocalService(
+      service,
+      z.enum(["SIGTERM", "SIGINT"]).parse(message),
+    );
   };
   port.on("message", onMessage);
   const beat = () => Atomics.add(heartbeat, 0, 1n);
@@ -50,7 +61,7 @@ export async function runLocalServiceWorker(
   timer.unref();
   try {
     await serve(
-      await serviceDirectory(input.directory),
+      service,
       (record) => {
         capture.record(record);
         if (capture.failed()) Atomics.store(heartbeat, 1, 1n);

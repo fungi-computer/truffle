@@ -1,5 +1,20 @@
 # @fungi.computer/truffle
 
+## 0.20.1
+
+### Patch Changes
+
+- Changes since 0.20.0:
+
+  - fix(local): keep a stop that arrives before the listener is ready
+  - fix(local): drain the service on SIGTERM while a sandboxed command runs
+
+- Updated dependencies
+  - @fungi.computer/shiitake@0.22.0
+  - @fungi.computer/graft@0.2.52
+  - @fungi.computer/shiitake-extensions@0.12.7
+  - @fungi.computer/zookeeper@0.0.59
+
 ## 0.20.0
 
 ### Minor Changes
