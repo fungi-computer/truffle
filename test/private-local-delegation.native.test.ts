@@ -575,6 +575,18 @@ it("lists the Agents a Local Agent created, by createdBy, in every one of its co
       agents: [{ agentId: made?.agentId, state: "idle" }],
       counts: { needs_you: 0, idle: 1 },
     });
+    // Both replies wake the parent's own turns, which can still be running
+    // when the rows settle. Closing interrupts such a turn; one interrupted in
+    // an extension prompt hook cannot prove a drain and close refuses it. Let
+    // the parent take its last scripted turn and rest before closing.
+    await until(
+      () => owner().getSession("main").read(),
+      (snapshot) =>
+        parentContexts.length === 4 &&
+        snapshot.activity.queue.state === "idle" &&
+        snapshot.pending.total === 0,
+      "the parent's main Session at rest",
+    );
   } finally {
     await local.owners.close();
   }
