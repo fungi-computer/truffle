@@ -575,7 +575,10 @@ it("shows a helper's Session in its creator's agents.status after agents.create 
     if (creator === undefined) throw new Error("Creator runtime missing");
     const model = `${fixture.options.providerId}/${fixture.options.modelId}`;
     // The creator's tool run and the helper's turn share one recorded
-    // provider, so both closing replies say the same thing.
+    // provider, so both closing replies say the same thing. The helper's
+    // finished turn also mails its reply back to the creator, which may reach
+    // the creator's turn before it settles; a fourth reply answers that mail
+    // instead of leaving the provider empty and failing the creator's turn.
     fixture.faux.setResponses([
       fauxAssistantMessage(
         fauxToolCall("execute", {
@@ -583,6 +586,7 @@ it("shows a helper's Session in its creator's agents.status after agents.create 
         }),
         { stopReason: "toolUse" },
       ),
+      fauxAssistantMessage("Done."),
       fauxAssistantMessage("Done."),
       fauxAssistantMessage("Done."),
     ]);

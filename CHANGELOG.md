@@ -1,5 +1,27 @@
 # @fungi.computer/truffle
 
+## 0.22.0
+
+### Minor Changes
+
+- Changes since 0.21.6:
+
+  - fix(truffle): pause schedules together without dropping a rejection
+  - feat(agar): report the schedules Stop all paused, in parallel under one
+    budget
+  - feat(truffle): pause the stopped subtree's schedules, proven across a
+    SIGKILL
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/agar@0.29.0
+  - @fungi.computer/nacre@0.9.10
+  - @fungi.computer/shiitake@0.22.12
+  - @fungi.computer/graft@0.2.64
+  - @fungi.computer/shiitake-extensions@0.13.8
+  - @fungi.computer/zookeeper@0.0.71
+
 ## 0.21.6
 
 ### Patch Changes

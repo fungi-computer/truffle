@@ -3,6 +3,8 @@ import { DatabaseSync } from "node:sqlite";
 import { Shiitake, type RuntimeHost } from "@fungi.computer/shiitake";
 import { fauxModel, type FauxModel } from "@fungi.computer/mule/testing";
 import { rejectingSandbox } from "@fungi.computer/mycelium/testing";
+import { almanacExtension } from "@fungi.computer/shiitake-extensions/almanac/host";
+import { loopExtension } from "@fungi.computer/shiitake-extensions/loop/host";
 import type { OpenLocalServiceRuntime } from "../../src/private-local-service-owner.js";
 import { createPrivateSqliteOwner } from "../../src/private-sqlite-owner.js";
 import {
@@ -21,12 +23,16 @@ export function stopAllRuntime(
         close: () => Promise<void>;
       }
     | undefined,
+  /** Runs after an Agent's abort is accepted and durable, before it settles. */
+  afterAbort?: (agentId: string) => void,
 ): OpenLocalServiceRuntime {
   return async (options) => {
     if (options.databasePath === undefined) throw new Error("Expected store");
     const database = new DatabaseSync(options.databasePath);
     const agentId = basename(dirname(options.databasePath));
     const live = liveFor?.(agentId);
+    // The schedule owners, so a stop can pause what the Agent scheduled.
+    const roster = [almanacExtension, loopExtension];
     const faux = live?.model ?? fauxModel([]);
     const agent = await Shiitake.make({
       model: {
@@ -39,7 +45,13 @@ export function stopAllRuntime(
           }),
       },
       store: createPrivateSqliteOwner(database),
-      extensions: { roster: [], grants: [] },
+      extensions: {
+        roster,
+        grants: roster.map(({ manifest }) => ({
+          id: manifest.id,
+          capabilities: manifest.requests,
+        })),
+      },
       tools: {
         modules: [],
         sandbox: rejectingSandbox("Stop-all proof has no tools"),
@@ -70,7 +82,8 @@ export function stopAllRuntime(
           ...session,
           abort: async () => {
             onAbort(agentId);
-            return session.abort();
+            await session.abort();
+            if (afterAbort !== undefined) afterAbort(agentId);
           },
         };
       },

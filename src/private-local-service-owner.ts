@@ -24,6 +24,7 @@ import {
 } from "./private-local-config-root.js";
 import type { ServiceLogLifecycle } from "./private-local-service-log.js";
 import type { AgentStopAllResult as StopAllResult } from "@fungi.computer/agar/agents";
+import { pauseSchedulesTogether } from "./private-local-stop-all.js";
 import { AdmissionGate } from "./private-local-admission-gate.js";
 import {
   readFungiMcpSelection,
@@ -101,6 +102,7 @@ import { controlAgentScheduleWithContent } from "@fungi.computer/shiitake-extens
 import {
   localScheduleControlInputSchema,
   localScheduleListInputSchema,
+  pauseAgentSchedules,
   readLocalSchedulePage,
 } from "./private-local-schedules.js";
 
@@ -2078,6 +2080,7 @@ export function createLocalServiceOwners(
     const result: StopAllResult = {
       rootAgentId: request.agentId,
       agents: [],
+      schedules: [],
       discoveryFailures: [],
       // The Local owner may stop every Agent in its project.
       notPermitted: 0,
@@ -2130,6 +2133,30 @@ export function createLocalServiceOwners(
       for (const [agentId] of children.reverse())
         stack.push({ agentId, visited: false });
     }
+    // Pause the whole subtree's schedules before any Session is stopped, so a
+    // schedule firing mid-cascade cannot start work after its Agent stopped.
+    // The Agents are paused together under one 5-second budget, so a tree of
+    // hung Agents costs the budget once. Cancellation wins: pausing is durable
+    // and survives a restart.
+    result.schedules.push(
+      ...(await pauseSchedulesTogether({
+        agentIds: ordered.filter((agentId) => agents.has(agentId)),
+        pause: async (agentId, signal) => {
+          const agent = agents.get(agentId);
+          if (agent === undefined) return [];
+          const { runtime: owner, release } = await acquire({
+            invocationRoot,
+            databasePath: agent.databasePath,
+          });
+          try {
+            return await pauseAgentSchedules(agentId, owner, signal);
+          } finally {
+            release();
+          }
+        },
+        budgetMs: 5_000,
+      })),
+    );
     for (const agentId of ordered) {
       const agent = agents.get(agentId);
       if (agent === undefined) continue;

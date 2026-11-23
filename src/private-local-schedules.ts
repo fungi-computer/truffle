@@ -5,7 +5,10 @@ import {
   agentSchedulePageSchema,
   agentScheduleTargetSchema,
 } from "@fungi.computer/shiitake-extensions/schedules";
-import { readAgentSchedulePage } from "@fungi.computer/shiitake-extensions/schedules/client";
+import {
+  controlAgentScheduleWithContent,
+  readAgentSchedulePage,
+} from "@fungi.computer/shiitake-extensions/schedules/client";
 import type { ShiitakeAgent } from "@fungi.computer/shiitake";
 import { logEvent } from "./log-event.js";
 
@@ -86,4 +89,52 @@ export async function readLocalSchedulePage(
     unavailable,
     next: unread === undefined ? null : { agentId: unread, kind: "almanac" },
   };
+}
+
+/**
+ * Pause every active schedule one admitted Agent owns, paging until none is
+ * left. Paused, finished and cancelled schedules are left alone, and nothing is
+ * deleted, so a person can resume them. A schedule is paused by its exact
+ * listed identity.
+ */
+export async function pauseAgentSchedules(
+  agentId: string,
+  owner: Pick<ShiitakeAgent, "extensions">,
+  signal: AbortSignal,
+) {
+  const paused: {
+    kind: "almanac" | "loop";
+    scheduleId: string;
+  }[] = [];
+  let after: Parameters<typeof readAgentSchedulePage>[2] = {};
+  for (;;) {
+    signal.throwIfAborted();
+    const page = await readAgentSchedulePage(agentId, owner, after);
+    for (const row of page.items) {
+      if (row.schedule.state !== "active") continue;
+      signal.throwIfAborted();
+      if (row.kind === "almanac") {
+        await controlAgentScheduleWithContent(
+          owner,
+          { kind: "almanac", agentId, scheduleId: row.schedule.id },
+          "pause",
+        );
+        paused.push({ kind: "almanac", scheduleId: row.schedule.id });
+      } else {
+        await controlAgentScheduleWithContent(
+          owner,
+          {
+            kind: "loop",
+            agentId,
+            sessionId: row.schedule.sessionId,
+            loopId: row.schedule.loopId,
+          },
+          "pause",
+        );
+        paused.push({ kind: "loop", scheduleId: row.schedule.loopId });
+      }
+    }
+    if (page.next === null) return paused;
+    after = { after: page.next };
+  }
 }
