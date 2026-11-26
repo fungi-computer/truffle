@@ -1,5 +1,22 @@
 # @fungi.computer/truffle
 
+## 0.22.13
+
+### Patch Changes
+
+- Updated dependencies
+- Updated dependencies
+  - @fungi.computer/approvals@0.4.0
+  - @fungi.computer/shiitake-extensions@0.14.0
+  - @fungi.computer/agar@0.29.4
+  - @fungi.computer/knapsack@0.4.36
+  - @fungi.computer/mycelium@0.5.5
+  - @fungi.computer/veil@0.11.17
+  - @fungi.computer/nacre@0.9.17
+  - @fungi.computer/shiitake@0.23.9
+  - @fungi.computer/graft@0.2.75
+  - @fungi.computer/zookeeper@0.0.82
+
 ## 0.22.12
 
 ### Patch Changes
