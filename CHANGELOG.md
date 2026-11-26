@@ -1,5 +1,12 @@
 # @fungi.computer/truffle
 
+## 0.22.10
+
+### Patch Changes
+
+- Updated dependencies
+  - @fungi.computer/shiitake-extensions@0.13.17
+
 ## 0.22.9
 
 ### Patch Changes
