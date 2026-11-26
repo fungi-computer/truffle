@@ -1,5 +1,19 @@
 # @fungi.computer/truffle
 
+## 0.22.21
+
+### Patch Changes
+
+- @fungi.computer/agar@0.30.2
+  - @fungi.computer/mycelium@0.5.9
+  - @fungi.computer/nacre@0.9.20
+  - @fungi.computer/shiitake@0.24.5
+  - @fungi.computer/knapsack@0.4.40
+  - @fungi.computer/veil@0.11.21
+  - @fungi.computer/shiitake-extensions@0.15.7
+  - @fungi.computer/graft@0.2.81
+  - @fungi.computer/zookeeper@0.0.88
+
 ## 0.22.20
 
 ### Patch Changes
